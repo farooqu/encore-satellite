@@ -59,7 +59,7 @@ class PackageContractTest(unittest.TestCase):
         self.write_registry(self.registry)
         self.run_check(True)
 
-    def test_rejects_profile_claims_and_wrong_identity_on_either_target(self):
+    def test_rejects_unknown_fields_and_wrong_identity_on_either_target(self):
         for target, original in self.profiles.items():
             path = self.root / "devices" / target / "profile.json"
             for patch in (
@@ -68,9 +68,8 @@ class PackageContractTest(unittest.TestCase):
                 {"schema": True},
                 {"schema": 1.0},
                 {"schema": 2},
-                {"audio_tuning": {"equalizer": "echo-dot-2"}},
-                {"audio_tuning": {"equalizer": "bypass", "gain_db": 12}},
-                {"advertised_capabilities": ["aec"]},
+                {"audio_tuning": {"equalizer": "bypass"}},
+                {"advertised_capabilities": []},
                 {"build": "pretend-build"},
                 {"package_revision": 1},
             ):

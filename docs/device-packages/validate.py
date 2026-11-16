@@ -32,15 +32,13 @@ def validate(root):
             "schema": 1,
             "target": target,
             "status": "planned",
-            "audio_tuning": {"equalizer": "bypass"},
-            "advertised_capabilities": [],
         }
         # This contract intentionally admits no runtime settings/capability claims.
         # JSON booleans/floats must not compare equal to the integer schema version.
         if (profile != expected or not isinstance(profile, dict)
                 or type(profile.get("schema")) is not int):
             raise ValueError(f"devices/{target}/profile.json: expected the closed schema-1 "
-                             "planned profile with bypass EQ and no advertised capabilities")
+                             "planned profile containing only schema, target and status")
 
         entries = [entry for entry in registry["targets"] if entry.get("id") == target]
         if len(entries) != 1:

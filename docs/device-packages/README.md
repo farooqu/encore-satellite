@@ -20,17 +20,11 @@ closed at this planning stage; every field is required and unknown fields fail.
 | `schema` | Integer `1`; identifies this planning-data contract, not an IPC version. |
 | `target` | Exact directory/central target ID: `echo-dot-2` or `android-generic`; prevents cross-target profile substitution. |
 | `status` | `planned`; explicitly denies runtime or installability claims. |
-| `audio_tuning` | Object containing only `equalizer: "bypass"`; no response correction is selected or measured. |
-| `advertised_capabilities` | Empty array; no device capability has been validated or may be advertised from this scaffold. |
 
-Bypass is an explicit neutral tuning intent, **not implemented DSP**. Neither
-profile supplies coefficients, gain boosts, wake thresholds or AEC settings.
-An empty capability list means unverified/not advertised, not hardware absence.
-Screen, touch, buttons, ring, mute and capture/reference facilities described in
-the target notes are intended work, not declarations of implemented support.
-There is no inheritance between targets or fallback to a Dot profile on Android.
-Extend this contract deliberately when an actual consumer and measured settings
-exist; do not add speculative fields or mark a device working by changing JSON.
+Profiles contain only identity and planning status. They do not configure audio
+or advertise runtime capabilities. Audio, control and display requirements remain
+in the target notes until there is an implementation that needs those settings
+and evidence for their values. Describing intended work does not declare support.
 
 From the repository root, using only Python 3's standard library:
 
@@ -40,12 +34,16 @@ python3 -m unittest discover -s docs/device-packages -p 'test_*.py'
 ```
 
 The validator rejects malformed/duplicate-key JSON, extra or missing fields,
-non-neutral tuning, capability claims, wrong target identity, and registry drift
+runtime settings or capability fields, wrong target identity, and registry drift
 from planned/revision-zero/non-release-supported. Tests exercise the command's
 observable exit status with valid and deliberately invalid package metadata.
 Neither command builds a device or validates hardware, an APK or an update.
 
 ## Ownership and intended assembly
+
+The [device contribution guidance](../../devices/AGENTS.md) defines how to reuse
+or introduce interfaces as implementations need them, without coupling the core
+to concrete device packages or adding speculative configuration.
 
 Device owners maintain their own profiles, wiring/calibration, target composition
 roots, packaging inputs and hardware acceptance records. Shared Go contracts and

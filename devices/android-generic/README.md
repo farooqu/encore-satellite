@@ -1,22 +1,23 @@
 # Generic Android: planned APK target
 
-**Planned, never released, not installable.** This directory contains a neutral
+**Planned, never released, not installable.** This directory contains a
 planning profile and package notes, not an Android app, build, installer or
 on-device validation. **Samsung Galaxy Tab A7 Lite is the intended first validation
 tablet**, not a tested compatibility claim. Other devices in the root README are
 future intentions, not a supported/tested list. See the
 [package contract](../../docs/device-packages/README.md).
 
-## Local ownership and conservative profile
+## Local ownership
 
-This target owns its explicit composition, conservative profile, APK packaging
+This target owns its explicit composition, target profile, APK packaging
 inputs and tested-device records. Shared Android service/Activity, audio,
 permissions, IPC and display integration belong in `platforms/android/`, not in
 this device directory. Add measured model-specific profiles only when justified;
 do not create a separate APK simply because a tablet has another brand.
 
-`profile.json` selects bypass EQ and advertises no validated capabilities. There
-is no inheritance from Dot wiring, EQ, gain or calibration. Ordinary microphone
+`profile.json` records target identity and planned status only; it contains no
+audio settings or capability declarations. Future Android integration must not
+inherit Dot wiring, EQ, gain or calibration. Ordinary microphone
 input does not imply a raw/reference pair, aligned capture, reliable platform AEC,
 or Incubator's second processed capture/enrollment capability. OS effect
 availability is not proof of cancellation quality; never stack OS and software

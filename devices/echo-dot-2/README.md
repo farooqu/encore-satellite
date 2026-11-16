@@ -1,7 +1,7 @@
 # Echo Dot (2nd generation): planned package
 
 **Planned, never released, not installable.** This directory contains only a
-neutral planning profile and package notes. No runtime, device binary, build
+planning profile and package notes. No runtime, device binary, build
 recipe, installer, maintained base image or hardware test result is provided.
 See the [package contract](../../docs/device-packages/README.md).
 
@@ -30,10 +30,10 @@ bytes to the engine as mono PCM16 or claim aligned/AEC capture from channel coun
 alone. Playback route, physical drain, mute enforcement, button identities and
 ring mapping still require Encore implementation and on-device confirmation.
 
-`profile.json` selects bypass EQ and advertises no validated capability. It does
-not import Techo5's calibration or claim AEC, beamforming, a wake model or a second
-processed stream. Any measured Dot correction stays in this module's profile and
-must not become a shared or Android default.
+`profile.json` records target identity and planned status only; it contains no
+audio settings or capability declarations. No Techo5 calibration, AEC,
+beamforming, wake model or second processed stream is implemented here. Future
+measured Dot tuning belongs in this module, not in shared or Android defaults.
 
 ## Prerequisites still to establish
 
