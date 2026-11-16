@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "target": "echo-dot-2",
+  "status": "planned",
+  "audio_tuning": {
+    "equalizer": "bypass"
+  },
+  "advertised_capabilities": []
+}
