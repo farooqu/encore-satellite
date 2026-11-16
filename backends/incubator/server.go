@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"sync"
 	"time"
@@ -107,6 +108,13 @@ func (s *Server) serveConn(ctx context.Context, conn net.Conn) error {
 				}
 				_ = conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
 				return writeFrame(conn, 0x03, b)
+			case "cancel":
+				// Flush cancellation before retiring this voice generation.
+				// AUDIO_OUT_END cannot distinguish the ACK from an old stream.
+				if err := send(0x04, map[string]string{"reason": c.Reason}); err != nil {
+					return err
+				}
+				return io.EOF
 			case "end":
 				return send(0x04, map[string]string{"reason": c.Reason})
 			case "drained":

@@ -13,6 +13,7 @@ import (
 type Queue struct {
 	mu       sync.Mutex
 	commands chan session.Command
+	ready    chan struct{}
 	ctx      context.Context
 	cancel   context.CancelFunc
 	close    func() error
@@ -21,7 +22,7 @@ type Queue struct {
 
 func New(close func() error) *Queue {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Queue{commands: make(chan session.Command, 64), ctx: ctx, cancel: cancel, close: close}
+	return &Queue{commands: make(chan session.Command, 64), ready: make(chan struct{}, 1), ctx: ctx, cancel: cancel, close: close}
 }
 
 func (q *Queue) Send(c session.Command) error {
@@ -41,9 +42,35 @@ func (q *Queue) Send(c session.Command) error {
 			}
 		}
 	}
+	if c.Kind == "cancel" || c.Kind == "discard_audio" {
+		// Drop unsent microphone data, but preserve a queued start: otherwise
+		// the engine would wait for cancellation of a pipeline never started.
+		pending := make([]session.Command, 0, len(q.commands))
+	dropAudio:
+		for {
+			select {
+			case queued := <-q.commands:
+				if queued.Kind != "audio" {
+					pending = append(pending, queued)
+				}
+			default:
+				break dropAudio
+			}
+		}
+		for _, queued := range pending {
+			q.commands <- queued
+		}
+		if c.Kind == "discard_audio" {
+			return nil // Local capture invalidation, not a wire-level abort.
+		}
+	}
 	c.Samples = slices.Clone(c.Samples)
 	select {
 	case q.commands <- c:
+		select {
+		case q.ready <- struct{}{}:
+		default:
+		}
 		return nil
 	default:
 		return errors.New("backend: bounded capture queue full")
@@ -63,15 +90,24 @@ func (q *Queue) Close() error {
 
 func (q *Queue) Run(send func(session.Command) error) error {
 	for {
+		// Receive under the same lock as cancellation's filtering, so the
+		// writer cannot overtake a temporarily removed start/control command.
+		q.mu.Lock()
 		select {
-		case <-q.ctx.Done():
-			return q.ctx.Err()
 		case c := <-q.commands:
+			q.mu.Unlock()
 			if err := q.ctx.Err(); err != nil {
 				return err
 			}
 			if err := send(c); err != nil {
 				return err
+			}
+		default:
+			q.mu.Unlock()
+			select {
+			case <-q.ctx.Done():
+				return q.ctx.Err()
+			case <-q.ready:
 			}
 		}
 	}

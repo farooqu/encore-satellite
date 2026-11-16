@@ -30,8 +30,8 @@ const subscribeAPIAudio uint32 = 1 << 2
 type Server struct {
 	Engine *session.Engine
 	// Controls shares this encrypted endpoint with voice-independent controls.
-	// Nil preserves the voice-only entity set. Keep this endpoint running when
-	// Incubator is selected; the session engine still rejects Assist voice.
+	// Nil preserves the voice-only entity set. In Incubator mode, serve controls
+	// without this adapter so the endpoint does not advertise Assist voice.
 	Controls interface {
 		esphome.Handler
 		esphome.ConnCloser
@@ -188,6 +188,10 @@ func (s *Server) Handle(ctx context.Context, c *esphome.Conn, message proto.Mess
 					return c.Send(&api.VoiceAssistantAudio{Data: b})
 				case "input_end":
 					return c.Send(&api.VoiceAssistantAudio{End: true})
+				case "cancel":
+					// Abort processing, not just microphone input. The engine
+					// fences the old run/stream without closing shared controls.
+					return c.Send(&api.VoiceAssistantRequest{Start: false})
 				case "end":
 					err := c.Send(&api.VoiceAssistantRequest{Start: false})
 					// The baseline protocol has no turn ID. Reconnect after cancel
@@ -242,15 +246,16 @@ func (s *Server) Handle(ctx context.Context, c *esphome.Conn, message proto.Mess
 		s.trace(m.EventType.String(), data)
 		event := session.Event{}
 		switch m.EventType {
+		case api.VoiceAssistantEvent_VOICE_ASSISTANT_RUN_START:
+			event.Kind = "run_start"
 		case api.VoiceAssistantEvent_VOICE_ASSISTANT_ERROR:
 			event.Kind, event.Reason = "error", data["code"]
 		case api.VoiceAssistantEvent_VOICE_ASSISTANT_STT_START:
 			event.Kind = "listening"
 		case eventWakeRejected:
 			// This protocol has no turn ID. Fence rejected capture and late
-			// events through the same generation boundary as cancellation.
-			s.Engine.Disconnect(generation, "wake_rejected")
-			return nil
+			// events, unless mute is already consuming the cancelled run.
+			event.Kind, event.Reason = "error", "wake_rejected"
 		case api.VoiceAssistantEvent_VOICE_ASSISTANT_STT_VAD_END:
 			event.Kind = "processing"
 		case api.VoiceAssistantEvent_VOICE_ASSISTANT_STT_END:
@@ -259,6 +264,12 @@ func (s *Server) Handle(ctx context.Context, c *esphome.Conn, message proto.Mess
 			event.Kind = "processing"
 		case api.VoiceAssistantEvent_VOICE_ASSISTANT_TTS_START:
 			event.Kind, event.Text = "responding", data["text"]
+		case api.VoiceAssistantEvent_VOICE_ASSISTANT_TTS_END:
+			if data["url"] != "" {
+				// HA may schedule streaming after RUN_END; a URL promises
+				// output even if STREAM_START has not arrived yet.
+				event.Kind = "output_expected"
+			}
 		case api.VoiceAssistantEvent_VOICE_ASSISTANT_TTS_STREAM_START:
 			event.Kind = "output_start"
 		case api.VoiceAssistantEvent_VOICE_ASSISTANT_TTS_STREAM_END:

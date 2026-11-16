@@ -120,6 +120,34 @@ no local pre-election runs. Negative HANGUP ends a call without disconnecting a
 healthy transport. See [executed proof](proof.md) and the scoped reports for
 real-service coverage and remaining gaps.
 
+Mute silences and flushes local voice output, clears microphone pre-roll and cancels
+the current pipeline: Assist receives an abort request; native Incubator receives
+`CALL_END {reason:cancelled}` for calls. The shared ESPHome transport stays connected,
+so Bluetooth controls need not restart. Hosts must still stop/gate physical capture.
+Already executed actions cannot be undone. HA may finish streaming an already
+produced reply; the muted/cancelling engine discards it without claiming playback.
+
+Active native cancellation sends `CALL_END` and then retires only the native
+voice socket, not ESPHome/BLE. Ordinary and cancellation `AUDIO_OUT_END` frames
+are identical, so neither may admit a new call on the retiring connection.
+Mute also retires output interrupted by Stop, even if its final drain is pending.
+Pinned upstream does not stop independent announcements on `CALL_END`.
+Old native tasks can survive reconnect; local call output remains blocked until
+upstream signals `listening`, after processing CALL_START and cancelling the old
+announcement. Voice recovery follows upstream's reconnect backoff. Idle
+mute/unmute does not reconnect and restores playback for fresh announcements/timers.
+
+Unmute does not revive the old turn. A new turn waits for Assist's `RUN_END` and
+any expected TTS stream end, or a fresh Incubator connection generation. During
+this interval the snapshot says `recovering`; capture/pre-roll are ignored.
+An early Assist mute defers its wire abort until `RUN_START` because HA can cancel
+an unscheduled pipeline without emitting `RUN_END`; unsent microphone audio is
+purged immediately, without removing queued start/control messages. Missing
+terminal messages leave voice blocked; no timeout drops the shared BLE connection.
+A deliberate transport reset clears that fence and can interrupt BLE/GATT.
+Network reconnection is accepted while still muted and cannot resume capture or
+old playback. The separate Stop command retains its existing cancellation policy.
+
 The core and loopback fixture support live backend selection, not yet a product
 setup/HA selector. Common ESPHome controls should share one connection and stay
 independent of voice selection. The pinned Incubator integration creates a

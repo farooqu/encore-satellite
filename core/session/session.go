@@ -30,6 +30,9 @@ type Command struct {
 }
 
 // Link.Send must copy/enqueue without blocking on I/O, using a bounded queue.
+// discard_audio synchronously purges unsent capture without a wire command.
+// Native cancel sends cancellation then closes its voice connection; the reader
+// reports Disconnect before a replacement may attach. Assist cancel stays open.
 // Overflow fails the connection, not silently drops audio. Close invalidates
 // queued and in-flight network audio and promptly unblocks all transport I/O.
 type Link interface {
@@ -63,6 +66,9 @@ type Engine struct {
 	inputOpen, outputOpen, runEnded bool
 	outputReceived                  bool
 	announcing                      bool
+	cancelling                      bool
+	runStarted                      bool
+	streamExpected, streamEnded     bool
 	pre                             audio.PreRoll
 	lastSequence                    uint64
 	lastTime                        time.Duration
@@ -129,13 +135,16 @@ func (e *Engine) Select(backend Backend) error {
 func (e *Engine) Attach(link Link) (uint64, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if string(link.Backend()) != e.state.Backend || e.state.Muted || e.link != nil {
+	if string(link.Backend()) != e.state.Backend || e.link != nil {
 		return 0, ErrUnavailable
 	}
 	e.generation++
 	e.link = link
 	e.state.Connected = true
 	e.state.Phase = "idle"
+	if e.state.Muted {
+		e.state.Phase = "muted"
+	}
 	e.state.Reason = ""
 	e.resetOutput()
 	return e.generation, nil
@@ -161,6 +170,8 @@ func (e *Engine) disconnect(reason string) {
 	e.active, e.discard, e.haveFrame = false, false, false
 	e.outputTimer = false
 	e.inputOpen, e.outputOpen, e.runEnded = false, false, false
+	e.cancelling, e.streamExpected, e.streamEnded = false, false, false
+	e.runStarted = false
 	e.outputReceived = false
 	e.announcing = false
 	e.state = presentation.State{Backend: e.state.Backend, Muted: e.state.Muted, Phase: "disconnected", Reason: reason}
@@ -170,16 +181,69 @@ func (e *Engine) disconnect(reason string) {
 	e.publishActivity()
 }
 
-// SetMuted is fail-closed: close transport as well as clearing pre-roll and
-// output. The host must ALSO gate/stop capture immediately at its OS boundary.
+// SetMuted silences locally and cancels the current pipeline without revoking
+// the shared Assist/BLE transport. Native cancellation retires its voice-only
+// connection: ordinary and cancellation stream ends are indistinguishable.
+// A new turn waits for Assist completion or a fresh native connection.
+// The host must ALSO gate/stop capture immediately at its OS boundary.
 func (e *Engine) SetMuted(muted bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	defer e.publishActivity()
 	if e.state.Muted == muted {
 		return
 	}
 	e.state.Muted = muted
-	e.disconnect("mute_changed")
+	if muted {
+		active, alert := e.active || e.outputOpen || e.announcing, e.state.Alert
+		e.cancelling = e.cancelling || active || e.discard
+		e.cancelOutput()
+		e.player.Flush()
+		e.pre.Clear()
+		e.haveFrame = false
+		e.active, e.inputOpen, e.outputOpen, e.announcing = false, false, false, false
+		e.state.Heard, e.state.Reply, e.state.Alert = "", "", false
+		if alert {
+			_ = e.send(Command{Kind: "stop_alert"})
+		}
+		if e.cancelling && e.state.Backend == string(Incubator) {
+			// Also retire interrupted output whose Stop/drain already cleared
+			// active ownership. Never wait for a terminal that cannot arrive.
+			_ = e.send(Command{Kind: "cancel", Reason: "cancelled"})
+		} else if active && e.runStarted {
+			_ = e.send(Command{Kind: "cancel", Reason: "cancelled"})
+		} else if active {
+			// Purge capture now; HA must establish RUN_START before wire abort.
+			_ = e.send(Command{Kind: "discard_audio"})
+		}
+	} else if !e.cancelling {
+		// Idle mute also cancelled playback; timers/announcements have no start.
+		e.resetOutput()
+	}
+	e.finishCancellation()
+}
+
+// Assist RUN_END can precede streamed TTS. No native stream end can prove that
+// an old HANGUP is not still buffered; its adapter closes after sending cancel.
+// Only the ensuing disconnect may release native cancellation ownership.
+func (e *Engine) finishCancellation() {
+	finished := false
+	if e.state.Backend == string(Assist) {
+		finished = e.runEnded && (!e.streamExpected || e.streamEnded)
+	}
+	if e.cancelling && finished {
+		e.cancelling, e.discard = false, false
+		e.resetOutput()
+	}
+	if e.state.Muted {
+		e.state.Phase = "muted"
+	} else if e.link == nil {
+		e.state.Phase = "disconnected"
+	} else if e.cancelling {
+		e.state.Phase = "recovering"
+	} else {
+		e.state.Phase = "idle"
+	}
 }
 
 func (e *Engine) Capture(frame audio.Frame) error {
@@ -188,7 +252,7 @@ func (e *Engine) Capture(frame audio.Frame) error {
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.state.Muted || e.link == nil {
+	if e.state.Muted || e.cancelling || e.link == nil {
 		return nil
 	}
 	if frame.Discontinuity || (e.haveFrame && (frame.Sequence != e.lastSequence+1 || frame.CapturedAt <= e.lastTime)) {
@@ -233,7 +297,7 @@ func (e *Engine) Wake(detection wake.Detection) error {
 }
 
 func (e *Engine) start(detection wake.Detection, pre []int16) error {
-	if e.state.Muted || e.link == nil || e.active || e.outputOpen || e.discard {
+	if e.state.Muted || e.cancelling || e.link == nil || e.active || e.outputOpen || e.discard {
 		return ErrUnavailable
 	}
 	e.resetOutput()
@@ -244,6 +308,8 @@ func (e *Engine) start(detection wake.Detection, pre []int16) error {
 	}
 	e.active = true
 	e.inputOpen, e.runEnded = true, false
+	e.runStarted = false
+	e.streamExpected, e.streamEnded = false, false
 	e.outputReceived = false
 	e.pre.Clear()
 	e.publishActivity() // Duck before the backend can begin capture or respond.
@@ -283,6 +349,9 @@ func (e *Engine) Stop() error {
 	if e.state.Muted {
 		e.state.Phase = "muted"
 	}
+	if e.cancelling {
+		e.finishCancellation()
+	}
 	e.publishActivity()
 	if alert {
 		if err := e.send(Command{Kind: "stop_alert"}); err != nil {
@@ -301,6 +370,29 @@ func (e *Engine) Handle(generation uint64, event Event) error {
 	defer e.publishActivity()
 	if generation != e.generation || e.link == nil {
 		return ErrStale
+	}
+	if event.Kind == "run_start" && !e.runStarted {
+		e.runStarted = true
+		if e.cancelling {
+			// HA can cancel an unscheduled task without emitting RUN_END.
+			// Local mute is immediate; defer abort until the run can finish.
+			return e.send(Command{Kind: "cancel", Reason: "cancelled"})
+		}
+	}
+	if e.cancelling {
+		switch event.Kind {
+		case "run_end":
+			e.runEnded = true
+		case "output_expected":
+			e.streamExpected = true
+		case "output_start":
+			e.streamExpected, e.streamEnded = true, false
+		}
+		e.finishCancellation()
+		return nil
+	}
+	if e.state.Muted {
+		return nil
 	}
 	if event.Kind == "error" {
 		e.disconnect(event.Reason)
@@ -349,6 +441,10 @@ func (e *Engine) Handle(generation uint64, event Event) error {
 		return nil
 	}
 	switch event.Kind {
+	case "output_expected":
+		if e.active {
+			e.streamExpected = true
+		}
 	case "announcement":
 		e.announcing = event.Active
 	case "timer_ringing":
@@ -357,6 +453,7 @@ func (e *Engine) Handle(generation uint64, event Event) error {
 		e.state.Alert = false
 	case "listening":
 		if e.active {
+			e.runStarted = true
 			e.state.Phase = "listening"
 		}
 	case "processing":
@@ -368,6 +465,7 @@ func (e *Engine) Handle(generation uint64, event Event) error {
 		}
 	case "output_start":
 		if e.active || e.state.Backend == string(Incubator) {
+			e.streamExpected, e.streamEnded = true, false
 			e.openOutput()
 			e.outputReceived = false
 		}
@@ -398,6 +496,10 @@ func (e *Engine) Output(generation uint64, samples []int16) error {
 		e.mu.Unlock()
 		return ErrStale
 	}
+	if e.state.Muted || e.cancelling {
+		e.mu.Unlock()
+		return nil
+	}
 	// Assist announcements are not advertised. A stream cannot appear before
 	// a local turn and its TTS_STREAM_START. HA can send a cancelled task's
 	// final STREAM_END on its freshly reconnected client.
@@ -407,9 +509,14 @@ func (e *Engine) Output(generation uint64, samples []int16) error {
 	}
 	// Native call output ends at HANGUP. Only explicitly signaled upstream
 	// alerts/announcements may play outside a call; idle frames cannot revive it.
-	if e.state.Backend == string(Incubator) && !e.active && !e.state.Alert && !e.announcing {
-		e.mu.Unlock()
-		return nil
+	if e.state.Backend == string(Incubator) {
+		// Upstream can retain an announcement task across socket reconnect.
+		// CALL_START cancels it before listening: local start alone is not
+		// authority to play PCM that arrived before upstream accepted the call.
+		if (e.active && !e.runStarted) || (!e.active && !e.state.Alert && !e.announcing) {
+			e.mu.Unlock()
+			return nil
+		}
 	}
 	ctx, discard := e.output, e.discard
 	if !discard {
@@ -429,6 +536,14 @@ func (e *Engine) EndOutput(generation uint64) error {
 	if generation != e.generation || e.link == nil {
 		e.mu.Unlock()
 		return ErrStale
+	}
+	if e.streamExpected || e.state.Backend == string(Incubator) {
+		e.streamEnded = true
+	}
+	if e.cancelling || e.state.Muted {
+		e.finishCancellation()
+		e.mu.Unlock()
+		return nil
 	}
 	if !e.outputOpen && !e.discard {
 		e.mu.Unlock()
@@ -459,6 +574,9 @@ func (e *Engine) EndOutput(generation uint64) error {
 	defer e.publishActivity()
 	if generation != e.generation || e.link == nil {
 		return ErrStale
+	}
+	if ctx != e.output || e.cancelling || e.state.Muted {
+		return nil
 	}
 	e.outputOpen, e.outputTimer = false, false
 	if ctx.Err() != nil || discarded || e.discard {

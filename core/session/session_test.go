@@ -35,6 +35,7 @@ type player struct {
 	writes           int
 	flushed          int
 	entered, release chan struct{}
+	holdCancelled    bool
 }
 
 func (p *player) Write(ctx context.Context, samples []int16) error {
@@ -50,6 +51,9 @@ func (p *player) Drain(ctx context.Context) error {
 		close(p.entered)
 		select {
 		case <-ctx.Done():
+			if p.holdCancelled {
+				<-p.release // Model cleanup finishing after a new turn starts.
+			}
 			return ctx.Err()
 		case <-p.release:
 		}
@@ -89,6 +93,7 @@ func TestVoiceActivityCoversListeningThroughPhysicalDrain(t *testing.T) {
 			if !active.Load() {
 				t.Fatal("microphone listening did not claim ducking")
 			}
+			_ = e.Handle(g, session.Event{Kind: "listening"})
 			_ = e.Handle(g, session.Event{Kind: "processing"})
 			if !active.Load() {
 				t.Fatal("processing released ducking")
@@ -168,6 +173,7 @@ func TestTimerStopRecoversWithoutStreamEndAndKeepsCallFence(t *testing.T) {
 				if err := e.StartManual(); err != nil {
 					t.Fatal(err)
 				}
+				_ = e.Handle(g, session.Event{Kind: "listening"})
 			}
 			if tt.announcementActive {
 				if err := e.Handle(g, session.Event{Kind: "announcement", Active: true}); err != nil {
@@ -228,6 +234,7 @@ func TestTimerStopRecoversWithoutStreamEndAndKeepsCallFence(t *testing.T) {
 			if err := e.StartManual(); err != nil {
 				t.Fatal("timer stop requires reconnect", err)
 			}
+			_ = e.Handle(g, session.Event{Kind: "listening"})
 			if err := e.Output(g, []int16{-41, 903, 7}); err != nil {
 				t.Fatal("next turn retained cancelled output context", err)
 			}
@@ -279,14 +286,22 @@ func TestWakeRetainsEvidenceAndBoundedPreRoll(t *testing.T) {
 
 func TestPrivacyAndBackendSwitchFenceStaleReader(t *testing.T) {
 	e, l, p, g := fixture(t)
+	var active atomic.Bool
+	e.SetActivityHandler(active.Store)
 	if err := e.StartManual(); err != nil {
 		t.Fatal(err)
 	}
-	e.SetMuted(true)
-	if !l.closed || !e.Snapshot().Muted || p.flushed == 0 {
-		t.Fatal("mute did not close audio ownership")
+	if !active.Load() {
+		t.Fatal("voice did not claim ducking")
 	}
-	if err := e.Output(g, []int16{9}); !errors.Is(err, session.ErrStale) {
+	e.SetMuted(true)
+	if active.Load() {
+		t.Fatal("mute retained voice ducking")
+	}
+	if l.closed || !e.Snapshot().Connected || !e.Snapshot().Muted || p.flushed == 0 {
+		t.Fatal("mute revoked shared transport or retained local audio")
+	}
+	if err := e.Output(g, []int16{9}); err != nil || p.writes != 0 {
 		t.Fatalf("late audio: %v", err)
 	}
 	if err := e.StartManual(); !errors.Is(err, session.ErrUnavailable) {
@@ -316,9 +331,192 @@ func TestPrivacyAndBackendSwitchFenceStaleReader(t *testing.T) {
 	}
 }
 
+func TestMuteCancelsAndWaitsForBackendBoundary(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		backend    session.Backend
+		stream     bool
+		streamLast bool
+	}{
+		{"Assist no output", session.Assist, false, false},
+		{"Assist run ends before stream starts", session.Assist, true, true},
+		{"Assist stream ends before run", session.Assist, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, l := &player{}, &link{backend: tc.backend}
+			e := session.New(p)
+			_ = e.Select(tc.backend)
+			g, _ := e.Attach(l)
+			_ = e.Capture(audio.Frame{Samples: []int16{17}, Sequence: 4})
+			_ = e.StartManual()
+			_ = e.Handle(g, session.Event{Kind: "run_start"})
+			if tc.stream {
+				_ = e.Handle(g, session.Event{Kind: "output_expected"})
+			}
+			e.SetMuted(true)
+			e.SetMuted(true) // Repeated mute must not enqueue a second cancel.
+			if len(l.commands) != 2 || l.commands[1].Kind != "cancel" || l.commands[1].Reason != "cancelled" {
+				t.Fatal("mute did not send pipeline cancellation", l.commands)
+			}
+			_ = e.Capture(audio.Frame{Samples: []int16{32767}, Sequence: 99, Discontinuity: true})
+			e.SetMuted(false)
+			if err := e.StartManual(); !errors.Is(err, session.ErrUnavailable) || e.Snapshot().Phase != "recovering" {
+				t.Fatal("unmute admitted a turn before cancellation completed", e.Snapshot(), err)
+			}
+			_ = e.Handle(g, session.Event{Kind: "responding", Text: "discard this"})
+			_ = e.Handle(g, session.Event{Kind: "error", Reason: "cancelled"})
+			_ = e.Output(g, []int16{-81, 7})
+			if tc.streamLast {
+				_ = e.Handle(g, session.Event{Kind: "run_end"})
+				if tc.stream {
+					_ = e.Handle(g, session.Event{Kind: "output_start"})
+				}
+			} else if tc.stream {
+				_ = e.Handle(g, session.Event{Kind: "output_start"})
+				_ = e.EndOutput(g)
+			}
+			if tc.stream && e.StartManual() != session.ErrUnavailable {
+				t.Fatal("accepted incomplete cancellation")
+			}
+			if tc.streamLast {
+				_ = e.EndOutput(g)
+			} else {
+				_ = e.Handle(g, session.Event{Kind: "run_end"})
+			}
+			if l.closed || !e.Snapshot().Connected || e.Snapshot().Reply != "" || p.writes != 0 || len(l.commands) != 2 {
+				t.Fatal("late response revived playback/presentation or revoked transport", e.Snapshot())
+			}
+			// A stopped/reopened host capture stream need not retain old counters.
+			_ = e.Capture(audio.Frame{Samples: []int16{-29}, Sequence: 0})
+			if err := e.Wake(wake.Detection{Word: "new"}); err != nil {
+				t.Fatal(err)
+			}
+			if got := l.commands[len(l.commands)-1].Samples; !slices.Equal(got, []int16{-29}) {
+				t.Fatal("pre-mute/recovering microphone input leaked", got)
+			}
+		})
+	}
+}
+
+func TestAssistMuteBeforeRunStartStillGetsACancellationBoundary(t *testing.T) {
+	p, l := &player{}, &link{backend: session.Assist}
+	e := session.New(p)
+	_ = e.Select(session.Assist)
+	g, _ := e.Attach(l)
+	_ = e.StartManual()
+	e.SetMuted(true)
+	e.SetMuted(false)
+	if len(l.commands) != 2 || l.commands[1].Kind != "discard_audio" || l.closed || e.StartManual() != session.ErrUnavailable {
+		t.Fatal("aborted before HA could establish a terminal boundary")
+	}
+	_ = e.Handle(g, session.Event{Kind: "run_start"})
+	if len(l.commands) != 3 || l.commands[2].Kind != "cancel" {
+		t.Fatal("deferred cancellation not sent", l.commands)
+	}
+	_ = e.Handle(g, session.Event{Kind: "run_end"})
+	if err := e.StartManual(); err != nil {
+		t.Fatal("deferred cancellation wedged the next turn", err)
+	}
+}
+
+func TestMutedStartupAndReconnectFenceOldReaders(t *testing.T) {
+	for _, backend := range []session.Backend{session.Assist, session.Incubator} {
+		t.Run(string(backend), func(t *testing.T) {
+			e := session.New(&player{})
+			_ = e.Select(backend)
+			e.SetMuted(true)
+			for range 2 {
+				l := &link{backend: backend}
+				g, err := e.Attach(l)
+				if err != nil || !e.Snapshot().Muted || !e.Snapshot().Connected || e.Snapshot().Phase != "muted" {
+					t.Fatal("muted connection rejected or microphone re-enabled", e.Snapshot(), err)
+				}
+				_ = e.Capture(audio.Frame{Samples: []int16{127}})
+				_ = e.Handle(g, session.Event{Kind: "hangup", Listen: true})
+				_ = e.Handle(g, session.Event{Kind: "timer_ringing"})
+				_ = e.EndOutput(g)
+				if e.StartManual() != session.ErrUnavailable || len(l.commands) != 0 || e.Snapshot().Alert {
+					t.Fatal("muted connection could start or publish voice events")
+				}
+				e.SetMuted(false)
+				if err := e.StartManual(); err != nil {
+					t.Fatal(err)
+				}
+				e.SetMuted(true) // Reconnect before this cancellation completes.
+				e.Disconnect(g, "network_lost")
+				if !e.Snapshot().Muted || e.Snapshot().Connected {
+					t.Fatal(e.Snapshot())
+				}
+				if err := e.Output(g, []int16{99}); err != session.ErrStale {
+					t.Fatal("disconnected reader retained ownership", err)
+				}
+			}
+			g, err := e.Attach(&link{backend: backend})
+			if err != nil {
+				t.Fatal(err)
+			}
+			e.Disconnect(g-1, "old_reader_cleanup")
+			_ = e.Handle(g-1, session.Event{Kind: "run_end"})
+			e.SetMuted(false)
+			if err := e.StartManual(); err != nil {
+				t.Fatal("old cancellation survived reconnect", err)
+			}
+		})
+	}
+}
+
+func TestMuteDuringDrainCannotCompleteANewerTurn(t *testing.T) {
+	for _, backend := range []session.Backend{session.Assist, session.Incubator} {
+		t.Run(string(backend), func(t *testing.T) {
+			p, l := &player{entered: make(chan struct{}), release: make(chan struct{}), holdCancelled: true}, &link{backend: backend}
+			e := session.New(p)
+			_ = e.Select(backend)
+			g, _ := e.Attach(l)
+			_ = e.StartManual()
+			_ = e.Handle(g, session.Event{Kind: "listening"})
+			_ = e.Handle(g, session.Event{Kind: "output_start"})
+			_ = e.Output(g, []int16{5, -19, 83})
+			_ = e.Handle(g, session.Event{Kind: "run_end"})
+			done := make(chan error, 1)
+			go func() { done <- e.EndOutput(g) }()
+			<-p.entered
+			e.SetMuted(true)
+			e.SetMuted(false)
+			if backend == session.Incubator {
+				if e.StartManual() != session.ErrUnavailable {
+					t.Fatal("old stream end mistaken for cancellation acknowledgement")
+				}
+				_ = e.EndOutput(g) // Even the ACK cannot release native ownership.
+				e.Disconnect(g, "connection_closed")
+				l = &link{backend: backend}
+				g, _ = e.Attach(l)
+			}
+			if err := e.StartManual(); err != nil {
+				t.Fatal(err)
+			}
+			_ = e.Handle(g, session.Event{Kind: "listening"})
+			_ = e.Handle(g, session.Event{Kind: "output_start"})
+			close(p.release)
+			select {
+			case err := <-done:
+				if err != nil && !(backend == session.Incubator && err == session.ErrStale) {
+					t.Fatal(err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("mute blocked behind drain")
+			}
+			_ = e.Output(g, []int16{-31, 67})
+			if l.closed || p.writes != 5 || l.commands[len(l.commands)-1].Kind != "start" {
+				t.Fatal("cancelled drain interfered with new stream", e.Snapshot())
+			}
+		})
+	}
+}
+
 func TestStopInterruptsDrainAndRejectsLateAudio(t *testing.T) {
 	e, l, p, g := fixture(t)
 	_ = e.StartManual()
+	_ = e.Handle(g, session.Event{Kind: "listening"})
 	_ = e.Output(g, []int16{1, -2, 3})
 	p.entered, p.release = make(chan struct{}), make(chan struct{})
 	done := make(chan error, 1)
@@ -392,6 +590,7 @@ func TestStoppedTimerRestoresReadiness(t *testing.T) {
 			if err := e.StartManual(); err != nil {
 				t.Fatal("next invocation requires reconnect", err)
 			}
+			_ = e.Handle(g, session.Event{Kind: "listening"})
 			_ = e.Output(g, []int16{-17, 29, 43})
 			_ = e.EndOutput(g)
 			if p.writes != 5 || len(l.commands) != 3 || l.commands[1].Kind != "start" || l.commands[2].Kind != "drained" {
@@ -406,6 +605,7 @@ func TestTimerStoppedDoesNotReleaseCancelledCall(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			e, _, p, g := fixture(t)
 			_ = e.StartManual()
+			_ = e.Handle(g, session.Event{Kind: "listening"})
 			if name == "call_with_timer" {
 				_ = e.Handle(g, session.Event{Kind: "timer_ringing"})
 			}
@@ -488,6 +688,7 @@ func TestRejectedNativeCandidateKeepsConnectionAndFencesOldOutput(t *testing.T) 
 			if err := e.StartManual(); err != nil {
 				t.Fatal("next turn requires reconnect", err)
 			}
+			_ = e.Handle(g, session.Event{Kind: "listening"})
 			_ = e.Output(g, []int16{-17, 29})
 			_ = e.EndOutput(g)
 			if p.writes != 2 || l.commands[len(l.commands)-1].Kind != "drained" {
@@ -532,9 +733,13 @@ func TestAssistIdleStreamEndAfterReconnectDoesNotClaimPlayback(t *testing.T) {
 
 func TestNativeAnnouncementAllowsMultipleStreamsButNotIdleOrStoppedOutput(t *testing.T) {
 	e, l, p, g := fixture(t)
+	e.SetMuted(true)
+	e.SetMuted(false) // A fresh out-of-call stream must not inherit idle mute.
 	_ = e.Handle(g, session.Event{Kind: "announcement", Active: true})
 	for _, pcm := range [][]int16{{-7}, {13, -23}} {
-		_ = e.Output(g, pcm)
+		if err := e.Output(g, pcm); err != nil {
+			t.Fatal(err)
+		}
 		_ = e.EndOutput(g)
 	}
 	if p.writes != 3 || len(l.commands) != 2 || l.commands[0].Kind != "drained" || l.commands[1].Kind != "drained" {
@@ -552,5 +757,107 @@ func TestNativeAnnouncementAllowsMultipleStreamsButNotIdleOrStoppedOutput(t *tes
 	}
 	if err := e.StartManual(); err != nil {
 		t.Fatal("stopping idle announcement wedged next turn", err)
+	}
+}
+
+func TestMuteNativeAnnouncementRevokesOnlyItsVoiceLink(t *testing.T) {
+	e, l, p, g := fixture(t)
+	_ = e.Handle(g, session.Event{Kind: "announcement", Active: true})
+	_ = e.Output(g, []int16{-71})
+	e.SetMuted(true)
+	if len(l.commands) != 1 || l.commands[0].Kind != "cancel" || !e.Snapshot().Muted {
+		t.Fatal("announcement mute did not request native cancellation", e.Snapshot(), l.commands)
+	}
+	_ = e.EndOutput(g) // CALL_END's acknowledgement cannot end announcing_now.
+	e.SetMuted(false)
+	if err := e.StartManual(); !errors.Is(err, session.ErrUnavailable) {
+		t.Fatal("started before native reconnect", err)
+	}
+	e.Disconnect(g, "connection_closed") // Adapter retires the link after sending cancel.
+	newLink := &link{backend: session.Incubator}
+	ng, err := e.Attach(newLink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.StartManual(); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Output(g, []int16{99}); !errors.Is(err, session.ErrStale) || p.writes != 1 {
+		t.Fatal("old announcement crossed into new turn", err, p.writes)
+	}
+	// The upstream task can survive socket loss and write on its new socket.
+	if err := e.Output(ng, []int16{101}); err != nil || p.writes != 1 {
+		t.Fatal("played before upstream accepted the new CALL_START", err, p.writes)
+	}
+	_ = e.Handle(ng, session.Event{Kind: "listening"})
+	if err := e.Output(ng, []int16{13, -29}); err != nil || p.writes != 3 {
+		t.Fatal("new voice connection cannot play", err, p.writes)
+	}
+}
+
+func TestNativeMuteCannotReuseBufferedStreamBoundary(t *testing.T) {
+	e, _, p, g := fixture(t)
+	_ = e.StartManual()
+	_ = e.Handle(g, session.Event{Kind: "listening"})
+	_ = e.Output(g, []int16{1})
+	e.SetMuted(true)
+	e.SetMuted(false)
+	// An ordinary end and HANGUP may already be buffered before cancellation.
+	_ = e.EndOutput(g)
+	if err := e.StartManual(); err != session.ErrUnavailable {
+		t.Fatal("old ordinary end admitted a new call before native disconnect", err)
+	}
+	_ = e.Handle(g, session.Event{Kind: "hangup", Reason: "done"})
+	_ = e.EndOutput(g) // Even the identical cancellation ACK cannot prove ownership.
+	if err := e.StartManual(); err != session.ErrUnavailable {
+		t.Fatal("cancellation ACK admitted a call on the retiring native link", err)
+	}
+	e.Disconnect(g, "connection_closed")
+	ng, err := e.Attach(&link{backend: session.Incubator})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = e.StartManual()
+	_ = e.Handle(g, session.Event{Kind: "hangup", Reason: "done"})
+	_ = e.Handle(ng, session.Event{Kind: "listening"})
+	_ = e.Output(ng, []int16{99})
+	if p.writes != 2 {
+		t.Fatal("stale native tail silenced the replacement call", p.writes)
+	}
+}
+
+func TestNativeStopThenMuteDuringAnnouncementDrainReconnects(t *testing.T) {
+	p := &player{entered: make(chan struct{}), release: make(chan struct{}), holdCancelled: true}
+	l := &link{backend: session.Incubator}
+	e := session.New(p)
+	g, _ := e.Attach(l)
+	_ = e.Handle(g, session.Event{Kind: "announcement", Active: true})
+	_ = e.Output(g, []int16{-7})
+	done := make(chan error, 1)
+	go func() { done <- e.EndOutput(g) }()
+	<-p.entered
+	_ = e.Stop()
+	e.SetMuted(true)
+	e.SetMuted(false)
+	close(p.release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if len(l.commands) != 1 || l.commands[0].Kind != "cancel" {
+		t.Fatal("Stop/mute left a terminal wait with no native cancellation", l.commands)
+	}
+	e.Disconnect(g, "connection_closed")
+	ng, err := e.Attach(&link{backend: session.Incubator})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.StartManual(); err != nil {
+		t.Fatal("Stop/mute wedged voice after native reconnect", err)
+	}
+	_ = e.Handle(g, session.Event{Kind: "announcement", Active: false})
+	_ = e.Handle(ng, session.Event{Kind: "listening"})
+	_ = e.Output(ng, []int16{13, -29})
+	if p.writes != 3 {
+		t.Fatal("new call after cancelled announcement did not play", p.writes)
 	}
 }

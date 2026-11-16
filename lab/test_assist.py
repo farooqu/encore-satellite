@@ -212,17 +212,60 @@ class Lab:
         assert not await self.has_trace("VOICE_ASSISTANT_ERROR"), "Pinned HA changed its empty-TTS behavior; review compatibility"
         print("PASS TTS failure: HA logged fixture failure but supplied normal empty stream/end, no ERROR; Encore made no playback claim or invented backend error")
 
-    async def privacy(self):
-        await self.prepare()
-        await self.begin()
+    async def privacy(self, phase="capture"):
+        scenario = "slow_stt" if phase == "recognition" else "short_tts" if phase == "drain" else "success"
+        before = await self.prepare(scenario)
+        if phase in {"playback", "drain"}:
+            await self.control("hold_playback", value=True)
+        if phase == "startup":
+            await self.control("start")  # Mute can beat STT_START/start acceptance.
+        else:
+            await self.begin()
+            await self.feed()
+        if phase in {"recognition", "playback", "drain"}:
+            await self.finish_input()
+        if phase == "playback":
+            async def queued():
+                return (await self.state())["playback"]["queued"] > 0
+            await self.until(queued, "held output before mute")
+        if phase == "drain":
+            await self.until(lambda: self.has_trace("VOICE_ASSISTANT_TTS_STREAM_END"), "held drain before mute")
         await self.control("mute", value=True)
-        state = (await self.state())["session"]
-        assert state["muted"] and not state["connected"]
+        muted = await self.state()
+        assert muted["session"]["muted"] and muted["session"]["connected"]
+        assert muted["playback"]["queued"] == 0
         await self.control("capture", samples=[32767] * 320)
         await self.control("start", status=409)
+        if phase in {"capture", "recognition"}:
+            await self.until(lambda: self.event("encore_fixture_cancelled"), "real HA cancelled STT on mute")
+            assert await self.lamp() == "off", "Mute ended input but allowed the cancelled intent to run"
         await self.control("mute", value=False)
-        await self.until(self.connected, "unmute reconnect")
-        print("PASS privacy: mute revoked transport, ignored new capture and rejected start; unmute reconnected")
+        await self.control("hold_playback", value=False)
+        after = await self.until(self.idle, "mute cancellation finished without reconnect")
+        assert not await self.has_trace("disconnected") and not await self.has_trace("subscribed")
+        assert not await self.has_trace("playback_drained")
+        assert not after["session"].get("heard") and not after["session"].get("reply")
+        assert after["playback"]["played"] == muted["playback"]["played"]
+        assert after["playback"]["drains"] == before["drains"]
+        received = after["playback"]["received"] - before["received"]
+        self.digest.update(TONE[:received * 2])
+        assert after["playback"]["sha256"] == self.digest.hexdigest()
+        print(f"PASS mute {phase}: cancelled real HA pipeline, no old output/false drain, same encrypted connection")
+
+    async def muted_reconnect(self, entry_id):
+        await self.prepare()
+        await self.control("mute", value=True)
+        await self.ha.api("POST", f"/api/config/config_entries/entry/{entry_id}/reload", {})
+        await self.until(lambda: self.has_trace("subscribed"), "HA resubscription while muted")
+        assert (await self.state())["session"]["muted"]
+        await self.control("start", status=409)
+        await self.control("capture", samples=[32767] * 320)
+        await asyncio.sleep(1)
+        assert (await self.state())["session"]["connected"], "Muted reconnect loop"
+        assert sum(t["kind"] == "subscribed" for t in await self.trace()) == 1
+        await self.control("mute", value=False)
+        await self.until(self.idle, "unmute after HA reload")
+        print("PASS muted HA reconnect: subscription restored without unmuting, no rejection loop")
 
     async def peers(self):
         key = (STATE / "noise.psk").read_text()
@@ -362,7 +405,11 @@ async def main():
             await lab.drain()
             for phase in ("capture", "recognition", "playback"):
                 await lab.cancel(phase)
-            await lab.privacy()
+            for phase in ("startup", "capture", "recognition", "playback", "drain"):
+                await lab.privacy(phase)
+                await lab.success(f"fresh turn after mute {phase}")
+            await lab.muted_reconnect(entry_id)
+            await lab.success("fresh turn after muted reconnect")
             await lab.error("stt_error", "stt-stream-failed")
             await lab.empty_tts()
             await lab.switch()

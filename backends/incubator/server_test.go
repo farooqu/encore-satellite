@@ -137,6 +137,7 @@ func TestNativeWireEvidenceEndpointingDrainAndFollowUp(t *testing.T) {
 	if got := receive(t, c, 0x03); !slices.Equal(got, []byte{7, 0, 245, 255, 44, 1}) {
 		t.Fatal(got)
 	}
+	send(t, c, 0x12, []byte(`{"type":"listening"}`))
 	send(t, c, 0x12, []byte(`{"type":"processing"}`))
 	// Synchronize processing through public presentation, then prove capture
 	// stays open: native Incubator, not Encore, owns endpointing.
@@ -306,6 +307,79 @@ func TestNativeCancelFencesLateOutputAndReconnect(t *testing.T) {
 		if time.Now().After(deadline) {
 			t.Fatal("listener did not recover")
 		}
+	}
+}
+
+func TestNativeMuteCancelsAndReconnectsWithoutUnmuting(t *testing.T) {
+	p := &speaker{}
+	e, address := start(t, p)
+	reconnect := func() net.Conn {
+		t.Helper()
+		deadline := time.Now().Add(time.Second)
+		for {
+			next := connect(t, address)
+			_ = next.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+			var h [3]byte
+			_, err := io.ReadFull(next, h[:])
+			if err == nil && h[0] == 0x01 {
+				if _, err := io.CopyN(io.Discard, next, int64(binary.BigEndian.Uint16(h[1:]))); err != nil {
+					t.Fatal(err)
+				}
+				return next
+			}
+			_ = next.Close()
+			if time.Now().After(deadline) {
+				t.Fatal("muted native connection could not reattach")
+			}
+		}
+	}
+	c := connect(t, address)
+	receive(t, c, 0x01)
+	if err := e.StartManual(); err != nil {
+		t.Fatal(err)
+	}
+	receive(t, c, 0x02)
+	e.SetMuted(true)
+	if got := object(t, receive(t, c, 0x04)); got["reason"] != "cancelled" {
+		t.Fatal("mute did not cancel upstream", got)
+	}
+	_ = c.SetReadDeadline(time.Now().Add(time.Second))
+	var b [1]byte
+	if _, err := c.Read(b[:]); err != io.EOF {
+		t.Fatal("cancel did not retire the old native connection", err)
+	}
+	c = reconnect()
+	if !e.Snapshot().Muted || e.StartManual() != session.ErrUnavailable {
+		t.Fatal("replacement connection lost mute", e.Snapshot())
+	}
+	e.SetMuted(false)
+	if err := e.StartManual(); err != nil {
+		t.Fatal(err)
+	}
+	receive(t, c, 0x02)
+	send(t, c, 0x12, []byte(`{"type":"listening"}`))
+	send(t, c, 0x10, []byte{225, 255, 67, 0})
+	send(t, c, 0x11, nil)
+	receive(t, c, 0x06)
+	p.mu.Lock()
+	got := slices.Clone(p.pcm)
+	p.mu.Unlock()
+	if !slices.Equal(got, []int16{-31, 67}) || e.Snapshot().Reply != "" {
+		t.Fatal("old muted response leaked into the next turn", got, e.Snapshot())
+	}
+	e.SetMuted(true)
+	receive(t, c, 0x04)
+	_ = c.SetReadDeadline(time.Now().Add(time.Second))
+	if _, err := c.Read(b[:]); err != io.EOF {
+		t.Fatal("second cancel did not retire native connection", err)
+	}
+	_ = reconnect()
+	if !e.Snapshot().Muted || !e.Snapshot().Connected || e.StartManual() != session.ErrUnavailable {
+		t.Fatal("native reconnect lost mute", e.Snapshot())
+	}
+	e.SetMuted(false)
+	if err := e.StartManual(); err != nil {
+		t.Fatal("old cancellation survived native reconnect", err)
 	}
 }
 

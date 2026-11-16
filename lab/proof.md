@@ -117,6 +117,47 @@ actually running. A fresh private HA state promoted to stable with no rollback
 deadline; repeat provisioning and the full baseline suite passed. Failed or
 inactive trials are not promoted. No production credentials were used.
 
+## Voice-only mute cancels pipelines and permits muted reconnect
+
+On the same HA pin, `make lab-test` passed after extending `lab/test_assist.py`
+with mute at startup, capture, delayed recognition, held playback and held drain,
+and an HA integration reload while muted. Each completed mute case was followed
+by a successful intent/PCM/drain-checked turn on the same connection. Delayed STT
+emitted the fixture's actual cancellation event; the lamp stayed off. This checks
+pipeline abort, not merely ending input and allowing recognition to continue.
+
+The first startup case exposed an HA race: cancelling a not-yet-running task
+produced no RUN_END and left voice recovering. The engine now waits for RUN_START
+before sending that abort, with capture/output already muted. The unchanged case
+then passed. Output expected from TTS_END remains fenced until its stream ends;
+muting a blocked playback-drain fixture cannot acknowledge old audio or modify a
+newer turn. Missing terminals still reject new turns rather than reset Bluetooth.
+
+Race-enabled core/native/outbox tests passed for 30 repetitions. Native TCP peer
+tests received the actual `CALL_END(cancelled)` frame before socket EOF, proved
+mute survived the native generation change, and played exact fresh PCM after
+reattaching. Neither an old ordinary end nor the identical cancellation ACK may
+admit a call on the retiring link. Stop followed by mute during announcement
+drain also sends cancellation and recovers through that native-only reconnect;
+it cannot leave a terminal wait without a future terminal. Both controlled
+regressions failed before the fixes. These are component/protocol-peer tests,
+not full Incubator speech/model proof. The earlier mute regression cases failed when
+the old core/adapters/outbox were restored through a Go build overlay.
+
+Cancellation drops queued microphone frames while retaining start/control order;
+the queue writer and cancellation filter share a lock so neither can overtake a
+temporarily removed start. Final `make check`, `make lab-test` and the standalone
+`lab/test_bluetooth.py` suite passed, including virtual encrypted GATT,
+pairing/slot limits, persistence and proxy-switch controls.
+
+A separate race-enabled lab composition attached the existing BLE proxy to the
+production Assist/session code, using only a virtual radio/host overlay. Real HA
+continued ingesting changing advertisements during all five mute phases and
+repeated idle mute/unmute, with no scan restart or voice resubscription. Deliberate
+HA reload while muted caused one reconnect/scan restart and then stable BLE and
+a successful new voice turn. This does not prove uninterrupted physical GATT,
+RF performance, hardware mute or Sendspin coexistence.
+
 ## Explicitly unproven
 
 No physical capture/playback, acoustic quality, AEC, EQ, wake model, hardware mute,
