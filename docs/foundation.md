@@ -22,6 +22,8 @@ and exact source commit.
   endpoint is loopback-only in the lab. No competing local wake election.
 - `cmd/encore-lab` and `internal/lab`: explicitly virtual capture/control/playback
   instrumentation. Neither is a production host or hardware adapter.
+  The encrypted selector and restart controls are private to the lab command,
+  not a shared backend package.
 - `lab`: pinned real HA service, deterministic speech fixtures and integration checks.
 - `lab/incubator` and `lab/assist-wake`: separately provisioned real upstream
   service suites; their source/model pins, licenses and fixture boundaries are
@@ -51,20 +53,26 @@ planned. Backend changes require explicit application-package replacement, and
 routine updates must preserve the variant. See the
 [package contract](device-packages/README.md#incubator-first-single-backend-packages).
 
-The shared core and loopback lab can still switch backends live and revoke stale
-audio as test instrumentation. This is not a production package requirement. The
-current lab can disconnect Assist transport when switching; it does not establish
-a common-control connection independent of voice ownership. Production common
-controls must not require bundling a second voice backend; their transport is
-not implemented yet.
+BLE and Sendspin enablement remain independent of that package choice.
+
+The core retains live selection/stale-audio fencing, but the virtual host now
+exposes saved selection plus an explicit Apply/restart operation, through both
+encrypted HA controls and loopback instrumentation. It constructs only the chosen
+voice route. Incubator mode keeps controls/BLE on the same ESPHome identity/key
+without advertising Assist capability. Software mute and the independent BLE
+choice survive runtime/process restarts; default BLE is off. Selecting alone is
+non-disruptive. Applying deliberately restarts the shared endpoint and can
+interrupt Bluetooth connections; ordinary mute/unmute keeps it alive.
 
 The pinned native integration creates its own persistent timer device with the
 same stable MAC, not an `assist_satellite` or per-native-voice availability entity.
-Existing HA Assist availability follows the whole ESPHome connection. The intended
-surface is one shared Encore control identity plus installed-backend/readiness
-state; mapping it to separate voice availability requires HA-side support, not
-duplicated controls or a fake second ESPHome assistant. Installed is not the same
-as connected. Native rejected/losing HANGUP now preserves healthy transport so
+At the pinned HA baseline, withdrawing Assist capability removes voice-only
+entities and restores their available IDs on return; common control registry
+identities remain stable. Configured/running mode is separate from connection
+readiness. No duplicate ESPHome assistant is fabricated. Production Dot/Android
+hosts, setup UI, updater and hardware audio arbitration remain unimplemented;
+Sendspin has separate opt-in virtual-lab instrumentation, not a device package.
+Native rejected/losing HANGUP preserves healthy transport so
 ordinary upstream decisions do not trigger reconnect backoff.
 
 ## Parallel work boundaries

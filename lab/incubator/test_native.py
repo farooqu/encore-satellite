@@ -44,6 +44,8 @@ class Wire:
     def __init__(self):
         self.frames = []
         self.writers = set()
+        self.start_gate = asyncio.Event()
+        self.start_gate.set()
 
     async def copy(self, reader, writer, direction):
         while True:
@@ -51,6 +53,8 @@ class Wire:
             kind, size = HEADER.unpack(header)
             body = await reader.readexactly(size)
             self.frames.append((direction, kind, body))
+            if direction == "encore" and kind == 2:
+                await self.start_gate.wait()  # Explicit delayed-upstream fixture.
             writer.write(header + body)
             await writer.drain()
 
@@ -165,8 +169,87 @@ async def main():
                                              "max_probability": 231, "cutoff": 51})
 
         ha = await login(http)
+        original_ble = (await state())["ble"]["enabled"]
+        ble_ws = None
         try:
-            await command("backend", backend="incubator")
+            entries = await ha.command("config_entries/get")
+            entry = next(e for e in entries if e["domain"] == "esphome" and e["title"] == "Encore virtual satellite")
+            entities = [e for e in await ha.command("config/entity_registry/list") if e["config_entry_id"] == entry["entry_id"]]
+            selector = next(e["entity_id"] for e in entities if e["original_name"] == "Voice mode (restart required)")
+            apply = next(e["entity_id"] for e in entities if e["original_name"] == "Apply and restart")
+            running = next(e["entity_id"] for e in entities if e["original_name"] == "Running voice mode")
+            bluetooth = next(e["entity_id"] for e in entities if e["original_name"] == "Bluetooth proxy")
+            common = [e for e in entities if e["entity_id"] in {selector, apply, running, bluetooth}]
+            ble_ws = await http.ws_connect("http://127.0.0.1:8123/api/websocket")
+            await ble_ws.receive_json()
+            await ble_ws.send_json({"type": "auth", "access_token": ha.token})
+            assert (await ble_ws.receive_json())["type"] == "auth_ok"
+            await ble_ws.send_json({"id": 1, "type": "bluetooth/subscribe_advertisements"})
+            assert (await ble_ws.receive_json())["success"]
+            ads = []
+
+            async def collect_ble():
+                async for message in ble_ws:
+                    if message.type == aiohttp.WSMsgType.TEXT:
+                        ads.extend(a for a in json.loads(message.data).get("event", {}).get("add", [])
+                                   if a["address"].upper() == "C0:FF:EE:12:34:56")
+
+            collector = asyncio.create_task(collect_ble())
+            await ha.api("POST", "/api/services/switch/turn_on", {"entity_id": bluetooth})
+
+            async def ble_alive(before=None):
+                count = len(ads)
+
+                async def received():
+                    return len(ads) > count + 2
+
+                await until(received, "changing BLE advertisements received inside real HA")
+                current = (await state())["ble"]
+                assert current["enabled"]
+                if before is not None:
+                    assert current == before, "ordinary voice operation restarted BLE"
+
+            await ble_alive()
+
+            async def activate(mode):
+                label = "Home Assistant Assist" if mode == "assist" else "Voice Incubator"
+                before = await state()
+                await ha.api("POST", "/api/services/select/select_option", {"entity_id": selector, "option": label})
+
+                async def saved():
+                    s = await state()
+                    return s if s["mode"]["configured"] == mode else None
+
+                pending = await until(saved, "HA saved mode selection")
+                assert pending["started_at"] == before["started_at"]
+                assert pending["mode"]["running"] == before["mode"]["running"]
+                assert pending["ble"] == before["ble"]
+                await ble_alive(before["ble"])
+                await ha.api("POST", "/api/services/button/press", {"entity_id": apply})
+
+                async def applied():
+                    try:
+                        s = await state()
+                    except aiohttp.ClientError:
+                        return None
+                    if s["mode"]["running"] != mode:
+                        return None
+                    assert s["ble"]["enabled"] == before["ble"]["enabled"]
+                    if before["mode"]["running"] != mode:
+                        assert s["started_at"] != before["started_at"]
+                    reported = await ha.api("GET", "/api/states/" + running)
+                    return s if reported["state"] == label else None
+
+                result = await until(applied, "HA Apply and running-mode diagnostic")
+                await ble_alive()
+                restored = await ha.command("config/entity_registry/list")
+                for old in common:
+                    new = next(e for e in restored if e["entity_id"] == old["entity_id"])
+                    assert (new["id"], new["device_id"], new["unique_id"]) == (old["id"], old["device_id"], old["unique_id"])
+                return result
+
+            await command("mute", value=False)
+            await activate("incubator")
             await zc.async_register_service(info)
             await until(connected, "real upstream native handshake")
             hello = json.loads(wire.bodies("encore", 1)[-1])
@@ -245,6 +328,51 @@ async def main():
             assert kinds.index(("encore", 6)) < kinds.index(("app", 0x13))
             print("PASS held real Piper reply: no early PLAYBACK_DRAINED/HANGUP; release drains then upstream hangs up", flush=True)
 
+            async def muted_reconnected():
+                s = await state()
+                return s if len(wire.bodies("encore", 1)) > hellos and s["session"]["connected"] else None
+
+            before = await state()
+            wire.frames.clear()
+            hellos = 0
+            await command("hold_playback", value=True)
+            await start()
+            await send(audio)
+            await until(output_ended, "held real reply before voice-only mute")
+            await command("mute", value=True)
+            muted = await until(muted_reconnected, "cancel retires native voice and reconnects muted", seconds=90)
+            await ble_alive(before["ble"])
+            assert muted["session"]["connected"] and muted["session"]["muted"]
+            assert muted["playback"]["queued"] == 0 and muted["playback"]["played"] == before["playback"]["played"]
+            assert muted["playback"]["drains"] == before["playback"]["drains"] and not wire.bodies("encore", 6)
+            assert json.loads(wire.bodies("encore", 4)[-1])["reason"] == "cancelled"
+            await command("hold_playback", value=False)
+            await command("mute", value=False)
+            await until(idle, "unmute on fresh native generation")
+            assert len(wire.bodies("encore", 1)) == 1
+            await ha.api("POST", "/api/services/input_boolean/turn_off", {"entity_id": "input_boolean.encore_lamp"})
+            await start()
+            await send(audio)
+            fresh = await until(idle, "recognized turn after muted native reconnect")
+            assert (await ha.api("GET", "/api/states/input_boolean.encore_lamp"))["state"] == "on"
+            assert fresh["playback"]["played"] > muted["playback"]["played"]
+            assert len(wire.bodies("encore", 6)) == 1 and len(wire.bodies("encore", 1)) == 1
+            await ble_alive(before["ble"])
+            print("PASS real native mute: CALL_END before voice-only reconnect, mute retained, no false drain; BLE scan unchanged; fresh recognized HA turn succeeded", flush=True)
+
+            await command("mute", value=True)
+            hellos = len(wire.bodies("encore", 1))
+            wire.drop()
+
+            muted = await until(muted_reconnected, "real app native reconnect while muted", seconds=90)
+            assert muted["session"]["muted"]
+            async with http.post(CONTROL + "/command", json={"type": "start"}) as response:
+                assert response.status == 409
+            await ble_alive(before["ble"])
+            await command("mute", value=False)
+            await until(idle, "unmute after real native reconnect")
+            print("PASS real app reconnect while muted: mute retained, new turn rejected, HA BLE scan uninterrupted", flush=True)
+
             before = (await state())["playback"]
             wire.frames.clear()
             await command("hold_playback", value=True)
@@ -288,8 +416,8 @@ async def main():
             assert (await ha.api("GET", "/api/states/input_boolean.encore_lamp"))["state"] == "on"
             print("PASS real Kaldi rejection → quiet idle → immediate successful next turn, same native transport", flush=True)
 
-            # Selection is core-owned: only inspect the real app and HA lifecycle.
-            await command("backend", backend="assist")
+            # Selection applies only after the host replaces the runtime.
+            await activate("assist")
             async def native_offline():
                 satellites = (await request("GET", APP + "/api/satellites"))["satellites"]
                 return any(s["key"] == KEY and not s["connected"] for s in satellites)
@@ -298,10 +426,10 @@ async def main():
             assert timer_after["state"] == timer_before["state"] != "unavailable"
             assert next(s for s in (await ha.command("voice_incubator/satellites/list"))["satellites"]
                         if s["id"] == KEY)["device_id"] == link["device_id"]
-            await command("backend", backend="incubator")
+            await activate("incubator")
             await until(connected, "real app reconnect after selection", seconds=90)
             await until(idle, "idle after selection")
-            print("PASS native disconnect/switch/reconnect: persistent HA timer entity stays available, not voice availability", flush=True)
+            print("PASS HA saved selector/apply both directions: stable common entities, BLE retained/recovered, real native reconnect; persistent timer is not voice availability", flush=True)
 
             wire.frames.clear()
             await start()
@@ -355,6 +483,8 @@ async def main():
                     "announce": "Dinner is ready.",
                 }})
                 wire.frames.clear()
+                await command("mute", value=True)
+                await command("mute", value=False)
                 before = (await state())["playback"]
                 tried = await request("POST", APP + "/api/try", {
                     "text": "announce dinner", "satellite": "020000ec0002", "run_actions": True,
@@ -370,7 +500,59 @@ async def main():
                 assert after["queued"] == 0
                 assert len(wire.bodies("encore", 6)) == len(wire.bodies("app", 0x11)) == 2
                 assert not wire.bodies("app", 0x13)  # No invented local call.
-                print("PASS real idle announcement: active true → chime drain → Piper drain → active false, no fake assistant", flush=True)
+                print("PASS real idle mute/unmute → fresh announcement: exact chime/Piper PCM, two drains, no fake assistant", flush=True)
+
+                # Hold the chime at drain, mute, then delay the next CALL_START
+                # after native reconnect. Upstream retains its announcement task
+                # across socket loss: its later Piper must not become new-call audio.
+                # Earlier deliberate resets raised upstream's backoff. A stable
+                # 30-second connection resets it, ensuring reconnect happens
+                # before the real chime drain timeout (the race under test).
+                await asyncio.sleep(31)
+                wire.frames.clear()
+                before = await state()
+                await command("hold_playback", value=True)
+                await request("POST", APP + "/api/try", {
+                    "text": "announce dinner", "satellite": "020000ec0002", "run_actions": True,
+                })
+                await until(output_ended, "real announcement chime held before mute")
+                assert (await state())["playback"]["queued"] > 0
+                hellos = len(wire.bodies("encore", 1))
+                await command("mute", value=True)
+                await until(muted_reconnected, "announcement voice-only reconnect", seconds=90)
+                await ble_alive(before["ble"])
+                muted = await state()
+                assert muted["session"]["muted"]
+                assert muted["playback"]["queued"] == 0
+                assert muted["playback"]["played"] == before["playback"]["played"]
+                assert not wire.bodies("encore", 6)
+                wire.frames.clear()
+                await command("hold_playback", value=False)
+                await command("mute", value=False)
+                wire.start_gate.clear()
+                await start()
+                # Wait beyond upstream's real 30-second chime drain timeout.
+                async def old_output():
+                    return bool(wire.bodies("app", 0x10))
+                await until(old_output, "old announcement resumes before delayed CALL_START", seconds=45)
+                await asyncio.sleep(0.25)
+                assert wire.bodies("app", 0x10), "did not exercise old PCM on the new connection"
+                fenced = await state()
+                assert fenced["playback"]["played"] == before["playback"]["played"]
+                assert fenced["playback"]["queued"] == 0 and not wire.bodies("encore", 6)
+                await ble_alive(before["ble"])
+                # CALL_START now cancels the surviving upstream task. The real
+                # new call must work without another connection reset.
+                await ha.api("POST", "/api/services/input_boolean/turn_off", {"entity_id": "input_boolean.encore_lamp"})
+                wire.frames.clear()
+                wire.start_gate.set()
+                await send(audio)
+                fresh = await until(idle, "recognized turn after muted announcement and delayed CALL_START")
+                assert (await ha.api("GET", "/api/states/input_boolean.encore_lamp"))["state"] == "on"
+                assert fresh["playback"]["played"] > fenced["playback"]["played"]
+                assert len(wire.bodies("encore", 6)) == 1
+                await ble_alive(before["ble"])
+                print("PASS real announcement mute: voice-only reconnect; resumed old Piper rejected before delayed CALL_START; fresh HA turn played; BLE scan unchanged", flush=True)
             finally:
                 await zc.async_unregister_service(peer_info)
                 if candidate.writer:
@@ -400,6 +582,8 @@ async def main():
             print("PASS upstream asks confirmation, follow_up has zero pre-roll, real recognition of yes triggers HA action", flush=True)
 
             wire.frames.clear()
+            await command("mute", value=True)
+            await command("mute", value=False)
             before = (await state())["playback"]
             await ha.api("POST", "/api/services/voice_timer_list/create_timer", {
                 "entity_id": link["timer_list"], "duration": 1, "name": "Encore proof",
@@ -442,8 +626,16 @@ async def main():
             assert len(wire.bodies("encore", 6)) == 1
             print("PASS timer Stop → next wake/recognition/HA intent/Piper drain, same native transport", flush=True)
         finally:
+            wire.start_gate.set()
             await command("hold_playback", value=False)
             await command("stop")
+            await command("mute", value=False)
+            if "bluetooth" in locals():
+                await ha.api("POST", "/api/services/switch/turn_" + ("on" if original_ble else "off"), {"entity_id": bluetooth})
+            if ble_ws is not None:
+                await ble_ws.close()
+                if "collector" in locals():
+                    await collector
             await ha.ws.close()
             await zc.async_unregister_service(info)
             await zc.async_close()

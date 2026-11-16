@@ -50,8 +50,11 @@ authentication headers. Ordinary HA login still protects the portal.
 `make lab-test` deliberately re-pairs **the Encore virtual satellite entry** and
 restarts the Encore service to reset its virtual playback instrumentation. It
 changes only lab helpers/scenarios, leaves HA authentication intact, and restores
-playback hold/mute on exit. Do not repurpose these scripts for a real household
-instance.
+Assist mode and playback hold/mute on exit. Run `make lab-test-modes` separately
+for the lab-only selector suite through HA's actual select/button/switch services,
+including a process restart and temporary save/bind failures. That suite restores
+the initial BLE choice. It is not a prerequisite for single-backend packages.
+Do not repurpose these scripts for a real household instance.
 
 ## Optional real upstream service suites
 
@@ -91,10 +94,64 @@ distribution permission or device support follows from running these tests.
 
 Controls are loopback-only on port 8099: `GET /state`, `GET /trace`,
 `POST /command`. Commands are `start`, `wake`, `capture`, `end`, `stop`, `mute`,
-`backend` and `hold_playback`. Capture accepts 1–1024 signed PCM16 samples. The
+`mode`, `restart` and `hold_playback`. `mode` takes `backend:assist|incubator` and
+only saves the choice; `restart` replaces the runtime when that choice differs.
+Capture accepts 1–1024 signed PCM16 samples. The
 native encrypted API is port 6053 and advertises the local virtual mDNS identity;
-the unencrypted native Incubator adapter is restricted to loopback port 6055.
+the unencrypted native Incubator adapter listens on loopback port 6055 only in
+Incubator mode. Native mDNS discovery is supplied by the separate Incubator
+suite's recording proxy, not by this loopback host.
 Do not expose these lab control/Incubator ports to an untrusted network.
+
+## Lab-only restart-bound voice mode and independent BLE
+
+These controls belong only to `cmd/encore-lab`; the Go command is not importable
+by device hosts. Production packages link one voice backend, Incubator by default.
+Changing that backend requires replacing the application package, not these
+controls. The lab deliberately links both adapters to exercise their contracts;
+its Assist default is a test prerequisite, not the product default.
+
+The encrypted ESPHome endpoint exposes **Voice mode (restart required)**,
+**Apply and restart**, **Running voice mode** and **Bluetooth proxy**
+in both modes. Choose **Home Assistant Assist** or **Voice Incubator**, then press
+Apply. Selection alone never interrupts a turn or restarts BLE. The diagnostic
+reports the running route, not whether the remote assistant is connected.
+
+The host saves `voice_mode`, `bluetooth_proxy` and software `muted` state in private
+`settings.json` alongside the existing Noise key. Missing configuration defaults
+to Assist with BLE off; invalid saved modes fail startup without fallback.
+Writes sync a temporary file and atomically rename it before reporting success.
+A failed save does not change the saved/running mode. Mute takes effect even if
+its save fails: the effective privacy latch survives runtime Apply and is included
+in subsequent mode/BLE saves. Unmute requires a successful save. A failed mute
+write cannot promise persistence across process death or power loss. This is not a
+qualified power-loss/storage-recovery mechanism. Mode is runtime configuration, not a device
+planning profile, package variant or download.
+
+Apply cancels old voice output, closes the old listeners/connections, waits for
+their workers to stop and starts a fresh engine with only the selected voice
+adapter. In both modes, accepted ESPHome sockets are tied to runtime retirement
+before reaching the protocol server, so a silent peer awaiting its Noise
+handshake cannot strand Apply. HTTP admission and mutations are fenced during
+teardown; a request still reading its body cannot mutate the retired runtime or
+shared settings.
+After a graceful-shutdown timeout, connections are closed and handlers joined
+before replacement. The same ESPHome identity/key and BLE/mute choices survive.
+BLE reconnects during this deliberate runtime restart; ongoing GATT sessions are
+not promised uninterrupted. The virtual radio emits changing advertisements but
+does not implement GATT. Ordinary mute/unmute never pauses or disables the proxy.
+
+Incubator mode keeps the encrypted settings/BLE endpoint with voice capability
+zero. An offline Incubator peer, or failure to bind its loopback listener, leaves
+management and BLE available with no fallback to Assist. `/state` separates
+configured/running/restart-required mode, session connection state and local
+backend startup error. Selecting Assist and applying remains possible.
+
+On the pinned HA baseline, removing Assist capability removes its satellite and
+voice-only selectors. Switching back restores the original IDs if they remain
+free. The four common controls retain registry/device identities. The separate
+native Incubator integration may create its own persistent timer device; the
+selector does not fabricate or merge HA devices.
 
 ## Compatibility boundary and gaps
 
@@ -103,8 +160,9 @@ There are no invented partial captions, local timer scheduling, media-player
 entities, Assist announcements, downloads, AEC/multichannel audio or working
 hardware profiles. Native Incubator can supply explicit announcement and timer
 audio; Encore only presents and drains it, and forwards Stop upstream.
-An empty entity list terminates normally. Only one selected backend owns a
-session; unsupported/competing subscribers cannot displace it.
+The composed host lists the four common controls; standalone Assist can still
+terminate an empty list. Only one selected backend owns a session;
+unsupported/competing subscribers cannot displace it.
 
 HA's experimental wake-audio verification path additionally requires negotiated
 `WAKE_WORD_AUDIO`, actual wake evidence, active models supported by a configured
@@ -148,12 +206,11 @@ A deliberate transport reset clears that fence and can interrupt BLE/GATT.
 Network reconnection is accepted while still muted and cannot resume capture or
 old playback. The separate Stop command retains its existing cancellation policy.
 
-The core and loopback fixture support live backend selection, not yet a product
-setup/HA selector. Common ESPHome controls should share one connection and stay
-independent of voice selection. The pinned Incubator integration creates a
-separate persistent timer device, not another Assist entity or a voice-availability
-signal. Marking only the existing Assist entity unavailable while retaining
-common controls needs HA-side support; no duplicate identity is fabricated here.
+The core retains live-selection fencing for embedding hosts and its existing
+tests, but the lab exposes only the persistent restart-bound selector described
+above. No device settings screen or production lifecycle host is implemented.
+Media is intended to use Sendspin, not an ESPHome media-player entity; neither
+Sendspin nor shared music/voice playback arbitration is implemented by this work.
 
 There is no Dot/Android runtime, installer, APK, update mechanism or binary
 release. The user's planned hardware remains aspirational. New Encore code's

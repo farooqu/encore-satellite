@@ -51,11 +51,13 @@ build. [Native Incubator](docs/incubator-validation.md) is tested with its real
 upstream wake verification, recognition, HA actions and speech output.
 [Experimental Assist wake verification](docs/assist-wake-validation.md) is an
 explicit opt-in. Capture and playback are virtual; these are protocol checks,
-not hardware or acoustic-quality results. See the [foundation scope](docs/foundation.md)
-for what works and what remains. The first device packages will target native
-Voice Incubator, with exactly one backend per package and no runtime switching.
-Changing backends will require an explicit application-package replacement.
-Shared device controls remain to be implemented.
+not hardware or acoustic-quality results. The lab includes a test-only Assist/native
+Incubator selector applied after restart, with independent BLE controls. Production
+packages must link one voice backend: Incubator by default, with a possible
+separate Home Assistant Assist pipeline package later. Changing backend requires
+application-package replacement, not a runtime switch. See the
+[foundation scope](docs/foundation.md) for what works and what remains.
+Production device hosts and their shared controls remain to be implemented.
 
 ## Devices
 

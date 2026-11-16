@@ -141,7 +141,7 @@ class Proof:
 
     async def assist(self):
         lab = self.voice
-        await lab.control("backend", backend="assist")
+        await lab.activate("assist")
         await lab.until(lab.connected, "real HA encrypted Assist subscription")
         await lab.listen()
         try:
@@ -297,7 +297,7 @@ class Proof:
             "response": "The lamp is on.",
         }
         try:
-            await lab.control("backend", backend="incubator")
+            await lab.activate("incubator")
             await zc.async_register_service(info)
             await lab.until(
                 lab.connected, "real Incubator mDNS/native handshake", timeout=90
@@ -371,14 +371,14 @@ class Proof:
             # remains a separate enabled feature and its MA queue keeps running.
             await wake()
             await self.measure("Incubator next live capture", 0.2)
-            await lab.control("backend", backend="assist")
+            await lab.activate("assist")
             await lab.until(
                 lab.connected, "Assist reconnect after cancelling Incubator"
             )
             await self.measure("backend switch releases only old voice ducking", 1)
             queue = await self.ma("player_queues/get", queue_id=self.player)
             assert queue["state"] == "playing"
-            await lab.control("backend", backend="incubator")
+            await lab.activate("incubator")
             await lab.until(lab.connected, "Incubator reconnect for timer", timeout=90)
             # Upstream's device reconnect backoff can outlast the short source
             # fixture. Start fresh queued media before the independent timer
@@ -448,7 +448,7 @@ class Proof:
             )
         finally:
             await lab.control("hold_playback", value=False)
-            await lab.control("backend", backend="assist")
+            await lab.activate("assist")
             await zc.async_unregister_service(info)
             await zc.async_close()
             wire.drop()

@@ -6,6 +6,136 @@ native TCP adapter. Synthetic capture, injected host wake detections and a
 clocked virtual speaker replace device boundaries only. No physical device,
 acoustic quality, household deployment or release claim is made.
 
+## Independent commit-review follow-up
+
+The three additional review findings are fixed. Native mute now sends cancellation
+before retiring its voice connection, and neither ordinary nor cancellation
+`AUDIO_OUT_END` releases admission on that retiring generation. Interrupted output
+from Stop is also retired when mute follows, including delayed announcement drain
+cleanup. The two public-engine regressions fail before the fixes and pass after;
+the native TCP test checks CALL_END before EOF, retained mute on reconnect and
+exact fresh playback. Race-enabled session/native/outbox tests pass 30 repetitions.
+
+The lab fences HTTP admission and command mutations at retirement, closes active
+connections when graceful shutdown times out, and joins admitted handlers before
+replacement. A real HTTP `Expect: 100-continue` request proves Decode is waiting
+for a body across real HA Apply. Before the fix it returns 200 after replacement
+and changes persisted mute while the new engine stays unmuted. Afterward it cannot
+succeed or mutate shared settings; a fresh request mutes the live engine normally.
+
+The full pinned Incubator/model/HA suite passes **16/16** with this policy: real
+CALL_END precedes native-only reconnect, mute remains set, fresh recognized HA
+intent/reply works, and HA receives BLE advertisements without scan restart.
+Idle mute/unmute does not reconnect. Both real-HA Assist/selector suites and the
+separate encrypted virtual BLE/GATT fixture suite pass. Evidence is under
+`.amp/in/orb-backup/cancellation-fix/` and `.amp/in/orb-backup/http-teardown/`.
+The controlled buffered-tail and Stop/drain interleavings are component proof,
+not newly executed real-service races. Earlier same-native-connection results
+below predate this stricter generation policy and are historical.
+
+## Production mute fixes and lab-only switching are separate
+
+The shared mute/cancellation/reconnect fixes are independent of the lab selector.
+Their exact commit snapshot passes `make check` and the real HA Assist suite with
+the original lab host, without any new selector, settings or BLE composition.
+
+Only the virtual lab links both voice adapters. Its selector controls live in
+`cmd/encore-lab/controls.go`, not an importable shared backend package. Production
+packages link one voice adapter, Incubator by default; changing backend requires
+deliberate application-package replacement. The earlier switching experiments
+below are lab coverage, not a production feature or package release requirement.
+`make lab-test` runs Assist; `make lab-test-modes` explicitly runs selector tests.
+The effective-mute persistence latch stays with those lab settings and their
+failed-save/Apply regression, rather than adding a persistence API to the core.
+
+## Four pre-landing review findings fixed
+
+The post-review native suite passed **16/16 cases** against the same pinned,
+unmodified Incubator app/models and real HA. In addition to the earlier coverage:
+
+- Idle mute/unmute now precedes the real announcement and HA duration timer.
+  Chime and Piper consume their exact wire PCM and both drain normally.
+- Active announcement mute closes only the native voice link. The app retains
+  its announcement task even across reconnect, so local call output also waits
+  for upstream `listening`, not just a local start. A transparent fault fixture
+  holds the next CALL_START until the real 30-second chime drain timeout causes
+  old Piper PCM on the new socket. None of it plays or claims drain. Releasing
+  CALL_START then permits a recognized HA lamp action/reply without another reset.
+  HA receives changing BLE advertisements with unchanged scan counters throughout.
+- Failed mute persistence now retains a separate effective privacy latch; later
+  mode/BLE saves include it and Apply initializes from it. A failed unmute save
+  stays muted. The live-host obstruction probe changed from `live_muted=false`
+  after Apply to `live_muted=true` using the same procedure.
+- Assist mute purges queued capture immediately while preserving queued starts
+  and controls; wire abort still waits for RUN_START. The delayed-writer public
+  engine/outbox regression failed before the fix and passes after it. This queue
+  timing is deterministic component coverage, not a claimed HA wire replay.
+
+The idle-announcement and native-reset regressions also failed before their fixes.
+A deliberate control removing only the native listening gate fails with
+`played before upstream accepted the new CALL_START`. The first real-service
+announcement fault attempt did not meet the race's precondition: earlier forced
+disconnects had raised app backoff to 40 seconds, beyond its 30-second chime wait.
+That run is retained as failed, not counted as a pass. Waiting for a real stable
+connection before forcing loss resets backoff; the strict old-PCM case then passes.
+
+Before the commit split, `make check`, 30 repetitions of the affected race-enabled
+Go packages, `make lab-test` (then running both Assist and selector suites) and
+`lab/test_bluetooth.py` passed. The HA selector suite now obstructs the real mute settings rename,
+recovers storage and uses HA Apply to verify the privacy latch is retained and
+persisted. Assist still cancels safely at startup, capture, delayed recognition,
+held playback and drain, with fresh intent/PCM-checked turns after each case.
+Optional Incubator was stopped; normal HA/Encore remain in Assist, unmuted, BLE on.
+
+Evidence is under `.amp/in/orb-backup/review/`. Physical capture/privacy, RF/GATT,
+device packaging, power-loss persistence and Sendspin remain unqualified. The
+earlier 15-case runs below are historical and predate these four fixes.
+
+## Restart-bound selector and mute revalidation
+
+On November 16, 2026, reran the full pinned stack against the local selector/mute
+changes on BLE foundation `8215e7a27b03102850178e9f4da6370577d8b9b9`.
+The expanded `lab/incubator/test_native.py` passed all **15 cases twice** after
+restarting the actual Incubator service between runs. No further production
+engine/adapter changes were needed. The earlier 13-case suite also passed before
+adding real native mute/reconnect and HA BLE observations.
+
+The suite now uses HA's actual select/button services over the encrypted
+ESPHome connection, not a live backend command or a native protocol-peer stand-in.
+It verifies that saving leaves the running route and BLE scan unchanged, Apply
+replaces the runtime in both directions, common registry identities and the BLE
+choice persist, and actual upstream native connection/voice recovers. The native
+HA timer remains persistent while the route is inactive, as before.
+
+Real Kaldi accepted the supplied wake audio, CTC/TDT recognized the lamp command,
+HA executed `HassTurnOn`, and real Piper output was consumed/drained by the virtual
+speaker. The first expanded run consumed 18,390 reply samples; the repeat consumed
+17,461. Each count was checked against that run's actual wire PCM, not an assumed
+fixed synthesis length. Both upstream WAV-prefix checks retained SHA-256
+`a7be072bea88d3c3e6ce0cb0ff229cdf4c2a840ac535ec3c91968452182119dc`.
+
+New mute cases cancelled held real Piper output with the actual
+`CALL_END(cancelled)`/`AUDIO_OUT_END` exchange. No discarded audio played, no false
+drain or new HELLO occurred, and a fresh recognized HA turn succeeded on that same
+transport. Deliberately dropping native transport while muted produced a new
+real HELLO without unmuting; new starts were rejected. HA continued receiving
+changing virtual advertisements during mute/reconnect with unchanged radio
+start/stop counters. Deliberate mode restart reconnects BLE; this does not prove
+uninterrupted physical GATT.
+
+The first invocation exposed a harness-only dependency error:
+`ModuleNotFoundError: No module named 'aioesphomeapi'`, because the new lifecycle
+helper imported the Assist suite into the separately locked native environment.
+Replacing that import with HA-driven selection fixed the coupling without
+expanding dependencies or changing upstream source. The app's cold startup was
+also awaited using `/api/settings` before the valid runs.
+
+Final `make check` and `make lab-test` passed after stopping optional Incubator;
+the normal HA/Encore services were restored in Assist, unmuted, with BLE enabled.
+Captured native logs, setup log, source hashes and final baseline logs are under
+`.amp/in/orb-backup/incubator-selector/`. No production HA, package, commit, push
+or deployment was involved. The earlier sections below retain historical proof.
+
 ## Exact baseline and environment
 
 - Fetched Encore foundation: `250af95320b3a3c4887f103ee1ce23f1dcce4a72`.
@@ -189,7 +319,7 @@ replies. HA Local Calendar currently lacks `ical` in the foundation environment;
 no shared dependency expansion was made for an out-of-scope scheduled-alarm test.
 Duration timer behavior is proven; it is not scheduled-alarm proof.
 
-Changes remain local, uncommitted and unpushed for coordinator integration and
-fresh user ship approval. Existing top-level foundation lab documentation still
-describes the old exploratory state; updating it and shared selector/control
-behavior remains parent-owned. No branch, merge, deployment or release was made.
+Changes remain local and unpushed, separated into shared mute and lab-only
+commits. The current selector/common controls and revalidation are described above
+and in the foundation lab proof; the earlier baseline comparisons remain
+historical evidence. No branch, merge, deployment or release was made.

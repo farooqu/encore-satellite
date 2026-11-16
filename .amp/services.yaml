@@ -10,3 +10,4 @@ services:
   encore:
     command: go run ./cmd/encore-lab
     port: 8099
+    health: /state

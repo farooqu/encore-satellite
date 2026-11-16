@@ -32,6 +32,12 @@ inside the orb, not user-facing portals. Do not run other suites that select a
 backend concurrently. On subsequent runs restart `incubator` to reset upstream
 reconnect backoff. Restart `encore` after Go edits. The source is run through
 the foundation's `go run ./cmd/encore-lab` supervised service, not a stale binary.
+The suite now saves the requested voice mode and applies a runtime restart at
+each mode transition through HA's actual encrypted selector/button controls;
+it no longer uses the old live `backend` fixture command. The isolated native
+environment runs the suite without importing Assist test dependencies.
+It enables the virtual BLE proxy for the run, observes advertisements inside HA
+and restores the previous BLE setting afterwards.
 
 Setup is separate from shared `.agents/setup`, `.amp/services.yaml`, Makefile and
 the foundation lockfile. It installs native system libraries/build tools, clones
@@ -99,14 +105,31 @@ existing public `/command` interface, not private core methods.
   is created through HA's real service, rings the idle satellite, then device
   Stop reaches upstream as `stop_timer` and upstream reports `timer_stopped`.
 - Switching away/back inspects app connection state and actual HA registry/entity
-  state. The timer entity is persistent, **not** per-satellite availability.
+  state. Saving leaves the running mode and BLE scan unchanged; Apply preserves
+  common entity identities and BLE enablement, then advertisements resume. The
+  timer entity is persistent, **not** per-satellite availability.
+- Voice-only mute sends CALL_END before retiring the native connection, without
+  false playback drain. The replacement connection retains mute; after unmute a
+  fresh recognized HA turn succeeds. Neither old ordinary AUDIO_OUT_END nor the
+  identical cancellation ACK can release admission on the retiring connection.
+  Deliberate native socket loss while muted reconnects without unmuting; starts
+  remain rejected. HA receives changing BLE advertisements during mute and after
+  reconnect with no radio scan restart.
+- Idle mute/unmute is followed by a genuinely fresh announcement and HA timer.
+  Muting an active announcement closes only native voice, preserving BLE. The
+  proxy deliberately holds the next CALL_START while upstream's old task resumes
+  Piper on its reconnected socket. No old samples play or claim drain; releasing
+  CALL_START permits a fresh recognized HA action/reply. This case waits for a
+  stable connection before forcing loss, so real upstream reconnect backoff is
+  shorter than its 30-second chime drain timeout.
 
 The suite intentionally edits only isolated lab command specs/helper/timer state
 and temporary multicast entries. Its `finally` block restores playback hold and
 stops the turn. Do not point it at household services. Run only one instance.
-Malformed frames, unsolicited idle PCM, stale generations and announcement
-cancellation/disconnect have deterministic Go contract tests; this script does
-not pretend those messages came from the real upstream app.
+Malformed frames, unsolicited idle PCM and stale generations have deterministic
+Go contract tests; this script does not pretend malformed messages came from
+the real upstream app. Announcement cancellation/reconnect now also runs against
+the actual upstream app as described above.
 
 ## Why the missing-model prerequisite was not hardware
 

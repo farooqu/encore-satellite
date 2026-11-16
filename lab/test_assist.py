@@ -48,6 +48,31 @@ class Lab:
             if status == 200:
                 return await response.json()
 
+    async def activate(self, mode):
+        async def available():
+            try:
+                return await self.state()
+            except aiohttp.ClientError:
+                return None
+
+        before = await self.until(available, "runtime HTTP readiness")
+        await self.control("mode", backend=mode)
+        await self.control("restart")
+
+        async def restarted():
+            state = await available()
+            if not state or state["mode"]["running"] != mode:
+                return None
+            if before["mode"]["running"] != mode and state["started_at"] == before["started_at"]:
+                return None
+            return state
+
+        state = await self.until(restarted, "saved mode applied after runtime restart")
+        if state["started_at"] != before["started_at"]:
+            self.mark = ""
+            self.digest = hashlib.sha256()
+        return state
+
     async def until(self, predicate, label, timeout=15):
         try:
             async with asyncio.timeout(timeout):
@@ -285,7 +310,8 @@ class Lab:
             info = await client.device_info()
             entities, services = await client.list_entities_services()
         assert int(info.voice_assistant_feature_flags) == 7, info
-        assert not entities and not services, "Invented entities/services advertised"
+        assert {e.object_id for e in entities} == {"voice_mode", "running_voice_mode", "apply_voice_mode", "bluetooth_proxy"}, entities
+        assert int(info.bluetooth_proxy_feature_flags) == 33 and not services, info
         await client.disconnect()
         for audio in (False, True):
             closed = asyncio.Event()
@@ -304,7 +330,7 @@ class Lab:
                 await closed.wait()
             await client.disconnect()
             assert await self.connected(), "Rejected peer displaced real HA"
-        print("PASS peers: wrong key denied; capabilities exactly 7/API-audio mono; entity list completes; unsupported/competing subscribers rejected without displacing HA")
+        print("PASS peers: wrong key denied; voice bits 7/BLE bits 33; four common controls listed; unsupported/competing subscribers rejected without displacing HA")
 
     async def wire_errors(self, entry_id):
         # Real Noise transport, with the pinned upstream API client injecting
@@ -352,13 +378,14 @@ class Lab:
         async def queued():
             return (await self.state())["playback"]["queued"] > 0
         await self.until(queued, "blocked response before backend switch")
-        await self.control("backend", backend="incubator")
+        await self.control("mode", backend="incubator")
+        pending = await self.state()
+        assert pending["mode"]["configured"] == "incubator" and pending["mode"]["running"] == "assist"
+        assert pending["session"]["backend"] == "assist" and pending["session"]["connected"]
+        await self.activate("incubator")
         after = await self.state()
         assert after["session"]["backend"] == "incubator" and not after["session"]["connected"]
-        assert after["playback"]["queued"] == 0 and after["playback"]["drains"] == before["drains"]
-        received = after["playback"]["received"] - before["received"]
-        self.digest.update(TONE[:received * 2])
-        assert after["playback"]["sha256"] == self.digest.hexdigest()
+        assert after["playback"]["queued"] == 0 and after["playback"]["received"] == 0 and after["playback"]["drains"] == 0
         await self.control("start", status=409)  # No silent fallback to HA.
         reader, writer = await asyncio.open_connection("127.0.0.1", 6055)
         try:
@@ -373,21 +400,28 @@ class Lab:
             await self.control("start")
             kind, payload = await frame()
             assert kind == 2 and json.loads(payload)["wake_word"] == "manual"
-            await self.control("backend", backend="assist")
-            assert await reader.read() == b"", "Old native transport survived switch"
+            await self.activate("assist")
+            async with asyncio.timeout(3):
+                remaining = await reader.read()  # EOF, optionally after shutdown cancellation.
+            if remaining:
+                assert remaining[0] == 4 and int.from_bytes(remaining[1:3], "big") == len(remaining) - 3
+                assert json.loads(remaining[3:])["reason"] == "cancelled"
         finally:
             writer.close()
             await writer.wait_closed()
-            await self.control("backend", backend="assist")
+            await self.activate("assist")
             await self.control("hold_playback", value=False)
         await self.until(self.connected, "real HA reattached after native peer fixture")
-        print("PASS backend selection: blocked Assist output flushed without completion; no fallback; native peer attached; old native transport revoked; HA reconnected")
+        print("PASS restart-bound selection: saving leaves current voice active; apply clears old output; only selected listener runs; native peer revoked on return; HA reconnected")
 
 
 async def main():
     await provision()
     async with aiohttp.ClientSession() as http:
         ha = await login(http)
+        lab = Lab(http, ha)
+        await lab.activate("assist")
+        await lab.control("mute", value=False)
         # Re-test actual discovery/configuration every run, for this named lab
         # entry only. Other entries and HA authentication are left intact.
         for entry in await ha.command("config_entries/get"):
@@ -395,7 +429,6 @@ async def main():
                 await ha.api("DELETE", "/api/config/config_entries/entry/" + entry["entry_id"])
         subprocess.run(["amp", "orb", "service", "restart", "encore"], check=True)
         entry_id = await pair_satellite(ha, check_wrong_key=True)
-        lab = Lab(http, ha)
         await lab.until(lab.connected, "initial encrypted HA subscription")
         await lab.listen()
         try:
@@ -412,7 +445,6 @@ async def main():
             await lab.success("fresh turn after muted reconnect")
             await lab.error("stt_error", "stt-stream-failed")
             await lab.empty_tts()
-            await lab.switch()
             await lab.prepare()
             await lab.control("stop")  # An idle stop must not wedge the next turn.
             await lab.success("turn after idle stop/errors/cancellations")

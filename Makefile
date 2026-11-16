@@ -1,4 +1,4 @@
-.PHONY: check test boundaries lab-up lab-provision lab-test
+.PHONY: check test boundaries lab-up lab-provision lab-test lab-test-modes
 
 check: boundaries
 	go vet ./...
@@ -18,3 +18,6 @@ lab-provision:
 
 lab-test:
 	lab/.venv/bin/python lab/test_assist.py
+
+lab-test-modes:
+	lab/.venv/bin/python lab/test_modes.py

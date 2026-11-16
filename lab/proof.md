@@ -41,8 +41,8 @@ clocked virtual sink records consumption independently of receipt.
   the sink consumed 3,200 samples and produced exactly one completion.
 - Cancellation during capture, delayed recognition and playback cleared the
   local queue, suppressed late text/audio and false drain, and recovered through
-  encrypted reconnect. Mute revoked transport and rejected capture/start until
-  unmute and reconnect.
+  encrypted reconnect. In that initial baseline, mute also revoked transport;
+  the voice-only cancellation increment below replaces that mute behavior.
 - Real STT failure emitted `stt-stream-failed`. This HA build logs fixture TTS
   failure but emits a normal empty stream/end without protocol ERROR; Encore
   made no playback claim and did not invent an unavailable backend error.
@@ -156,14 +156,171 @@ continued ingesting changing advertisements during all five mute phases and
 repeated idle mute/unmute, with no scan restart or voice resubscription. Deliberate
 HA reload while muted caused one reconnect/scan restart and then stable BLE and
 a successful new voice turn. This does not prove uninterrupted physical GATT,
-RF performance, hardware mute or Sendspin coexistence.
+RF performance, hardware mute or Sendspin coexistence. This overlay experiment
+preceded the default-host selector/BLE composition below.
+
+## Saved selector and deliberate runtime restart
+
+The default host now composes the shipped BLE proxy with common encrypted
+ESPHome controls in both modes. Real HA exposes **Voice mode (restart required)**,
+**Apply and restart**, and **Running voice mode**. Selection persists without
+changing the running engine. Apply cancels voice, tears down the runtime, waits
+for its workers and starts only the saved route. It is not a live toggle.
+
+`make check` and `make lab-test` passed on the final source. The full real-HA
+suite also passed with the host race-instrumented before the final button-label
+shortening. `lab/test_modes.py` verifies through real HA/encrypted API:
+
+- Saving Incubator leaves Assist and the same HA BLE scan running. Assist
+  mute/unmute preserves both the pending selection and scan lifetime.
+- Applying in both directions changes voice capabilities 7 → 0 → 7 while BLE
+  capabilities remain 33. The device/common entity identities and Noise key stay
+  unchanged. Non-common Assist entities disappear in Incubator and return with
+  their IDs on switch-back. Deliberate restart reconnects BLE; uninterrupted GATT
+  is not promised.
+- A native TCP peer starts only in Incubator mode, verifies an independently
+  checked 320-sample output digest/drain and is revoked on return to Assist.
+- Same-mode Apply is a no-op. Invalid HTTP/encrypted selections and an actual
+  failed settings rename cannot replace the previous saved mode. Occupying the
+  native port leaves management/BLE available without Assist fallback.
+- An actual supervised process restart loads the pending mode, mute and BLE
+  settings. Saved BLE OFF stays OFF after switching back. A fresh real HA turn
+  then passes intent, exact microphone/output PCM and playback-drain checks.
+
+Browser clicks exercised save, Apply and switch-back in HA's actual device page;
+inspected screenshots show default, pending and Incubator states. An inspected
+pointer recording covers the same round trip. The initial recorder export was
+killed with exit 137; a fresh recording exported successfully using one encoding
+thread and is accelerated 1.82×. The first suite attempt had reached the control
+endpoint before host startup; explicit readiness waiting and the supervised
+service's `/state` health check fixed that cold-start race without relaxing mode
+assertions. The unchanged suite subsequently passed repeatedly.
+
+These checks use virtual audio/BLE and the native protocol peer, not the full
+Incubator speech/model environment, physical RF/GATT, a packaged device host or
+Sendspin. The subsequent full-stack run below covers native speech/models.
+Private settings use synced temporary-file/atomic
+rename persistence; power-loss recovery has not been qualified. Invalid saved
+configuration rejects startup rather than silently selecting a different route.
+
+## Full Incubator stack after selector implementation
+
+The actual pinned app, custom HA integration, Kaldi, shared CTC/TDT and Piper were
+installed without upstream source changes. The expanded native suite passed
+15 cases twice, with real HA selector/button calls driving both restart-bound
+directions. Common registry identity and BLE enablement remained stable; HA
+received changing virtual advertisements before Apply and after reconnection.
+
+Held real Piper output was cancelled by mute without playback/false drain or
+native reconnect; the next recognized HA intent/reply succeeded on the same
+transport. Actual native socket loss while muted reattached without unmuting or
+restarting BLE scanning. Existing election, announcement, confirmation, rejection
+and HA timer cases also passed. No further production fix was required.
+
+The first invocation exposed an Assist-test import unavailable in the separate
+native environment. The native harness now drives HA directly instead of
+importing that dependency; no lockfile expansion was needed. `make check` and
+`make lab-test` passed after stopping optional Incubator and restored normal
+Assist/unmuted/BLE-enabled state. See the [full native validation](../docs/incubator-validation.md)
+for pins, captured counts, reproduction and physical/feature limitations.
+
+## Four mute review findings fixed and revalidated
+
+The post-review implementation now revokes only native voice when muting an
+active announcement, and blocks new-call PCM until upstream `listening`.
+Pinned Incubator can retain an announcement task across socket loss; a connection
+generation alone is insufficient. The extended actual-app suite passed **16/16**,
+including old Piper audio arriving on the reconnected socket while a transparent
+proxy holds CALL_START. No old audio plays or claims drain; the next real
+recognized HA lamp turn succeeds. BLE advertisements continue with unchanged
+radio start/stop counters. Idle mute/unmute before a new announcement and HA
+duration timer also passes.
+
+The host retains effective mute separately from persisted settings on write
+failure. The actual HA selector suite now verifies failed mute rename, recovered
+storage, mode save/Apply and retained/persisted mute. Failed unmute stays muted.
+Assist purges unsent capture immediately even before RUN_START, preserving queued
+start/control order and deferring wire abort until HA can emit RUN_END.
+
+The live settings-failure probe and three deterministic public engine/outbox
+regressions failed before the fixes and pass afterward. Removing only the native
+listening gate fails its regression. The new real-service announcement test's
+first attempt did not create old PCM on the new connection: accumulated upstream
+reconnect backoff exceeded the chime drain timeout. Waiting for a real stable
+connection resets backoff and exercises the strict race without relaxing any
+assertion; the failed attempt is retained in the evidence.
+
+Final `make check`, 30 repetitions of session/native/outbox/settings race tests,
+`make lab-test` and the encrypted virtual BLE/GATT fixture suite all pass. Queue
+backlog timing is deterministic component coverage; it is not a claimed real-HA
+wire replay. Audio/detection/radio remain virtual, with the physical/feature
+limits below. Evidence: `.amp/in/orb-backup/review/` and
+[full native validation](../docs/incubator-validation.md). Optional Incubator is
+stopped; normal HA/Encore are restored to Assist, unmuted, BLE enabled. These
+results predate the local commit split described below; nothing has been pushed.
+
+## Shared mute fixes are independent of lab-only selection
+
+The changes are separated into a shared mute/cancellation/reconnect commit and a
+subsequent lab-only composition/selector commit. The first commit changes no
+production selector, lab host, settings or packaging. Its exact staged snapshot
+passed `make check` and the real HA Assist suite using the original host,
+including all five mute phases, muted reconnect and fresh intent/PCM-checked turns.
+That validation used a separately materialized index tree, not the combined host.
+
+The second commit places encrypted selector controls in the non-importable
+`cmd/encore-lab` command, not `backends/`. Its settings retain the effective-mute
+persistence latch and failed-save/Apply coverage. Production packages link only
+one voice adapter, Incubator by default; changing backend means deliberate
+application-package replacement. Lab defaults and switching evidence do not
+change that product contract or impose selector qualification on device packages.
+
+`make lab-test` runs the Assist suite; `make lab-test-modes` separately runs the
+lab selector suite. Shared BLE proxy code is unchanged by this split. Evidence
+for independent and combined-tree checks is in `.amp/in/orb-backup/split/`.
+
+After relocating controls, the combined tree passed `make check`, both real-HA
+suites, all **16/16** actual Incubator/Kaldi/CTC-TDT/Piper cases and the separate
+encrypted virtual BLE/GATT fixture suite. The selector suite now owns the
+held-playback switch scenario; the ordinary Assist suite retains mute/cancel and
+reconnect coverage. No shared core, backend or platform code is changed by the
+second commit. These are local-stack results, not package or physical-device
+qualification.
+
+## Three independent-review findings fixed and revalidated
+
+The shared commit now keeps native cancellation fenced until the adapter sends
+CALL_END and retires the voice connection. A buffered ordinary stream end cannot
+admit a new call whose state is then cleared by an old HANGUP. Stop/mute during
+announcement drain also requests cancellation instead of waiting forever for an
+already consumed terminal. Both deterministic public-engine regressions failed
+before and pass after; race-enabled session/native/outbox tests pass 30 repeats.
+The revised mute-only snapshot passes `make check` and real HA Assist with the
+original host, without the new lab composition or settings.
+
+The lab commit fences HTTP admission and mutation during retirement, closes active
+connections on graceful-shutdown timeout, and joins handlers before replacement.
+The real HA selector suite holds a body read across Apply using HTTP 100 Continue
+as admission evidence. Before the fix it received 200 from the retired handler,
+with saved mute true but the replacement unmuted. Now that request cannot succeed
+or alter settings; fresh mute/unmute affects the replacement normally.
+
+The full pinned Incubator/Kaldi/CTC-TDT/Piper/HA suite passes **16/16** after this
+change. Native CALL_END is followed by voice-only reconnect with mute retained,
+fresh recognition/intent/reply succeeds, and BLE scan counters remain unchanged.
+Idle mute/unmute still does not reconnect. Both real-HA suites and encrypted
+virtual BLE/GATT checks pass; earlier same-native-connection mute results above
+are historical. Buffered-tail and delayed Stop/drain timings are controlled
+component evidence, not real-service fault replays. Logs and before-fix failures
+are in `.amp/in/orb-backup/cancellation-fix/` and
+`.amp/in/orb-backup/http-teardown/`. No physical or package qualification is added.
 
 ## Explicitly unproven
 
 No physical capture/playback, acoustic quality, AEC, EQ, wake model, hardware mute,
 Dot/Android runtime, dashboard host, installer, updater or performance claim.
-No Assist cross-device quality arbitration, production backend-selector/common
-control surface, scheduled-alarm execution or trained host wake execution.
+No Assist cross-device quality arbitration, packaged-device selector lifecycle,
+scheduled-alarm execution or trained host wake execution.
 Experimental WAKE_WORD_AUDIO is verified only against its documented development
 pin and real Kaldi path, not optional CTC or future HA versions. Upstream verifier
 faults fail open and are not distinguishable as verification success on the normal
