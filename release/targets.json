@@ -9,6 +9,7 @@
       "platform": "linux",
       "goos": "linux",
       "goarch": "amd64",
+      "depends_on": ["platforms/linux/", "cmd/encore-lab/", "internal/lab/", "lab/"],
       "package_revision": 0,
       "release_supported": false,
       "build": "go build ./cmd/encore-lab"
@@ -17,6 +18,7 @@
       "id": "echo-dot-2",
       "status": "planned",
       "platform": "echo",
+      "depends_on": ["platforms/echo/", "devices/echo-dot-2/"],
       "package_revision": 0,
       "release_supported": false
     },
@@ -24,6 +26,7 @@
       "id": "android-generic",
       "status": "planned",
       "platform": "android",
+      "depends_on": ["platforms/android/", "devices/android-generic/"],
       "intended_first_device": "Samsung Galaxy Tab A7 Lite",
       "package_revision": 0,
       "release_supported": false

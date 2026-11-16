@@ -1,0 +1,76 @@
+name: Foundation checks
+
+on:
+  pull_request:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: foundation-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  impact:
+    name: Inventory and impact
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      affected_targets: ${{ steps.select.outputs.affected_targets }}
+      package_targets: ${{ steps.select.outputs.package_targets }}
+      lab_check: ${{ steps.select.outputs.lab_check }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - name: Test inventory and selector
+        run: python3 -m unittest discover -s release -p 'test_*.py' -v
+      - name: Validate planned package scaffold when present
+        run: |
+          if test -d devices/echo-dot-2 || test -d devices/android-generic || test -d docs/device-packages; then
+            python3 docs/device-packages/validate.py
+            python3 -m unittest discover -s docs/device-packages -p 'test_*.py' -v
+          else
+            echo '::notice::Package scaffold absent on this branch; no profile validation claimed.'
+          fi
+      - name: Select impact (missing history selects everything)
+        id: select
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: python3 release/check.py --base "$BASE" --head "$HEAD" --github-output "$GITHUB_OUTPUT"
+      - name: Refuse unsupported package builds
+        env:
+          PACKAGE_TARGETS: ${{ steps.select.outputs.package_targets }}
+        run: |
+          test "$PACKAGE_TARGETS" = '[]' || {
+            echo 'No release package builders are implemented in this foundation.' >&2
+            exit 1
+          }
+
+  lab-foundation:
+    name: Lab boundary, vet, race and build
+    needs: impact
+    if: needs.impact.outputs.lab_check == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.27.4'
+          cache: false
+      - name: Check dependency boundaries, vet and race tests
+        run: make check
+      - name: Build the virtual lab (not a device package)
+        run: go build -o "$RUNNER_TEMP/encore-lab" ./cmd/encore-lab
+      # Deliberately not make lab-test: it needs pinned HA, onboarding and
+      # Amp-supervised service restart support. See release/README.md.

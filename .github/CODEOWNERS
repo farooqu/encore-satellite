@@ -1,0 +1,36 @@
+# Review routing only. Rulesets/branch protection and security policy are external
+# configuration; CODEOWNERS neither isolates code nor guarantees all approvals.
+# @farooqu is the repository owner, not an invented community device maintainer.
+
+# Central contracts, platforms, dependencies, checks and release/security policy.
+/core/ @farooqu
+/backends/ @farooqu
+/platforms/ @farooqu
+/cmd/ @farooqu
+/internal/ @farooqu
+/go.mod @farooqu
+/go.sum @farooqu
+/go.work* @farooqu
+/Makefile @farooqu
+/tools/ @farooqu
+/build/ @farooqu
+/scripts/ @farooqu
+/.agents/ @farooqu
+/.amp/services.yaml @farooqu
+/lab/ @farooqu
+/.github/ @farooqu
+/release/ @farooqu
+/updates/ @farooqu
+/docs/foundation.md @farooqu
+/docs/device-packages/ @farooqu
+/docs/security* @farooqu
+/licenses/ @farooqu
+/ACKNOWLEDGEMENTS.md @farooqu
+/LICENSE* @farooqu
+/NOTICE* @farooqu
+/SECURITY* @farooqu
+
+# Device scopes are separate. Until real device maintainers are appointed, the
+# owner reviews these too. Privileges/installers also require central review.
+/devices/echo-dot-2/ @farooqu
+/devices/android-generic/ @farooqu
