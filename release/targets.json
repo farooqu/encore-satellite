@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "core_version": "0.1.0-dev.0",
+  "channels": ["dev", "stable"],
+  "targets": [
+    {
+      "id": "lab-linux-amd64",
+      "status": "test-fixture",
+      "platform": "linux",
+      "goos": "linux",
+      "goarch": "amd64",
+      "package_revision": 0,
+      "release_supported": false,
+      "build": "go build ./cmd/encore-lab"
+    },
+    {
+      "id": "echo-dot-2",
+      "status": "planned",
+      "platform": "echo",
+      "package_revision": 0,
+      "release_supported": false
+    },
+    {
+      "id": "android-generic",
+      "status": "planned",
+      "platform": "android",
+      "intended_first_device": "Samsung Galaxy Tab A7 Lite",
+      "package_revision": 0,
+      "release_supported": false
+    }
+  ]
+}

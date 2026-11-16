@@ -28,8 +28,13 @@ on more hardware. On displays, that also means your Home Assistant dashboard
 with a small conversation overlay. Timers, alarms, and household automations
 stay with Home Assistant or Voice Incubator.
 
-**This is still in planning.** There's nothing to install yet, and device support
-hasn't been verified.
+**Early implementation has started.** There's nothing to install on a device
+yet, and device support hasn't been verified. The first increment is a shared
+Go protocol core and a [reproducible Home Assistant lab](lab/README.md), tested
+against a pinned 2026.12 development build with virtual audio and deterministic
+speech fixtures. Native Incubator has protocol-contract tests; full upstream
+integration is not yet verified. See the [foundation scope](docs/foundation.md)
+for what works and what remains.
 
 ## Devices
 
@@ -55,6 +60,10 @@ hear from you.
 
 I intend to use a permissive license so others can build on the work. The license
 hasn't been selected yet.
+
+Encore's design and proof of concept build on Techo5, Techo5 Panel and their
+upstream foundations. [Acknowledgements](ACKNOWLEDGEMENTS.md) distinguish that
+design credit from the implementation actually included and its required notices.
 
 Encore Satellite is an independent community project, not an official Home
 Assistant or Nabu Casa product.

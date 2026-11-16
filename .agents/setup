@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$root"
+echo 'Installing Go 1.27.4 and the pinned Home Assistant lab'
+if ! dpkg-query -W -f='${Status}' libturbojpeg0 ffmpeg 2>/dev/null | grep -qv 'install ok installed' && dpkg-query -W libturbojpeg0 ffmpeg >/dev/null 2>&1; then
+  :
+else
+  sudo apt-get update -qq
+  sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq libturbojpeg0 ffmpeg
+fi
+if ! test -x "$HOME/.local/lib/go1.27.4/bin/go"; then
+  mkdir -p "$HOME/.local/lib" "$root/.amp/in/orb-backup"
+  archive="$root/.amp/in/orb-backup/go1.27.4.tar.gz"
+  curl -fsSL https://go.dev/dl/go1.27.4.linux-amd64.tar.gz -o "$archive"
+  echo "7226736c2339719cda28fbf3a54d71aa63bcefe376e98cef00034268dab24840  $archive" | sha256sum -c -
+  tar -xzf "$archive" -C "$HOME/.local/lib"
+  mv "$HOME/.local/lib/go" "$HOME/.local/lib/go1.27.4"
+fi
+mkdir -p "$HOME/.local/bin"
+ln -sfn "$HOME/.local/lib/go1.27.4/bin/go" "$HOME/.local/bin/go"
+ln -sfn "$HOME/.local/lib/go1.27.4/bin/gofmt" "$HOME/.local/bin/gofmt"
+export PATH="$HOME/.local/bin:$PATH"
+go mod download
+uv sync --project lab --locked
+lab/.venv/bin/python lab/prepare_ha.py
+echo 'Ready. Run amp orb services ensure, then lab/.venv/bin/python lab/provision.py'

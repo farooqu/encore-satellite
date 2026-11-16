@@ -1,0 +1,12 @@
+services:
+  home-assistant:
+    command: lab/run-ha
+    port: 8123
+    health: /
+    review: false
+    portal:
+      title: Encore Home Assistant lab
+      description: Isolated Home Assistant 2026.12.0.dev0 protocol lab. See lab/README.md for credentials and fixtures.
+  encore:
+    command: go run ./cmd/encore-lab
+    port: 8099

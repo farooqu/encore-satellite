@@ -1,0 +1,42 @@
+[project]
+name = "encore-protocol-lab"
+version = "0.1.0"
+requires-python = "==3.14.7"
+dependencies = [
+  "homeassistant @ https://github.com/home-assistant/core/archive/1395798e2338bd46ee522539f7281b336c44e3b8.tar.gz",
+  "home-assistant-frontend==20261028.6",
+  "aioesphomeapi==46.30.0",
+  "esphome-dashboard-api==1.4.0",
+  "bleak-esphome==4.0.0",
+  "ha-ffmpeg==3.2.2",
+  "pymicro-vad==1.0.1",
+  "pyspeex-noise==1.0.2",
+  "gazetteer-matcher==1.1.0",
+  "hassil==3.12.1",
+  "home-assistant-intents==2026.10.27",
+  "mutagen==1.48.1",
+  "numpy==2.4.4",
+  "aiodhcpwatcher==1.2.7",
+  "aiodiscover==3.3.2",
+  "aiohasupervisor==0.11.0",
+  "aiousbwatcher==1.1.2",
+  "asyncinotify==4.4.4",
+  "cached-ipaddress==1.1.2",
+  "click==8.1.8",
+  "gtts==2.5.4",
+  "infrared-protocols==10.7.0",
+  "paho-mqtt==2.1.0",
+  "pymetno==0.14.0",
+  "pyotp==2.10.0",
+  "pyqrcode==1.2.1",
+  "pyroute2==0.9.7",
+  "pyturbojpeg==1.8.3",
+  "radios==2.0.1",
+  "rf-protocols==4.3.0",
+  "scapy==2.8.0",
+  "serialx==1.15.1",
+  "xmltodict==1.0.4",
+]
+
+[tool.uv]
+environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]

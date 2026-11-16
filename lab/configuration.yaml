@@ -1,0 +1,42 @@
+homeassistant:
+  name: Encore protocol lab
+  latitude: 39.7684
+  longitude: -86.1581
+  elevation: 218
+  unit_system: us_customary
+  time_zone: America/Indiana/Indianapolis
+  country: US
+  internal_url: http://127.0.0.1:8123
+http:
+  server_host: 0.0.0.0
+  server_port: 8123
+  use_x_forwarded_for: true
+  trusted_proxies:
+    - 127.0.0.1
+    - ::1
+frontend:
+api:
+config:
+history:
+recorder:
+  purge_keep_days: 1
+zeroconf:
+assist_pipeline:
+conversation:
+stt:
+tts:
+input_boolean:
+  encore_lamp:
+    name: Encore lamp
+    initial: false
+input_select:
+  encore_scenario:
+    name: Encore speech fixture scenario
+    options: [success, stt_error, slow_stt, tts_error, short_tts]
+    initial: success
+logger:
+  default: warning
+  logs:
+    homeassistant.components.esphome: debug
+    homeassistant.components.assist_pipeline: debug
+    custom_components.encore_fixture: info

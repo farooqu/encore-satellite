@@ -1,0 +1,5 @@
+/.amp/*
+!/.amp/services.yaml
+/build/
+/lab/.venv/
+__pycache__/
