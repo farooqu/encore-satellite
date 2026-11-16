@@ -29,6 +29,15 @@ const subscribeAPIAudio uint32 = 1 << 2
 
 type Server struct {
 	Engine *session.Engine
+	// Controls shares this encrypted endpoint with voice-independent controls.
+	// Nil preserves the voice-only entity set. Keep this endpoint running when
+	// Incubator is selected; the session engine still rejects Assist voice.
+	Controls interface {
+		esphome.Handler
+		esphome.ConnCloser
+		Features() esphome.BluetoothFeature
+		Run(context.Context)
+	}
 	// ExperimentalWakeWords maps actual host model IDs to their spoken phrases.
 	// Nil keeps feature bits exactly 7. Configure only hosts that supply real
 	// contiguous wake pre-roll; compatibility is pinned in wake_audio.go.
@@ -67,6 +76,15 @@ func (s *Server) Serve(ctx context.Context, listener net.Listener, info esphome.
 		s.activeWakeWords = append(s.activeWakeWords, id)
 	}
 	info.ESPHomeVersion = "2026.10.1" // Pinned generated schema, not a firmware identity.
+	info.BluetoothFeatures = 0        // Never inherit unsupported caller claims.
+	if s.Controls != nil {
+		ctxWithControls, cancel := context.WithCancel(ctx)
+		ctx = ctxWithControls
+		done := make(chan struct{})
+		go func() { defer close(done); s.Controls.Run(ctx) }()
+		defer func() { cancel(); <-done }()
+		info.BluetoothFeatures = s.Controls.Features()
+	}
 	server := esphome.Server{Info: info, PSK: &key, Handler: s, WriteTimeout: 2 * time.Second}
 	return server.Serve(ctx, listener)
 }
@@ -78,7 +96,15 @@ func (s *Server) trace(kind string, data map[string]string) {
 }
 
 func (s *Server) Handle(ctx context.Context, c *esphome.Conn, message proto.Message) error {
+	if s.Controls != nil {
+		if err := s.Controls.Handle(ctx, c, message); err != nil {
+			return err
+		}
+	}
 	if _, ok := message.(*api.ListEntitiesRequest); ok {
+		if s.Controls != nil {
+			return nil
+		}
 		// The satellite is negotiated through DeviceInfo, not a fake entity.
 		return c.Send(&api.ListEntitiesDoneResponse{})
 	}
@@ -101,7 +127,7 @@ func (s *Server) Handle(ctx context.Context, c *esphome.Conn, message proto.Mess
 				link.closeTransport.Store(false)
 			}
 			s.mu.Unlock()
-			s.ConnClosed(c)
+			s.voiceClosed(c)
 			if link != nil {
 				<-link.done
 				if !link.closeTransport.Load() {
@@ -246,6 +272,13 @@ func (s *Server) Handle(ctx context.Context, c *esphome.Conn, message proto.Mess
 }
 
 func (s *Server) ConnClosed(c *esphome.Conn) {
+	if s.Controls != nil {
+		s.Controls.ConnClosed(c)
+	}
+	s.voiceClosed(c)
+}
+
+func (s *Server) voiceClosed(c *esphome.Conn) {
 	s.mu.Lock()
 	link := s.connections[c]
 	delete(s.connections, c)

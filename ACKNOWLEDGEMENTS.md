@@ -30,6 +30,17 @@ Encore assistant. No Kiosk Satellite application code or assets are included.
   Its MIT copyright/permission text is retained in `licenses/Techo5-MIT.txt`.
   The complete inspected Techo5 NOTICE is retained as historical provenance at
   `licenses/Techo5-NOTICE.txt`, **not as an inventory of Encore's shipped code**.
+- Bluetooth work also inspects [Techo5 Dot](https://github.com/farooqu/techo5-dot)
+  at `b2a50c74bbe8b34785748574aa39fbd045fc4e46`. `cmd/btbridge` and its tests,
+  `platforms/linuxble/bluez` GATT client/peripheral code, and `core/improv/protocol.go`
+  reuse MIT Techo5 code at the Techo5 pin above; HCI framing and proxy UUID/flag
+  conversions adapt small parts of that source. `licenses/Techo5-MIT.txt` applies
+  to these portions too. Kernel/firmware research is not kernel/firmware inclusion.
+- `github.com/godbus/dbus/v5` supplies D-Bus transport under its BSD-2-Clause
+  license in the pinned module source. BlueZ and Linux are separate system
+  components with their own licenses; no BlueZ C code or kernel binaries are
+  included in the Go runtime. Any device image must carry its own complete
+  kernel/module/firmware/system-package source and license compliance inventory.
 - `github.com/ygelfand/go-esphome-device` is a pinned MIT Go dependency for the
   native API, Noise transport and mDNS. It and transitive modules remain under
   their own licenses supplied with their source; `go.mod`/`go.sum` identify the
