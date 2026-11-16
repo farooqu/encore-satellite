@@ -37,6 +37,7 @@ type Proxy struct {
 	modeSwitch bool
 	links      *connections
 	switchKey  uint32
+	states     map[*esphome.Conn]struct{}
 }
 
 // Options holds host integration, not separate user switches. Enabled is the
@@ -60,7 +61,7 @@ func New(scanner ble.Scanner, options Options) *Proxy {
 	sw := &esphome.Switch{Base: esphome.Base{ObjectID: "bluetooth_proxy"}}
 	b := &Proxy{scanner: scanner, wake: make(chan struct{}, 1), enabled: options.Enabled,
 		save: options.SaveEnabled, central: options.OpenCentral, pairing: options.Pairing,
-		modeSwitch: options.ModeSwitch, switchKey: sw.Key()}
+		modeSwitch: options.ModeSwitch, switchKey: sw.Key(), states: make(map[*esphome.Conn]struct{})}
 	b.links = newConnections(b)
 	return b
 }
@@ -170,6 +171,9 @@ func (b *Proxy) handle(c *esphome.Conn, msg proto.Message) (bool, error) {
 }
 
 func (b *Proxy) ConnClosed(c *esphome.Conn) {
+	b.mu.Lock()
+	delete(b.states, c)
+	b.mu.Unlock()
 	b.closed(c)
 	b.links.closed(c)
 }

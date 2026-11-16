@@ -24,6 +24,7 @@ type request struct {
 	conn       *esphome.Conn
 	msg        proto.Message
 	generation uint64
+	cancelled  bool // Protected by connections.mu, including while queued.
 }
 type event struct {
 	address string
@@ -37,19 +38,26 @@ type event struct {
 // slot before disconnect has finished. Cancelling a lease fences queued ops,
 // in-flight connects and notification callbacks before a new owner starts.
 type connections struct {
-	b          *Proxy
-	mu         sync.Mutex
-	owner      *esphome.Conn
-	subscriber *esphome.Conn
-	cancel     context.CancelFunc
-	opCancel   context.CancelFunc
-	opAddress  uint64
-	generation uint64
-	requests   chan request
+	b            *Proxy
+	mu           sync.Mutex
+	owner        *esphome.Conn
+	subscriber   *esphome.Conn
+	cancel       context.CancelFunc
+	failed       bool // Unconfirmed cleanup requires host/controller recovery.
+	opCancel     context.CancelFunc
+	opAddress    uint64
+	opDisconnect bool
+	opGeneration uint64
+	generation   uint64
+	requests     chan *request
+	pending      map[*request]struct{}
+	disconnects  map[uint64]*request
+	wake         chan struct{}
 }
 
 func newConnections(b *Proxy) *connections {
-	return &connections{b: b, requests: make(chan request, 32)}
+	return &connections{b: b, requests: make(chan *request, 32), pending: make(map[*request]struct{}),
+		disconnects: make(map[uint64]*request), wake: make(chan struct{}, 1)}
 }
 
 func handles(msg proto.Message) bool {
@@ -69,6 +77,9 @@ func refuse(c *esphome.Conn, msg proto.Message) error {
 		return c.Send(&api.BluetoothConnectionsFreeResponse{})
 	case *api.BluetoothDeviceRequest:
 		switch m.RequestType {
+		case api.BluetoothDeviceRequestType_BLUETOOTH_DEVICE_REQUEST_TYPE_DISCONNECT:
+			// HA accepts Connected=false as cleanup even with an error.
+			return c.Send(&api.BluetoothDeviceConnectionResponse{Address: m.Address, Connected: true, Error: noResources})
 		case api.BluetoothDeviceRequestType_BLUETOOTH_DEVICE_REQUEST_TYPE_PAIR:
 			return c.Send(&api.BluetoothDevicePairingResponse{Address: m.Address, Error: noResources})
 		case api.BluetoothDeviceRequestType_BLUETOOTH_DEVICE_REQUEST_TYPE_UNPAIR:
@@ -89,31 +100,99 @@ func refuse(c *esphome.Conn, msg proto.Message) error {
 }
 
 func (l *connections) handle(c *esphome.Conn, msg proto.Message) error {
-	if _, ok := msg.(*api.SubscribeBluetoothConnectionsFreeRequest); ok {
-		l.mu.Lock()
-		l.subscriber = c
-		l.mu.Unlock()
-	}
-	if !l.b.enabledNow() || l.b.central == nil {
-		return refuse(c, msg)
-	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.owner != nil && l.owner != c {
 		return refuse(c, msg)
 	}
+	if _, ok := msg.(*api.SubscribeBluetoothConnectionsFreeRequest); ok {
+		l.subscriber = c
+	}
+	if l.failed {
+		return refuse(c, msg)
+	}
+	if !l.b.enabledNow() || l.b.central == nil {
+		if m, ok := msg.(*api.BluetoothDeviceRequest); ok && m.RequestType == api.BluetoothDeviceRequestType_BLUETOOTH_DEVICE_REQUEST_TYPE_DISCONNECT && l.cancel == nil {
+			// OFF cleanup is idempotent only once the central has closed.
+			return c.Send(&api.BluetoothDeviceConnectionResponse{Address: m.Address})
+		}
+		return refuse(c, msg)
+	}
 	if l.owner == nil {
 		l.owner = c
 	}
-	if m, ok := msg.(*api.BluetoothDeviceRequest); ok && m.RequestType == api.BluetoothDeviceRequestType_BLUETOOTH_DEVICE_REQUEST_TYPE_DISCONNECT && l.opCancel != nil && l.opAddress == m.Address {
-		l.opCancel() // Do not queue a disconnect behind the connect it cancels.
+	if m, ok := msg.(*api.BluetoothDeviceRequest); ok && m.RequestType == api.BluetoothDeviceRequestType_BLUETOOTH_DEVICE_REQUEST_TYPE_DISCONNECT {
+		// A client can cancel before its connect reaches the worker. Fence
+		// queued operations too, or that abandoned connect starts afterwards.
+		for r := range l.pending {
+			if address, ok := r.msg.(interface{ GetAddress() uint64 }); ok && address.GetAddress() == m.Address && r.conn == c && r.generation == l.generation {
+				r.cancelled = true
+			}
+		}
+		// The disconnect response also terminates cancelled queued calls.
+		// Remove them now: a refusal after that response could match a new
+		// same-address call, since the protocol has no request identifiers.
+		for remaining := len(l.requests); remaining > 0; remaining-- {
+			r := <-l.requests
+			if r.cancelled {
+				delete(l.pending, r)
+			} else {
+				l.requests <- r
+			}
+		}
+		if l.opDisconnect && l.opAddress == m.Address && l.opGeneration == l.generation {
+			return nil // Coalesce only this generation's active cleanup.
+		}
+		// Cleanup cannot depend on room in the ordinary request queue.
+		// Coalesce repeated disconnects, with room for every queued address,
+		// the active operation and the established links. Excess unknown
+		// addresses close the API connection (and its lease), never send a
+		// false disconnected response for a link we have not removed.
+		if _, exists := l.disconnects[m.Address]; !exists && len(l.disconnects) >= cap(l.requests)+slots+1 {
+			return errors.New("bluetooth: too many pending disconnects")
+		}
+		l.disconnects[m.Address] = &request{conn: c, msg: proto.Clone(m), generation: l.generation}
+		if l.opCancel != nil {
+			l.opCancel() // Cleanup preempts ordinary work, even at another address.
+		}
+	} else {
+		r := &request{conn: c, msg: proto.Clone(msg), generation: l.generation}
+		select {
+		case l.requests <- r:
+			l.pending[r] = struct{}{}
+		default:
+			return refuse(c, msg)
+		}
 	}
 	select {
-	case l.requests <- request{c, proto.Clone(msg), l.generation}:
-		return nil
+	case l.wake <- struct{}{}:
 	default:
-		return refuse(c, msg)
 	}
+	return nil
+}
+
+func (l *connections) takeRequest() *request {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var r *request
+	for address, disconnect := range l.disconnects {
+		delete(l.disconnects, address)
+		r = disconnect
+		break
+	}
+	if r == nil {
+		select {
+		case r = <-l.requests:
+		default:
+		}
+	}
+	if len(l.disconnects) > 0 || len(l.requests) > 0 {
+		select {
+		case l.wake <- struct{}{}:
+		default:
+		}
+	}
+	return r
 }
 
 func (l *connections) stop() {
@@ -121,6 +200,7 @@ func (l *connections) stop() {
 	defer l.mu.Unlock()
 	l.generation++
 	l.owner = nil
+	clear(l.disconnects)
 	if l.cancel != nil {
 		l.cancel()
 	}
@@ -135,6 +215,7 @@ func (l *connections) closed(c *esphome.Conn) {
 	if l.owner == c {
 		l.generation++
 		l.owner = nil
+		clear(l.disconnects)
 		if l.cancel != nil {
 			l.cancel()
 		}
@@ -151,12 +232,13 @@ func (l *connections) refresh() {
 }
 
 // Invalidate only this lease: late callbacks must never cancel a newer owner.
-func (l *connections) expire(first request) {
+func (l *connections) expire(first *request) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.generation == first.generation && l.owner == first.conn {
 		l.generation++
 		l.owner = nil
+		clear(l.disconnects)
 		if l.cancel != nil {
 			l.cancel()
 		}
@@ -169,31 +251,48 @@ func (l *connections) run(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		var first request
+		var first *request
 		if pending != nil {
-			first, pending = *pending, nil
-		} else {
+			first, pending = pending, nil
+		} else if first = l.takeRequest(); first == nil {
 			select {
 			case <-ctx.Done():
 				return
-			case first = <-l.requests:
+			case <-l.wake:
+				continue
 			}
 		}
 		l.mu.Lock()
-		if first.generation != l.generation || first.conn != l.owner {
+		if l.failed || first.generation != l.generation || first.conn != l.owner {
+			delete(l.pending, first)
 			l.mu.Unlock()
 			_ = refuse(first.conn, first.msg)
 			continue
 		}
+		// Priority cleanup can overtake old ordinary requests. Finish their
+		// replies before publishing any successor lease's availability.
+		var stale []*request
+		for remaining := len(l.requests); remaining > 0; remaining-- {
+			r := <-l.requests
+			if r.generation < first.generation {
+				delete(l.pending, r)
+				stale = append(stale, r)
+			} else {
+				l.requests <- r
+			}
+		}
 		lease, cancel := context.WithCancel(ctx)
 		l.cancel = cancel
 		l.mu.Unlock()
+		for _, r := range stale {
+			_ = refuse(r.conn, r.msg)
+		}
 		pending = l.lease(lease, cancel, first)
 		cancel()
 	}
 }
 
-func (l *connections) lease(ctx context.Context, cancel context.CancelFunc, first request) *request {
+func (l *connections) lease(ctx context.Context, cancel context.CancelFunc, first *request) *request {
 	c := first.conn
 	defer l.expire(first)
 	events := make(chan event, 64)
@@ -216,13 +315,30 @@ func (l *connections) lease(ctx context.Context, cancel context.CancelFunc, firs
 		push(event{address: a, handle: h, data: append([]byte(nil), d...)})
 	}, func(a string) { push(event{address: a, lost: true}) })
 	if err != nil {
+		l.mu.Lock()
+		delete(l.pending, first)
+		l.cancel = nil
+		l.mu.Unlock()
 		_ = refuse(c, first.msg)
 		return nil
 	}
 	peers := map[uint64]uint32{}
 	defer func() {
 		cancel()
-		_ = ct.Close()
+		err := ct.Close()
+		l.mu.Lock()
+		if err == nil {
+			l.cancel = nil
+		} else {
+			l.failed = true
+		}
+		l.mu.Unlock()
+		if err != nil {
+			// Lost transport is not a claim that controller links closed.
+			_ = c.Send(&api.BluetoothConnectionsFreeResponse{})
+			_ = c.Close()
+			return
+		}
 		for a := range peers {
 			_ = c.Send(&api.BluetoothDeviceConnectionResponse{Address: a})
 		}
@@ -235,7 +351,12 @@ func (l *connections) lease(ctx context.Context, cancel context.CancelFunc, firs
 		}
 		return c.Send(r)
 	}
-	process := func(r request) error {
+	process := func(r *request) error {
+		defer func() {
+			l.mu.Lock()
+			delete(l.pending, r)
+			l.mu.Unlock()
+		}()
 		if r.generation != first.generation || r.conn != c || ctx.Err() != nil || !l.b.enabledNow() {
 			return refuse(r.conn, r.msg)
 		}
@@ -245,12 +366,27 @@ func (l *connections) lease(ctx context.Context, cancel context.CancelFunc, firs
 		opCtx, done := context.WithTimeout(ctx, 30*time.Second)
 		defer done()
 		l.mu.Lock()
+		if r.cancelled {
+			l.mu.Unlock()
+			return refuse(r.conn, r.msg)
+		}
 		l.opAddress = r.msg.(interface{ GetAddress() uint64 }).GetAddress()
 		l.opCancel = done
+		l.opGeneration = r.generation
+		device, ok := r.msg.(*api.BluetoothDeviceRequest)
+		l.opDisconnect = ok && device.RequestType == api.BluetoothDeviceRequestType_BLUETOOTH_DEVICE_REQUEST_TYPE_DISCONNECT
+		if l.opDisconnect {
+			// Repeated cleanup requests must not interrupt cleanup already
+			// in progress. Lease cancellation still cancels opCtx on OFF.
+			l.opCancel = nil
+		} else if len(l.disconnects) != 0 {
+			done() // Cleanup may arrive between dequeue and installing opCancel.
+		}
 		l.mu.Unlock()
 		defer func() {
 			l.mu.Lock()
 			l.opCancel = nil
+			l.opDisconnect = false
 			l.mu.Unlock()
 		}()
 		err := l.operation(opCtx, ct, c, peers, r.msg)
@@ -263,18 +399,17 @@ func (l *connections) lease(ctx context.Context, cancel context.CancelFunc, firs
 		return nil
 	}
 	for {
+		if ctx.Err() != nil {
+			return nil
+		}
+		var r *request
 		select {
 		case <-ctx.Done():
 			return nil
-		case r := <-l.requests:
-			if r.generation != first.generation || r.conn != c {
-				// A rapid OFF/ON or reconnect can queue a fresh lease while
-				// this one unwinds. Preserve it until cleanup has finished.
-				return &r
-			}
-			if err := process(r); err != nil {
-				_ = c.Close()
-				return nil
+		case <-l.wake:
+			r = l.takeRequest()
+			if r == nil {
+				continue
 			}
 		case e := <-events:
 			if ctx.Err() != nil {
@@ -300,6 +435,22 @@ func (l *connections) lease(ctx context.Context, cancel context.CancelFunc, firs
 					return nil
 				}
 			}
+			continue
+		}
+		if r.generation < first.generation {
+			// Priority cleanup can overtake stale ordinary requests. Their
+			// old lease is already closed; do not expire this newer one.
+			_ = process(r)
+			continue
+		}
+		if r.generation != first.generation || r.conn != c {
+			// A rapid OFF/ON or reconnect can queue a fresh lease while
+			// this one unwinds. Preserve it until cleanup has finished.
+			return r
+		}
+		if err := process(r); err != nil {
+			_ = c.Close()
+			return nil
 		}
 	}
 }
@@ -330,6 +481,11 @@ func (l *connections) operation(ctx context.Context, ct ble.Central, c *esphome.
 			return c.Send(&api.BluetoothDeviceConnectionResponse{Address: a, Connected: true, Mtu: uint32(mtu)})
 		case api.BluetoothDeviceRequestType_BLUETOOTH_DEVICE_REQUEST_TYPE_DISCONNECT:
 			err := ct.Disconnect(ctx, addr)
+			// Retire coalescing atomically with the terminal response. A
+			// retry after that response needs its own acknowledgement.
+			l.mu.Lock()
+			defer l.mu.Unlock()
+			l.opDisconnect = false
 			if err != nil {
 				return c.Send(&api.BluetoothDeviceConnectionResponse{Address: a, Connected: true, Mtu: peers[a], Error: gattError})
 			}
@@ -416,11 +572,8 @@ func (l *connections) operation(ctx context.Context, ct ble.Central, c *esphome.
 		err = ct.Notify(ctx, addr, uint16(handle), m.Enable)
 		reply = &api.BluetoothGATTNotifyResponse{Address: a, Handle: handle}
 	}
-	if err != nil {
+	if err != nil || ctx.Err() != nil {
 		return c.Send(&api.BluetoothGATTErrorResponse{Address: a, Handle: handle, Error: gattError})
-	}
-	if ctx.Err() != nil {
-		return nil
 	}
 	return c.Send(reply)
 }

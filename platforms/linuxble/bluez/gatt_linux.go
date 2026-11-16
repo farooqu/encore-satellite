@@ -121,15 +121,16 @@ func (c *Central) Close() error {
 		addrs = append(addrs, a)
 	}
 	c.mu.Unlock()
+	var err error
 	for _, a := range addrs {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		_ = c.Disconnect(ctx, a)
+		err = errors.Join(err, c.Disconnect(ctx, a))
 		cancel()
 	}
 	if c.stop != nil {
 		c.stop()
 	}
-	return c.conn.Close()
+	return errors.Join(err, c.conn.Close())
 }
 
 func (c *Central) objects() (map[dbus.ObjectPath]map[string]map[string]dbus.Variant, error) {

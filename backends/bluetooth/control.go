@@ -40,7 +40,10 @@ func (b *Proxy) control(c *esphome.Conn, msg proto.Message) (bool, error) {
 		}
 		return true, c.Send(&api.ListEntitiesDoneResponse{})
 	case *api.SubscribeStatesRequest:
+		b.controlMu.Lock()
+		defer b.controlMu.Unlock()
 		b.mu.Lock()
+		b.states[c] = struct{}{}
 		enabled := b.enabled
 		b.mu.Unlock()
 		return true, c.Send(&api.SwitchStateResponse{Key: b.switchKey, State: enabled})
@@ -63,14 +66,25 @@ func (b *Proxy) control(c *esphome.Conn, msg proto.Message) (bool, error) {
 			b.enabled = m.State
 			b.changed()
 		}
+		clients := make([]*esphome.Conn, 0, len(b.states)+1)
+		for peer := range b.states {
+			if peer != c {
+				clients = append(clients, peer)
+			}
+		}
 		b.mu.Unlock()
 		if !m.State {
 			b.links.stop()
 		}
-		if err := c.Send(&api.SwitchStateResponse{Key: b.switchKey, State: m.State}); err != nil {
-			return true, err
+		// A control-only client must not claim the radio lease or replace its
+		// slot subscriber. Publish to state observers independently of GATT.
+		b.links.refresh()
+		for _, peer := range clients {
+			if err := peer.Send(&api.SwitchStateResponse{Key: b.switchKey, State: m.State}); err != nil {
+				_ = peer.Close()
+			}
 		}
-		return true, b.links.handle(c, &api.SubscribeBluetoothConnectionsFreeRequest{})
+		return true, c.Send(&api.SwitchStateResponse{Key: b.switchKey, State: m.State})
 	}
 	return false, nil
 }

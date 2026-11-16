@@ -27,11 +27,32 @@ with the proxy OFF; forwarding advertisements does not provision Wi-Fi.
   agent is installed. Unpair refuses paired audio/phone peers. Bond keys remain
   BlueZ's responsibility, not the ESPHome Noise PSK's.
 - Proxy resources are bounded: one scan worker, 64-report queue, batches of
-  16/250 ms, one GATT worker, 32 queued requests, 64 queued notifications,
-  three connection slots and at most 32 BlueZ notification subscriptions.
+  16/250 ms, one GATT worker, 32 ordinary queued requests, 36 coalesced
+  disconnect addresses, 64 queued notifications, three connection slots and
+  at most 32 BlueZ notification subscriptions.
   GATT operations have a 30-second context; D-Bus calls have a five-second
-  maximum and HCI commands two seconds. A disconnect cancels an in-flight
-  operation rather than waiting behind the connect it cancels. Notification
+  maximum and HCI commands two seconds. A disconnect cancels earlier queued
+  calls for its address and preempts ordinary in-flight work even at another
+  address. Repeated disconnects coalesce only within the same lease generation
+  and never cancel active disconnect cleanup; OFF or client loss still cancels
+  the lease.
+  Cancelled queued calls are removed before the disconnect response, so their
+  late replies cannot be mistaken for a subsequent same-address retry.
+  Older-generation replies finish before successor slot availability; active
+  cleanup stops coalescing atomically with its terminal response. Preempted
+  GATT calls receive an error even if controller success races cancellation.
+  Cleanup is serviced ahead of ordinary work even when its queue is full;
+  repeated disconnects for one address coalesce. Excess distinct disconnect
+  addresses close the API connection and its lease rather than falsely report
+  cleanup. Rejected disconnects never publish a disconnected acknowledgement.
+  OFF disconnect is idempotent after confirmed central cleanup, including on
+  first boot without opening a radio. Failed central cleanup closes the old API
+  client without claiming disconnection and fences further active GATT leases
+  at zero slots until the host recovers the controller and recreates the proxy.
+  OFF/ON or API reconnect alone does not clear that fault. Encrypted switch
+  controls remain available; BlueZ propagates individual disconnect failures.
+  A control-only client never takes another client's GATT lease or slot
+  subscription; persisted switch changes reach every state subscriber. Notification
   overflow cancels/fences that lease rather than silently losing link state.
   No audio/session locks are held for radio I/O.
 
@@ -173,25 +194,47 @@ independently of the optional proxy, before voice/proxy on first boot:
 
 `make check` runs dependency boundaries, vet and the race-enabled Go suite. Tests
 exercise H4 framing with a socketpair controller emulator, asymmetric multiple
-raw reports, cancellation/scan disable, malformed batches, actual private D-Bus
-GATT read/write/notification and scoped pairing-agent calls, and Improv physical
-authorization, expiry, fragmented Wi-Fi, retry/error/result and offer timeout.
+raw reports, cancellation/scan disable, malformed batches, private D-Bus GATT
+read/write/descriptors/notification, cached-handle reconnect and scoped pairing
+agent calls. Improv covers authorization, expiry, fragmented Wi-Fi,
+retry/error/result and offer timeout, including first-boot provisioning over
+D-Bus without starting a proxy or voice backend. Peripheral reads and managed
+objects retain immutable values while notifications update them. The bus daemon
+is real, but the exported BlueZ adapter/device objects are test fixtures, not
+bluetoothd or a kernel controller.
 The private-bus tests skip only when `dbus-daemon` is not installed.
 
-Run the existing lab's pinned Python environment (aioesphomeapi 46.30.0):
+Use the lab's pinned Python environment (`.agents/setup` installs it):
+aioesphomeapi 46.30.0, bleak-esphome 4.0.0, and the HA development revision
+documented in `lab/README.md`.
 
 ```sh
+mkdir -p .amp/in/orb-backup
 go build -race -o .amp/in/orb-backup/ble-fixture ./lab/bluetooth/satellite
 lab/.venv/bin/python lab/test_bluetooth.py .amp/in/orb-backup/ble-fixture
+lab/.venv/bin/python lab/test_bluetooth_ha.py .amp/in/orb-backup/ble-fixture
 ```
 
 This runs real Noise/protobuf against a **virtual** radio: wrong-key rejection,
 default OFF/no radio, one switch, exact raw bytes/address/RSSI, asymmetric
 UUID/ATT handles, GATT read/write/descriptors/notifications/error, pair/unpair
-response ordering, three-slot limit, in-flight connect cancellation, pause/resume,
-OFF traffic stop, process-restart persistence and failed-save atomicity. It does
-not replace a full HA integration or actual BlueZ/RF bonding test. It contacts
-only ephemeral loopback fixture listeners and does not modify production HA.
+response ordering, three-slot limit, active/queued connect cancellation,
+same-address retry after cancellation, disconnect under queue saturation with
+unrelated-operation preemption and another connected peer preserved, 64 retries
+during delayed cleanup, delayed OFF/ON and successor-client generation handoffs,
+stale slot-refresh ordering, preempted-read terminal errors, failed central
+cleanup with no false acknowledgement or successor lease, disconnect overflow,
+pause/resume, OFF traffic stop, rapid toggles,
+process-restart persistence and failed-save atomicity.
+
+The second suite boots disposable HA and exercises its actual ESPHome config
+flow, single default-OFF switch, raw-advertisement parsing, multi-source Bleak
+routing, CCCD notifications, cached-service reconnect, competing client
+rejection, ATT handle/value limits, OFF disconnect, pause/resume, failed-save
+isolation and config-entry unload/reload. Controls work with no voice backend.
+Both suites contact only ephemeral loopback listeners and do not modify
+production HA. Their GATT peer and pairing outcomes are virtual; neither suite
+qualifies BlueZ/RF bonding or changed-service cache invalidation on a real peer.
 
 Before supported-device release, test the exact kernel/base on a physical Dot:
 phone/browser first-boot Improv with proxy OFF (physical authorization, expired

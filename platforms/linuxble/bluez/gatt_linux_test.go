@@ -7,6 +7,7 @@ package bluez
 import (
 	"bytes"
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -114,13 +115,20 @@ func (m *testAgentManager) RegisterAgent(path dbus.ObjectPath, capability string
 }
 
 type testDevice struct {
-	agent *testAgentManager
-	path  dbus.ObjectPath
-	props *prop.Properties
+	agent          *testAgentManager
+	path           dbus.ObjectPath
+	props          *prop.Properties
+	failDisconnect atomic.Bool
 }
 
-func (*testDevice) Connect() *dbus.Error { return nil }
+func (d *testDevice) Connect() *dbus.Error {
+	d.props.SetMust(deviceIfc, "Connected", true)
+	return nil
+}
 func (d *testDevice) Disconnect() *dbus.Error {
+	if d.failDisconnect.Load() {
+		return dbus.NewError("org.bluez.Error.Failed", []any{"fixture disconnect failure"})
+	}
 	d.props.SetMust(deviceIfc, "Connected", false)
 	return nil
 }
@@ -144,6 +152,27 @@ func (c *testCharacteristic) WriteValue(b []byte, _ map[string]dbus.Variant) *db
 func (*testCharacteristic) StartNotify() *dbus.Error { return nil }
 func (*testCharacteristic) StopNotify() *dbus.Error  { return nil }
 
+type testDescriptor struct{ props *prop.Properties }
+
+func (d *testDescriptor) ReadValue(map[string]dbus.Variant) ([]byte, *dbus.Error) {
+	v, err := d.props.Get(gattDescIfc, "Value")
+	if err != nil {
+		return nil, err
+	}
+	return v.Value().([]byte), nil
+}
+func (d *testDescriptor) WriteValue(b []byte, _ map[string]dbus.Variant) *dbus.Error {
+	d.props.SetMust(gattDescIfc, "Value", b)
+	return nil
+}
+
+type testCentralAdapter struct{ removed chan dbus.ObjectPath }
+
+func (a *testCentralAdapter) RemoveDevice(path dbus.ObjectPath) *dbus.Error {
+	a.removed <- path
+	return nil
+}
+
 func TestCentralGATTAndScopedPairingOverDBus(t *testing.T) {
 	addr := privateBus(t)
 	t.Setenv("DBUS_SYSTEM_BUS_ADDRESS", addr)
@@ -153,11 +182,13 @@ func TestCentralGATTAndScopedPairingOverDBus(t *testing.T) {
 	}
 	dev := dbus.ObjectPath("/org/bluez/hci0/dev_C0_FF_EE_12_34_56")
 	char := dev + "/service0010/char0013"
+	desc := char + "/desc0019"
 	objects := map[dbus.ObjectPath]map[string]map[string]dbus.Variant{
 		"/org/bluez/hci0":    {adapterIfc: {}},
 		dev:                  {deviceIfc: {"Address": dbus.MakeVariant("C0:FF:EE:12:34:56"), "Connected": dbus.MakeVariant(true), "ServicesResolved": dbus.MakeVariant(true)}},
 		dev + "/service0010": {gattServiceIfc: {"UUID": dbus.MakeVariant("0000180f-0000-1000-8000-00805f9b34fb")}},
 		char:                 {gattCharIfc: {"UUID": dbus.MakeVariant("00002a19-0000-1000-8000-00805f9b34fb"), "Flags": dbus.MakeVariant([]string{"read", "write", "notify"})}},
+		desc:                 {gattDescIfc: {"UUID": dbus.MakeVariant("00002901-0000-1000-8000-00805f9b34fb")}},
 	}
 	if err := server.Export(testObjects{objects}, "/", objMgrIfc); err != nil {
 		t.Fatal(err)
@@ -166,11 +197,16 @@ func TestCentralGATTAndScopedPairingOverDBus(t *testing.T) {
 	if err := server.Export(m, "/org/bluez", "org.bluez.AgentManager1"); err != nil {
 		t.Fatal(err)
 	}
-	dp, err := prop.Export(server, dev, prop.Map{deviceIfc: {"Address": ro("C0:FF:EE:12:34:56"), "Connected": {Value: true, Emit: prop.EmitTrue}, "ServicesResolved": ro(true), "Trusted": {Value: false, Writable: true}}})
+	a := &testCentralAdapter{removed: make(chan dbus.ObjectPath, 1)}
+	if err := server.Export(a, "/org/bluez/hci0", adapterIfc); err != nil {
+		t.Fatal(err)
+	}
+	dp, err := prop.Export(server, dev, prop.Map{deviceIfc: {"Address": ro("C0:FF:EE:12:34:56"), "Connected": {Value: true, Emit: prop.EmitTrue}, "ServicesResolved": ro(true), "Trusted": {Value: false, Writable: true}, "Paired": {Value: false}, "Icon": {Value: ""}}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := server.Export(&testDevice{m, dev, dp}, dev, deviceIfc); err != nil {
+	device := &testDevice{agent: m, path: dev, props: dp}
+	if err := server.Export(device, dev, deviceIfc); err != nil {
 		t.Fatal(err)
 	}
 	cp, err := prop.Export(server, char, prop.Map{gattCharIfc: {"Value": {Value: []byte{}, Emit: prop.EmitTrue}, "MTU": ro(uint16(61))}})
@@ -178,6 +214,13 @@ func TestCentralGATTAndScopedPairingOverDBus(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := server.Export(&testCharacteristic{cp}, char, gattCharIfc); err != nil {
+		t.Fatal(err)
+	}
+	descProps, err := prop.Export(server, desc, prop.Map{gattDescIfc: {"Value": {Value: []byte("description")}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := server.Export(&testDescriptor{descProps}, desc, gattDescIfc); err != nil {
 		t.Fatal(err)
 	}
 	values := make(chan []byte, 2)
@@ -205,6 +248,17 @@ func TestCentralGATTAndScopedPairingOverDBus(t *testing.T) {
 	if err != nil || !bytes.Equal(b, []byte{0x27, 0xe1, 0x82}) {
 		t.Fatalf("read=%x err=%v", b, err)
 	}
+	b, err = c.Read(ctx, "C0:FF:EE:12:34:56", 0x19)
+	if err != nil || string(b) != "description" {
+		t.Fatalf("descriptor read=%q err=%v", b, err)
+	}
+	if err := c.Write(ctx, "C0:FF:EE:12:34:56", 0x19, []byte("changed description"), true); err != nil {
+		t.Fatal(err)
+	}
+	b, err = c.Read(ctx, "C0:FF:EE:12:34:56", 0x19)
+	if err != nil || string(b) != "changed description" {
+		t.Fatalf("descriptor after write=%q err=%v", b, err)
+	}
 	if err := c.Notify(ctx, "C0:FF:EE:12:34:56", 0x14, true); err != nil {
 		t.Fatal(err)
 	}
@@ -227,15 +281,56 @@ func TestCentralGATTAndScopedPairingOverDBus(t *testing.T) {
 	for _, call := range []struct {
 		method string
 		args   []any
-	}{{"RequestAuthorization", []any{dev}}, {"RequestConfirmation", []any{dev, uint32(123456)}}} {
+	}{{"RequestAuthorization", []any{dev}}, {"RequestConfirmation", []any{dev, uint32(123456)}}, {"RequestPinCode", []any{dev}}, {"RequestPasskey", []any{dev}}} {
 		if err := server.Object(string(m.sender), m.path).Call(agentIfc+"."+call.method, 0, call.args...).Err; err == nil {
 			t.Fatalf("unrequested %s accepted", call.method)
 		}
 	}
+	dp.SetMust(deviceIfc, "Paired", true)
+	dp.SetMust(deviceIfc, "Icon", "phone")
+	if err := c.Unpair(ctx, "C0:FF:EE:12:34:56"); err == nil || !c.Connected("C0:FF:EE:12:34:56") {
+		t.Fatal("unpair did not protect the device's paired phone")
+	}
+	select {
+	case <-a.removed:
+		t.Fatal("protected phone was removed")
+	default:
+	}
+	dp.SetMust(deviceIfc, "Icon", "")
 	if err := c.Disconnect(ctx, "C0:FF:EE:12:34:56"); err != nil {
 		t.Fatal(err)
 	}
 	if c.Connected("C0:FF:EE:12:34:56") {
 		t.Fatal("disconnected link retained")
+	}
+	if _, err := c.Connect(ctx, "C0:FF:EE:12:34:56", true); err != nil {
+		t.Fatal(err)
+	}
+	// A remote-cache client does not ask for services on its new connection.
+	b, err = c.Read(ctx, "C0:FF:EE:12:34:56", 0x14)
+	if err != nil || !bytes.Equal(b, []byte{0x27, 0xe1, 0x82}) {
+		t.Fatalf("cached-handle read after reconnect=%x err=%v", b, err)
+	}
+	if err := c.Unpair(ctx, "C0:FF:EE:12:34:56"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case path := <-a.removed:
+		if path != dev || c.Connected("C0:FF:EE:12:34:56") {
+			t.Fatalf("unpaired path=%s connected=%v", path, c.Connected("C0:FF:EE:12:34:56"))
+		}
+	case <-ctx.Done():
+		t.Fatal("unpair did not remove the device")
+	}
+	if _, err := c.Connect(ctx, "C0:FF:EE:12:34:56", true); err != nil {
+		t.Fatal(err)
+	}
+	device.failDisconnect.Store(true)
+	if err := c.Close(); err == nil {
+		t.Fatal("Close hid the controller's failed disconnect")
+	}
+	connected, dbusErr := dp.Get(deviceIfc, "Connected")
+	if dbusErr != nil || connected.Value() != true {
+		t.Fatalf("failed disconnect changed controller state: %v, %v", connected, dbusErr)
 	}
 }

@@ -7,11 +7,14 @@ package bluez
 import (
 	"bufio"
 	"bytes"
+	"context"
+	"errors"
 	"os/exec"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/farooqu/encore-satellite/core/improv"
 	"github.com/godbus/dbus/v5"
 	"github.com/godbus/dbus/v5/prop"
 )
@@ -65,7 +68,6 @@ func TestPeripheralAsBluetoothdSeesIt(t *testing.T) {
 		advert:  root + "/advert",
 		objects: map[dbus.ObjectPath]map[string]map[string]*prop.Prop{},
 		chars:   map[string]*charObj{},
-		props:   map[dbus.ObjectPath]*prop.Properties{},
 	}
 	err := p.export("0000aaaa-0000-1000-8000-00805f9b34fb", []CharSpec{
 		{UUID: "0000aaa1-0000-1000-8000-00805f9b34fb", Flags: []string{"read", "notify"}, Value: []byte("hello")},
@@ -128,7 +130,20 @@ func TestPeripheralAsBluetoothdSeesIt(t *testing.T) {
 	}
 	sigs := make(chan *dbus.Signal, 4)
 	client.Signal(sigs)
+	// Hold method results before D-Bus encodes them. A subsequent shorter
+	// update must not overwrite storage still owned by these replies.
+	snapshot, readErr := p.chars["0000aaa1-0000-1000-8000-00805f9b34fb"].ReadValue(nil)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	objectSnapshot, objectErr := (manager{p}).GetManagedObjects()
+	if objectErr != nil {
+		t.Fatal(objectErr)
+	}
 	p.Set("0000AAA1-0000-1000-8000-00805f9b34fb", []byte("bye"))
+	if string(snapshot) != "hello" || string(objectSnapshot[root+"/service0/char0"][gattCharIfc]["Value"].Value().([]byte)) != "hello" {
+		t.Fatalf("a previously returned D-Bus value was overwritten: %q", snapshot)
+	}
 	select {
 	case s := <-sigs:
 		changed := s.Body[1].(map[string]dbus.Variant)
@@ -189,11 +204,15 @@ func TestPickAdapter(t *testing.T) {
 }
 
 type testPeripheralAdapter struct {
-	conn       *dbus.Conn
-	advertised chan byte
+	conn        *dbus.Conn
+	advertised  chan byte
+	application chan dbus.Sender
 }
 
-func (*testPeripheralAdapter) RegisterApplication(dbus.ObjectPath, map[string]dbus.Variant) *dbus.Error {
+func (a *testPeripheralAdapter) RegisterApplication(_ dbus.ObjectPath, _ map[string]dbus.Variant, sender dbus.Sender) *dbus.Error {
+	if a.application != nil {
+		a.application <- sender
+	}
 	return nil
 }
 func (*testPeripheralAdapter) UnregisterApplication(dbus.ObjectPath) *dbus.Error   { return nil }
@@ -219,7 +238,7 @@ func TestAdvertisementStateIsReregistered(t *testing.T) {
 	if err := server.Export(testObjects{map[dbus.ObjectPath]map[string]map[string]dbus.Variant{adapter: {adapterIfc: {}, gattMgrIfc: {}, advertMgrIfc: {}}}}, "/", objMgrIfc); err != nil {
 		t.Fatal(err)
 	}
-	a := &testPeripheralAdapter{server, make(chan byte, 2)}
+	a := &testPeripheralAdapter{conn: server, advertised: make(chan byte, 2)}
 	for _, ifc := range []string{gattMgrIfc, advertMgrIfc} {
 		if err := server.Export(a, adapter, ifc); err != nil {
 			t.Fatal(err)
@@ -245,5 +264,108 @@ func TestAdvertisementStateIsReregistered(t *testing.T) {
 	}
 	if err := p.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestProvisionWithoutProxyOverDBus(t *testing.T) {
+	addr := privateBus(t)
+	t.Setenv("DBUS_SYSTEM_BUS_ADDRESS", addr)
+	server := connect(t, addr)
+	if _, err := server.RequestName(service, dbus.NameFlagDoNotQueue); err != nil {
+		t.Fatal(err)
+	}
+	adapter := dbus.ObjectPath("/org/bluez/hci0")
+	if err := server.Export(testObjects{map[dbus.ObjectPath]map[string]map[string]dbus.Variant{adapter: {adapterIfc: {}, gattMgrIfc: {}, advertMgrIfc: {}}}}, "/", objMgrIfc); err != nil {
+		t.Fatal(err)
+	}
+	a := &testPeripheralAdapter{conn: server, advertised: make(chan byte, 8), application: make(chan dbus.Sender, 1)}
+	for _, ifc := range []string{gattMgrIfc, advertMgrIfc} {
+		if err := server.Export(a, adapter, ifc); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := prop.Export(server, adapter, prop.Map{adapterIfc: {"Powered": {Value: false, Writable: true}}}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	auth := make(chan struct{}, 1)
+	joined := make(chan improv.WiFi, 1)
+	done := make(chan error, 1)
+	// No proxy, Noise connection, scanner or GATT central is started. First
+	// boot's locally authorized peripheral role must remain independent.
+	go func() {
+		done <- Provision(ctx, improv.Options{Name: "Setup only", Authorize: auth, Join: func(_ context.Context, wifi improv.WiFi) (string, error) {
+			joined <- wifi
+			return "http://192.0.2.23/", nil
+		}})
+	}()
+	var sender dbus.Sender
+	select {
+	case sender = <-a.application:
+	case <-ctx.Done():
+		t.Fatal("Improv application was not registered")
+	}
+	var objs map[dbus.ObjectPath]map[string]map[string]dbus.Variant
+	if err := server.Object(string(sender), "/org/encore/improv").Call(objMgrIfc+".GetManagedObjects", 0).Store(&objs); err != nil {
+		t.Fatal(err)
+	}
+	chars := map[string]dbus.ObjectPath{}
+	for path, ifcs := range objs {
+		if props, ok := ifcs[gattCharIfc]; ok {
+			chars[props["UUID"].Value().(string)] = path
+		}
+	}
+	readUntil := func(uuid string, want []byte) {
+		t.Helper()
+		for {
+			var b []byte
+			err := server.Object(string(sender), chars[uuid]).CallWithContext(ctx, gattCharIfc+".ReadValue", 0, map[string]dbus.Variant{}).Store(&b)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Equal(b, want) {
+				return
+			}
+			select {
+			case <-ctx.Done():
+				t.Fatalf("%s: got %x want %x", uuid, b, want)
+			case <-time.After(time.Millisecond):
+			}
+		}
+	}
+	write := func(b []byte) {
+		t.Helper()
+		if err := server.Object(string(sender), chars[improv.RPCCommandUUID]).CallWithContext(ctx, gattCharIfc+".WriteValue", 0, b, map[string]dbus.Variant{}).Err; err != nil {
+			t.Fatal(err)
+		}
+	}
+	readUntil(improv.CapabilitiesUUID, []byte{2}) // Device info only, not identify/scan.
+	readUntil(improv.StateUUID, []byte{1})
+	// Independently encoded Wi-Fi request: command, payload length, strings, checksum.
+	frame := []byte{1, 8, 3, 'l', 'a', 'b', 3, 'p', 's', 'k', 0x8c}
+	write(frame)
+	readUntil(improv.ErrorUUID, []byte{4})
+	select {
+	case <-joined:
+		t.Fatal("Wi-Fi join ran without physical authorization")
+	default:
+	}
+	auth <- struct{}{}
+	readUntil(improv.StateUUID, []byte{2})
+	write(frame[:4])
+	write(frame[4:])
+	readUntil(improv.StateUUID, []byte{4})
+	select {
+	case wifi := <-joined:
+		if wifi.SSID != "lab" || wifi.Passphrase != "psk" {
+			t.Fatal("provisioned credentials changed")
+		}
+	case <-ctx.Done():
+		t.Fatal("authorized fragmented request never reached Join")
+	}
+	cancel() // Do not wait through the ten-second result window in this transport test.
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("provisioning shutdown: %v", err)
 	}
 }

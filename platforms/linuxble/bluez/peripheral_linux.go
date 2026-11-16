@@ -53,7 +53,6 @@ type Peripheral struct {
 	mu      sync.Mutex
 	objects map[dbus.ObjectPath]map[string]map[string]*prop.Prop
 	chars   map[string]*charObj // by lower-case UUID
-	props   map[dbus.ObjectPath]*prop.Properties
 	closed  bool
 }
 
@@ -81,7 +80,6 @@ func OpenPeripheral(root dbus.ObjectPath, serviceUUID string, chars []CharSpec, 
 		advert:  root + "/advert",
 		objects: map[dbus.ObjectPath]map[string]map[string]*prop.Prop{},
 		chars:   map[string]*charObj{},
-		props:   map[dbus.ObjectPath]*prop.Properties{},
 	}
 	if err := p.findAdapter(); err != nil {
 		conn.Close()
@@ -160,16 +158,12 @@ func (p *Peripheral) export(serviceUUID string, chars []CharSpec, ad AdvertSpec)
 	}}
 	for i, c := range chars {
 		path := dbus.ObjectPath(fmt.Sprintf("%s/char%d", svc, i))
-		value := c.Value
-		if value == nil {
-			value = []byte{}
-		}
+		value := append([]byte{}, c.Value...)
 		p.objects[path] = map[string]map[string]*prop.Prop{gattCharIfc: {
 			"UUID":    ro(c.UUID),
 			"Service": ro(svc),
-			"Flags":   ro(c.Flags),
-			// Emit, so that setting it is the notification a subscribed central gets.
-			"Value": {Value: value, Emit: prop.EmitTrue},
+			"Flags":   ro(append([]string(nil), c.Flags...)),
+			"Value":   ro(value),
 		}}
 		obj := &charObj{p: p, path: path, write: c.Write}
 		p.chars[strings.ToLower(c.UUID)] = obj
@@ -180,29 +174,23 @@ func (p *Peripheral) export(serviceUUID string, chars []CharSpec, ad AdvertSpec)
 
 	serviceData := map[string]dbus.Variant{}
 	for k, v := range ad.ServiceData {
-		serviceData[k] = dbus.MakeVariant(v)
+		serviceData[k] = dbus.MakeVariant(append([]byte(nil), v...))
 	}
 	advertProps := map[string]*prop.Prop{
 		"Type":         ro("peripheral"),
-		"ServiceUUIDs": ro(ad.ServiceUUIDs),
+		"ServiceUUIDs": ro(append([]string(nil), ad.ServiceUUIDs...)),
 		"ServiceData":  ro(serviceData),
 	}
 	if ad.LocalName != "" {
 		advertProps["LocalName"] = ro(ad.LocalName)
 	}
 
-	for path, ifcs := range p.objects {
-		props, err := prop.Export(p.conn, path, toMap(ifcs))
-		if err != nil {
+	p.objects[p.advert] = map[string]map[string]*prop.Prop{advertIfc: advertProps}
+	for path := range p.objects {
+		if err := p.conn.Export(peripheralProperties{p, path}, path, propsIfc); err != nil {
 			return err
 		}
-		p.props[path] = props
 	}
-	advProps, err := prop.Export(p.conn, p.advert, prop.Map{advertIfc: advertProps})
-	if err != nil {
-		return err
-	}
-	p.props[p.advert] = advProps
 	if err := p.conn.Export(advert{}, p.advert, advertIfc); err != nil {
 		return err
 	}
@@ -213,12 +201,17 @@ func (p *Peripheral) export(serviceUUID string, chars []CharSpec, ad AdvertSpec)
 func (p *Peripheral) Set(uuid string, value []byte) {
 	p.mu.Lock()
 	c, ok := p.chars[strings.ToLower(uuid)]
-	closed := p.closed
-	p.mu.Unlock()
-	if !ok || closed {
+	if !ok || p.closed {
+		p.mu.Unlock()
 		return
 	}
-	p.props[c.path].SetMust(gattCharIfc, "Value", append([]byte(nil), value...))
+	// Replace rather than reuse backing storage: D-Bus encodes returned
+	// values after the read method returns, outside our property lock.
+	value = append([]byte{}, value...)
+	p.objects[c.path][gattCharIfc]["Value"] = ro(value)
+	p.mu.Unlock()
+	_ = p.conn.Emit(c.path, propsIfc+".PropertiesChanged", gattCharIfc,
+		map[string]dbus.Variant{"Value": dbus.MakeVariant(value)}, []string{})
 }
 
 // SetServiceData re-registers advertising: BlueZ snapshots these properties at
@@ -236,7 +229,9 @@ func (p *Peripheral) SetServiceData(data map[string][]byte) error {
 	for uuid, b := range data {
 		values[uuid] = dbus.MakeVariant(append([]byte(nil), b...))
 	}
-	p.props[p.advert].SetMust(advertIfc, "ServiceData", values)
+	p.mu.Lock()
+	p.objects[p.advert][advertIfc]["ServiceData"] = ro(values)
+	p.mu.Unlock()
 	return o.Call(advertMgrIfc+".RegisterAdvertisement", 0, p.advert, map[string]dbus.Variant{}).Err
 }
 
@@ -260,11 +255,9 @@ func (p *Peripheral) Close() error {
 
 // value is the characteristic's value now, as its Value property holds it.
 func (c *charObj) value() []byte {
-	v, err := c.p.props[c.path].Get(gattCharIfc, "Value")
-	if err != nil {
-		return nil
-	}
-	b, _ := v.Value().([]byte)
+	c.p.mu.Lock()
+	defer c.p.mu.Unlock()
+	b, _ := c.p.objects[c.path][gattCharIfc]["Value"].Value.([]byte)
 	return b
 }
 
@@ -301,13 +294,18 @@ func (c *charObj) StopNotify() *dbus.Error  { return nil }
 type manager struct{ p *Peripheral }
 
 func (m manager) GetManagedObjects() (map[dbus.ObjectPath]map[string]map[string]dbus.Variant, *dbus.Error) {
+	m.p.mu.Lock()
+	defer m.p.mu.Unlock()
 	out := map[dbus.ObjectPath]map[string]map[string]dbus.Variant{}
 	for path, ifcs := range m.p.objects {
+		if path == m.p.advert {
+			continue
+		}
 		out[path] = map[string]map[string]dbus.Variant{}
-		for ifc := range ifcs {
-			all, err := m.p.props[path].GetAll(ifc)
-			if err != nil {
-				return nil, err
+		for ifc, props := range ifcs {
+			all := map[string]dbus.Variant{}
+			for name, v := range props {
+				all[name] = dbus.MakeVariant(v.Value)
 			}
 			out[path][ifc] = all
 		}
@@ -322,10 +320,44 @@ func (advert) Release() *dbus.Error { return nil }
 
 func ro(v any) *prop.Prop { return &prop.Prop{Value: v, Emit: prop.EmitFalse} }
 
-func toMap(ifcs map[string]map[string]*prop.Prop) prop.Map {
-	m := prop.Map{}
-	for k, v := range ifcs {
-		m[k] = v
+// Properties publishes immutable snapshots. prop.Properties.SetMust uses
+// dbus.Store, which reuses slices/maps still referenced by an encoding reply.
+type peripheralProperties struct {
+	p    *Peripheral
+	path dbus.ObjectPath
+}
+
+func (s peripheralProperties) Get(ifc, name string) (dbus.Variant, *dbus.Error) {
+	s.p.mu.Lock()
+	defer s.p.mu.Unlock()
+	props, ok := s.p.objects[s.path][ifc]
+	if !ok {
+		return dbus.Variant{}, prop.ErrIfaceNotFound
 	}
-	return m
+	v, ok := props[name]
+	if !ok {
+		return dbus.Variant{}, prop.ErrPropNotFound
+	}
+	return dbus.MakeVariant(v.Value), nil
+}
+
+func (s peripheralProperties) GetAll(ifc string) (map[string]dbus.Variant, *dbus.Error) {
+	s.p.mu.Lock()
+	defer s.p.mu.Unlock()
+	props, ok := s.p.objects[s.path][ifc]
+	if !ok {
+		return nil, prop.ErrIfaceNotFound
+	}
+	all := make(map[string]dbus.Variant, len(props))
+	for name, v := range props {
+		all[name] = dbus.MakeVariant(v.Value)
+	}
+	return all, nil
+}
+
+func (s peripheralProperties) Set(ifc, name string, _ dbus.Variant) *dbus.Error {
+	if _, err := s.Get(ifc, name); err != nil {
+		return err
+	}
+	return prop.ErrReadOnly
 }
