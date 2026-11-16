@@ -59,10 +59,10 @@ type Engine struct {
 	link                            Link
 	generation                      uint64
 	active, discard                 bool
+	outputTimer                     bool
 	inputOpen, outputOpen, runEnded bool
 	outputReceived                  bool
 	announcing                      bool
-	stoppingTimer                   bool
 	pre                             audio.PreRoll
 	lastSequence                    uint64
 	lastTime                        time.Duration
@@ -159,10 +159,10 @@ func (e *Engine) disconnect(reason string) {
 	e.player.Flush()
 	e.pre.Clear()
 	e.active, e.discard, e.haveFrame = false, false, false
+	e.outputTimer = false
 	e.inputOpen, e.outputOpen, e.runEnded = false, false, false
 	e.outputReceived = false
 	e.announcing = false
-	e.stoppingTimer = false
 	e.state = presentation.State{Backend: e.state.Backend, Muted: e.state.Muted, Phase: "disconnected", Reason: reason}
 	if e.state.Muted {
 		e.state.Phase = "muted"
@@ -261,17 +261,14 @@ func (e *Engine) start(detection wake.Detection, pre []int16) error {
 }
 
 // Stop silences locally before notifying the peer; late output and presentation
-// cannot revive the cancelled call. A new call waits for AUDIO_OUT_END or reconnect;
-// a timer-only cancellation may instead finish with timer_stopped.
+// cannot revive the cancelled call. A new call waits for AUDIO_OUT_END (or a
+// native timer's timer_stopped), or reconnect.
 func (e *Engine) Stop() error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.cancelOutput()
 	e.player.Flush()
 	e.pre.Clear()
-	if !e.discard && e.state.Alert && e.outputOpen && !e.active && !e.announcing {
-		e.stoppingTimer = true
-	}
 	e.discard = e.discard || e.active || e.outputOpen
 	active, alert := e.active, e.state.Alert
 	e.active = false
@@ -330,6 +327,9 @@ func (e *Engine) Handle(generation uint64, event Event) error {
 			e.cancelOutput()
 			e.player.Flush()
 			e.outputOpen, e.outputReceived = false, false
+			if !e.discard {
+				e.outputTimer = false
+			}
 			e.state.Heard, e.state.Reply = "", ""
 			e.resetOutput()
 			return nil
@@ -339,11 +339,10 @@ func (e *Engine) Handle(generation uint64, event Event) error {
 		}
 		return nil
 	}
-	if event.Kind == "timer_stopped" && e.stoppingTimer {
-		// Cancelling paced timer PCM can skip AUDIO_OUT_END. This ordered
-		// upstream acknowledgement ends only a timer-owned discard fence,
-		// never a cancelled call or announcement that overlapped the timer.
-		e.stoppingTimer, e.discard = false, false
+	if event.Kind == "timer_stopped" && e.discard && e.outputTimer {
+		// Cancelling a native paced ring can omit AUDIO_OUT_END. This event
+		// ends only that ring's fence, never a cancelled voice call's fence.
+		e.discard, e.outputTimer = false, false
 		e.resetOutput()
 	}
 	if e.discard {
@@ -369,7 +368,7 @@ func (e *Engine) Handle(generation uint64, event Event) error {
 		}
 	case "output_start":
 		if e.active || e.state.Backend == string(Incubator) {
-			e.outputOpen = true
+			e.openOutput()
 			e.outputReceived = false
 		}
 	case "recognized":
@@ -414,7 +413,7 @@ func (e *Engine) Output(generation uint64, samples []int16) error {
 	}
 	ctx, discard := e.output, e.discard
 	if !discard {
-		e.outputOpen = true
+		e.openOutput()
 		e.outputReceived = true
 	}
 	e.publishActivity()
@@ -438,7 +437,7 @@ func (e *Engine) EndOutput(generation uint64) error {
 	if e.state.Backend == string(Assist) && !e.outputReceived && !e.discard {
 		// This HA version can end an empty stream after TTS fails without
 		// sending an ERROR event. No received audio means no playback claim.
-		e.outputOpen = false
+		e.outputOpen, e.outputTimer = false, false
 		if e.runEnded {
 			e.active = false
 			e.state.Phase = "idle"
@@ -461,10 +460,9 @@ func (e *Engine) EndOutput(generation uint64) error {
 	if generation != e.generation || e.link == nil {
 		return ErrStale
 	}
-	e.outputOpen = false
+	e.outputOpen, e.outputTimer = false, false
 	if ctx.Err() != nil || discarded || e.discard {
 		e.discard = false
-		e.stoppingTimer = false
 		e.resetOutput()
 		return nil // Cancelled samples were not played: never claim they drained.
 	}
@@ -479,6 +477,15 @@ func (e *Engine) EndOutput(generation uint64) error {
 		e.state.Phase = "working"
 	}
 	return e.send(Command{Kind: "drained"})
+}
+
+func (e *Engine) openOutput() {
+	if !e.outputOpen {
+		// Ownership lasts through cancellation until the stream's boundary;
+		// HANGUP or a later timer event cannot relabel an open voice stream.
+		e.outputTimer = e.state.Backend == string(Incubator) && e.state.Alert && !e.active && !e.announcing
+		e.outputOpen = true
+	}
 }
 
 func (e *Engine) resetOutput() {

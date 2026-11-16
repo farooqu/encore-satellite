@@ -415,8 +415,15 @@ async def main():
             assert any(json.loads(b)["type"] == "stop_timer" for b in wire.bodies("encore", 9))
             stopped = await state()
             assert not stopped["session"]["alert"] and stopped["playback"]["queued"] == 0
+            print(f"Timer stop wire: PCM={len(wire.bodies('app', 0x10))}, "
+                  f"AUDIO_OUT_END={len(wire.bodies('app', 0x11))}, "
+                  f"drains={len(wire.bodies('encore', 6))}, "
+                  f"queued={stopped['playback']['queued']}", flush=True)
             print("PASS real HA duration timer → upstream timer_ringing/audio → immediate device Stop → upstream timer_stopped", flush=True)
 
+            # A cancelled paced ring may omit AUDIO_OUT_END. Idle presentation
+            # alone is not readiness: the next wake must work without reconnect.
+            assert not wire.bodies("encore", 1), "Timer cancellation reconnected the native transport"
             await request("PUT", APP + "/api/commands/encore_lamp", {"spec": {
                 "description": "turn on the lamp", "examples": ["turn on the lamp"],
                 "slots": {"entity": ["input_boolean.encore_lamp"]}, "intent": "HassTurnOn",

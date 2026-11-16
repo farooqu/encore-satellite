@@ -360,6 +360,77 @@ func TestStopInterruptsDrainAndRejectsLateAudio(t *testing.T) {
 	}
 }
 
+func TestStoppedTimerRestoresReadiness(t *testing.T) {
+	for _, end := range []string{"timer_stopped", "output_end"} {
+		t.Run(end, func(t *testing.T) {
+			e, l, p, g := fixture(t)
+			_ = e.Handle(g, session.Event{Kind: "timer_ringing"})
+			_ = e.Output(g, []int16{-7, 13})
+			if err := e.Stop(); err != nil {
+				t.Fatal(err)
+			}
+			_ = e.Stop() // Repeated Stop must retain the original cancellation boundary.
+			if len(l.commands) != 1 || l.commands[0].Kind != "stop_alert" || p.flushed == 0 {
+				t.Fatal("timer was not silenced and stopped", l.commands)
+			}
+			_ = e.Output(g, []int16{79})
+			_ = e.Handle(g, session.Event{Kind: "timer_ringing"})
+			_ = e.Handle(g, session.Event{Kind: "responding", Text: "late"})
+			if err := e.StartManual(); !errors.Is(err, session.ErrUnavailable) {
+				t.Fatal("started before cancelled timer ended", err)
+			}
+			if end == "output_end" {
+				_ = e.EndOutput(g)
+			}
+			// A cancelled paced ring need not send AUDIO_OUT_END at all.
+			_ = e.Handle(g, session.Event{Kind: "timer_stopped"})
+			_ = e.Output(g, []int16{83})
+			_ = e.Handle(g, session.Event{Kind: "responding", Text: "late"})
+			if p.writes != 2 || e.Snapshot().Alert || e.Snapshot().Reply != "" || l.closed || len(l.commands) != 1 {
+				t.Fatal("late timer output played, claimed drain or revived presentation", e.Snapshot(), l.commands)
+			}
+			if err := e.StartManual(); err != nil {
+				t.Fatal("next invocation requires reconnect", err)
+			}
+			_ = e.Output(g, []int16{-17, 29, 43})
+			_ = e.EndOutput(g)
+			if p.writes != 5 || len(l.commands) != 3 || l.commands[1].Kind != "start" || l.commands[2].Kind != "drained" {
+				t.Fatal("next invocation did not play and complete", l.commands)
+			}
+		})
+	}
+}
+
+func TestTimerStoppedDoesNotReleaseCancelledCall(t *testing.T) {
+	for _, name := range []string{"call", "call_with_timer", "hung_up_call_with_timer"} {
+		t.Run(name, func(t *testing.T) {
+			e, _, p, g := fixture(t)
+			_ = e.StartManual()
+			if name == "call_with_timer" {
+				_ = e.Handle(g, session.Event{Kind: "timer_ringing"})
+			}
+			_ = e.Output(g, []int16{19})
+			if name == "hung_up_call_with_timer" {
+				_ = e.Handle(g, session.Event{Kind: "hangup"})
+				_ = e.Handle(g, session.Event{Kind: "timer_ringing"})
+			}
+			// More PCM in the same stream must retain its original owner,
+			// even if the call ended and a timer was signaled in the meantime.
+			_ = e.Output(g, []int16{-23})
+			_ = e.Stop()
+			_ = e.Handle(g, session.Event{Kind: "timer_stopped"})
+			_ = e.Output(g, []int16{97})
+			if err := e.StartManual(); !errors.Is(err, session.ErrUnavailable) || p.writes != 2 {
+				t.Fatal("timer event released a cancelled voice call", err)
+			}
+			_ = e.EndOutput(g)
+			if err := e.StartManual(); err != nil {
+				t.Fatal("stream end did not release cancelled call", err)
+			}
+		})
+	}
+}
+
 func TestDiscontinuityAndTransportFailureFailClosed(t *testing.T) {
 	for _, cause := range []string{"gap", "queue"} {
 		t.Run(cause, func(t *testing.T) {
