@@ -4,8 +4,9 @@ One module: `github.com/farooqu/encore-satellite`. Core version
 `0.1.0-dev.0`; these pre-1.0 contracts are still being established. No device is
 release-supported and no installer, signature trust or update channel is shipped.
 The target inventory is `release/targets.json`; revision zero means never released.
-An eventual package must record target ID, core SemVer, monotonically increasing
-per-target package revision, explicit dev/stable channel and exact source commit.
+An eventual package must record target ID, backend variant, core SemVer,
+monotonically increasing per-target package revision, explicit dev/stable channel
+and exact source commit.
 
 ## Working paths and direction
 
@@ -39,19 +40,30 @@ there is no runtime plugin registry. Platforms/devices are reserved paths, not
 implemented support. Assist quality-based cross-device arbitration is not yet
 implemented; raw probabilities are not assumed comparable across devices.
 
-## Backend selection and common controls
+## Single-backend packages and common controls
 
-The shared core and loopback lab can switch backends live and revoke stale audio.
-A product setup/HA backend selector and common-control connection independent of
-voice ownership are not implemented yet. The current lab can still disconnect
-Assist transport when switching; do not claim common controls already survive it.
+Production packages will contain exactly one voice backend. Native Incubator is
+the default package, not just the first release. Assist remains in the repository;
+any future package for the Home Assistant Assist pipeline would be explicitly
+labeled, opt-in and is deferred.
+No product setup/HA backend selector, cross-backend fallback or live switching is
+planned. Backend changes require explicit application-package replacement, and
+routine updates must preserve the variant. See the
+[package contract](device-packages/README.md#incubator-first-single-backend-packages).
+
+The shared core and loopback lab can still switch backends live and revoke stale
+audio as test instrumentation. This is not a production package requirement. The
+current lab can disconnect Assist transport when switching; it does not establish
+a common-control connection independent of voice ownership. Production common
+controls must not require bundling a second voice backend; their transport is
+not implemented yet.
 
 The pinned native integration creates its own persistent timer device with the
 same stable MAC, not an `assist_satellite` or per-native-voice availability entity.
 Existing HA Assist availability follows the whole ESPHome connection. The intended
-surface is one shared Encore control identity plus selected-backend/readiness
+surface is one shared Encore control identity plus installed-backend/readiness
 state; mapping it to separate voice availability requires HA-side support, not
-duplicated controls or a fake second ESPHome assistant. Selected is not the same
+duplicated controls or a fake second ESPHome assistant. Installed is not the same
 as connected. Native rejected/losing HANGUP now preserves healthy transport so
 ordinary upstream decisions do not trigger reconnect backoff.
 

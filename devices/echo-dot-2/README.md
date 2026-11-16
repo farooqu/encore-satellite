@@ -53,21 +53,30 @@ measured Dot tuning belongs in this module, not in shared or Android defaults.
 
 Once those prerequisites and the protocol foundation are validated, the target's
 explicit composition root would assemble the shared Go engine, reusable Echo host,
-Dot-local wiring/profile and selectable Assist/native Incubator backends. Package
-only that application, necessary target data and audited notices. Do not bundle
-Android code or a second voice engine.
+Dot-local wiring/profile and only the native Incubator backend. Assist remains in
+the repository for a possible later, separately qualified package for the
+**Home Assistant Assist pipeline**. Incubator is the default Dot package; the
+Assist package would be explicitly opt-in.
+Package only that application, necessary target data and audited notices. Do not
+bundle Android code, a second voice backend or runtime backend selection/fallback.
 
 The intended deliverable is a versioned application bundle over an independently
 maintained base, **not** a boot/kernel/driver/recovery replacement. No concrete
 archive layout, ABI, service manager, signing key, install path or command is
 invented here. Central release metadata will bind the core SemVer, Dot package
-revision, source commit and verified base compatibility when there is a package;
-the current central revision is zero and release support is false.
+revision, backend variant, source commit and verified base compatibility when
+there is a package; the current central revision is zero and release support is
+false. Routine updates must preserve the installed backend. A later change to
+Assist requires explicit application-package replacement with validated state
+migration/recovery, not a runtime toggle or a base reflash.
 
 Before support is claimed, record pinned base/toolchain/backend versions and real
 device results for capture/playback, wake during playback, physical drain,
-stop/mute with queued audio, both backends and switching, disconnect/recovery,
-reboot/service recovery, resource use and app replacement without a base update.
+stop/mute with queued audio, native Incubator voice/timer behavior,
+disconnect/recovery, reboot/service recovery, resource use and same-backend app
+replacement without a base update. Inspect the package dependency closure and
+contents to exclude the Assist adapter. Assist qualification and live-switching
+tests are not gates for the Incubator package.
 Hardware/wiring/tuning changes need evidence from a Dot maintainer; the profile
 validator is only a metadata check, not any of these acceptance results.
 

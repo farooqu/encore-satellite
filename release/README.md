@@ -110,29 +110,44 @@ has run anything; record executed commands and actual CI run URLs separately.
 
 These are requirements for later work, **not a verifier or updater shipped now**.
 
+- **Incubator default, one backend per package:** the default device package and
+  any unqualified build/install choice must use only the native `incubator`
+  adapter. Keep `assist` in the repository, but defer its possible separately
+  qualified, opt-in package, explicitly labeled for the **Home Assistant Assist
+  pipeline**. Do not present it as a co-default. The backend identifier remains
+  `assist`. No runtime
+  backend selector, automatic cross-backend fallback or live switching is part
+  of a device package.
+  Inspect built dependencies and package contents to enforce this; a disabled
+  second adapter is not isolation. The dual-backend lab remains a test fixture.
 - **Two version axes:** shared core SemVer describes protocol/core behavior.
   A positive, monotonically increasing integer package revision belongs to each
-  target across all core versions and channels. Packaging/base-compatibility-only
+  target across all core versions, backend variants and channels; adding a variant
+  must not reset that sequence. Packaging/base-compatibility-only
   changes can increment one target's revision without changing core SemVer or
   other targets. Revision zero is never distributable. Never reuse a revision for
   different bytes, including after a failed or withdrawn release.
-- **Immutable provenance:** each package records exact target identity, core
-  SemVer, package revision, full source commit, build/toolchain provenance,
-  artifact byte size and cryptographic digest, plus compatibility requirements.
+- **Immutable provenance:** each package records exact target identity, backend
+  variant (`incubator` or later `assist`), core SemVer, package revision, full source
+  commit, build/toolchain provenance, artifact byte size and cryptographic digest,
+  plus compatibility requirements.
   Immutable artifact identities and retained records must be established before
   publication; do not overwrite a `latest` binary or silently replace old bytes.
-- **Explicit channels:** publish a separate signed entry for each target/channel
-  pair, exactly `dev` or `stable`. No implicit fallback between channels. Stable
-  entries must not point to a prerelease core. Promotion reuses the already
+- **Explicit variants and channels:** publish a separate signed entry for each
+  supported target/backend/channel combination; channels remain exactly `dev` or
+  `stable`. Routine updates preserve the installed backend and channel, with no
+  implicit fallback between either. Only Incubator is initially in scope; do not
+  create empty Assist release entries. Stable entries must not point to a
+  prerelease core. Promotion reuses the already
   validated immutable package bytes/revision, not a rebuild disguised as the same
   package. A target advances independently, except for the affected-cohort gate.
-- **Authenticity before installation:** signed metadata must bind target,
-  channel, versions, source, digest/size and compatibility. Establish a vetted
-  format, trusted offline-provisioned roots, verification/rotation/revocation and
+- **Authenticity before installation:** signed metadata must bind target, backend
+  variant, channel, versions, source, digest/size and compatibility. Establish a
+  vetted format, trusted offline-provisioned roots, verification/rotation/revocation and
   freshness/anti-rollback behavior before implementing downloads or activation.
-  Reject missing/invalid signatures, wrong targets/channels, stale revisions,
-  tampered artifacts and incompatible packages. Never accept trust keys or shell
-  commands from an unauthenticated device/backend/channel response.
+  Reject missing/invalid signatures, wrong targets/backend variants/channels,
+  stale revisions, tampered artifacts and incompatible packages. Never accept
+  trust keys or shell commands from an unauthenticated device/backend/channel response.
 - **Compatibility before activation:** enforce declared base identity/version,
   OS/kernel/userspace/ABI, platform-host/engine IPC contract, configuration/state
   migrations and tested backend baselines. Exact constraints must come from
@@ -143,6 +158,12 @@ These are requirements for later work, **not a verifier or updater shipped now**
   and engine, subject to real signing/install permissions. Base maintenance and
   recovery are separate; no implicit OS flashing, arbitrary remote execution,
   independently fetched Android engine or promised unattended APK update.
+- **Backend replacement is explicit:** moving between Incubator and a later Assist
+  variant is a deliberate application-package replacement, not a routine update,
+  runtime setting or required base/OS reflash. Before offering it, validate
+  configuration/state migration, platform signing/version constraints and recovery.
+  Qualify each variant independently; Assist hardware support and switching tests
+  must not block an otherwise qualified Incubator package.
 - **Rollback is deliberate:** retain known-good immutable packages and test
   recovery, but do not let rollback defeat monotonic revision enforcement. A
   normal rollback should be a newly signed higher package revision carrying the

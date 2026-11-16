@@ -35,9 +35,13 @@ intended design, **not fresh hardware validation, an Encore port or a guarantee
 that current Android versions permit every execution/provisioning mode**.
 
 A future target composition root would select the shared Go engine, native
-Android host, this profile and selectable Assist/native Incubator adapters. One
-signed APK must bundle its matching host and engine for each explicitly supported
-ABI. The host owns engine lifetime independently of dashboard reloads; it adapts
+Android host, this profile and only the native Incubator backend. Assist remains
+in the repository for a possible later, separately qualified APK for the
+**Home Assistant Assist pipeline**. Incubator is the default APK; the Assist APK
+would be explicitly opt-in. Do not
+bundle a second voice backend or runtime backend selection/fallback. One signed
+APK must bundle its matching host and engine for each explicitly supported ABI. The host
+owns engine lifetime independently of dashboard reloads; it adapts
 actual audio routes to the engine's bounded mono PCM16/16 kHz capture contract.
 IPC must check same-UID peers on both sides, reject incompatible protocol versions,
 and preserve bounded audio plus prompt control/cancellation. No socket, protocol,
@@ -67,14 +71,20 @@ OS/security updates. Preserve Android signature/version constraints through a
 centrally reviewed packaging policy; core SemVer and package revision alone are
 not an Android versionCode algorithm. Current central revision is zero and release
 support is false. There is no APK, updater or installation procedure to run.
+Future package/update metadata must bind the backend variant and routine updates
+must preserve it. A later change to Assist requires explicit application-package
+replacement with validated state migration/recovery and Android signing/version
+compatibility, not a runtime toggle or an OS reflash.
 
 Before support is claimed, record actual tablet/OS/ABI/toolchain and pinned backend
-versions plus both backend turns/switching, capture/playback/drain, wake during
-playback, immediate stop/mute/permission revocation, network/audio-route recovery,
+versions plus native Incubator voice/timer behavior, capture/playback/drain, wake
+during playback, immediate stop/mute/permission revocation, network/audio-route recovery,
 dashboard reload without voice loss, background/reboot behavior under real
-provisioning and a signed app update without an OS update. Measure resource use,
-latency and underruns. A profile check or a future successful APK build does not
-establish any of those hardware results.
+provisioning and a signed same-backend app update without an OS update. Inspect
+the APK dependency closure and contents to exclude the Assist adapter. Assist
+qualification and live-switching tests are not gates for the Incubator APK.
+Measure resource use, latency and underruns. A profile check or a future successful
+APK build does not establish any of those hardware results.
 
 ## Acknowledgement
 

@@ -33,8 +33,8 @@ See the lab README and [dependency notices](../lab/sendspin/NOTICES.md).
 ## Shared behavior to preserve on both targets
 
 - [ ] Provide a persistent, independently switchable Sendspin feature, initially
-  off, through the target's normal configuration/common controls. Voice backend
-  selection and Bluetooth proxying must not control its lifetime. Off means no
+  off, through the target's normal configuration/common controls. The installed
+  voice backend and Bluetooth proxying must not control its lifetime. Off means no
   active music discovery, connection, decoder or queued output; preserve private
   identity/trust for deliberate re-enabling and reject stale callbacks/PCM.
 - [ ] Implement discovery/manual server configuration, stable per-device identity,
@@ -56,9 +56,11 @@ See the lab README and [dependency notices](../lab/sendspin/NOTICES.md).
   voice. The lab's PCM16/48 kHz/stereo negotiation is not a physical stereo or
   format-support claim for either device. Report real consumed-frame/presentation
   timing, bound buffers, fence replaced streams and handle output/network failure.
-- [ ] Verify voice and timer responses with both Assist and Incubator, switching
-  in both directions, feature-off during voice/playback, user-volume changes while
-  ducked, late audio, reconnect and restart. MA absence must not disable voice.
+- [ ] Verify voice and timer responses with the package's sole backend, native
+  Incubator by default; repeat qualification for any later package for the Home
+  Assistant Assist pipeline, not runtime switching. Cover feature-off during
+  voice/playback, user-volume changes
+  while ducked, late audio, reconnect and restart. MA absence must not disable voice.
   Test MA-managed announcements separately; Sendspin does not supply Encore's
   voice/timer lifecycle or implement "play music here" intents/room targeting.
 

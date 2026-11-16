@@ -3,10 +3,26 @@
 **Your devices aren't done yet.**
 
 Encore Satellite aims to turn existing speakers and displays into satellites
-for [Home Assistant Assist](https://www.home-assistant.io/voice_control/) and
-[Voice Incubator](https://github.com/OHF-Voice/voice-incubator).
+for [Voice Incubator](https://github.com/OHF-Voice/voice-incubator) and
+[Home Assistant Assist](https://www.home-assistant.io/voice_control/).
 
 I'm building it for my own home and sharing it in case it's useful to yours.
+
+**Voice Incubator is my focus for now.** It's the setup I'd prefer to use at
+home, so I'm concentrating on getting that working on real devices first. The
+Assist code will stay in the repo, but further Assist development and device
+packages are deferred for now. **The default Encore package will use Incubator.**
+If a package for the **Home Assistant Assist pipeline** is offered later, it will
+be a separate opt-in package rather than another default.
+
+I'm keeping the Assist code so I can reevaluate it from time to time as Incubator
+features reach the Home Assistant Assist pipeline. Before I'd move over, I'd want the behaviors
+I value: wake-word detection and verification, identifying who's speaking,
+stopping a response when someone says "stop", and keeping the microphone listening
+throughout an active conversation so it can catch interruptions and follow-ups
+without another wake word. That listening must still respect mute and privacy
+controls. These are my evaluation criteria, not features already proven on Encore
+hardware or a claim about what Assist currently lacks.
 
 ## Why Encore?
 
@@ -36,8 +52,10 @@ upstream wake verification, recognition, HA actions and speech output.
 [Experimental Assist wake verification](docs/assist-wake-validation.md) is an
 explicit opt-in. Capture and playback are virtual; these are protocol checks,
 not hardware or acoustic-quality results. See the [foundation scope](docs/foundation.md)
-for what works and what remains, including the planned backend selector and
-shared device controls.
+for what works and what remains. The first device packages will target native
+Voice Incubator, with exactly one backend per package and no runtime switching.
+Changing backends will require an explicit application-package replacement.
+Shared device controls remain to be implemented.
 
 ## Devices
 
