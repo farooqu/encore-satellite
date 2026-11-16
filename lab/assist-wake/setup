@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root="$(cd "$(dirname "$0")/../.." && pwd)"
+scratch="$root/.amp/in/orb-backup"
+upstream="$scratch/app-voice"
+revision=b9461db9e6c5f19d30a9dc9563f93d2bc572c3c8
+assets=9e6bcf3af07909f39f71674f62372508d00dd4a9
+sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq libopenblas-dev espeak-ng
+uv sync --project "$root/lab/assist-wake" --locked
+mkdir -p "$scratch/wake-assets"
+if ! test -d "$upstream/.git"; then git clone https://github.com/OHF-Voice/app-voice "$upstream"; fi
+test "$(git -C "$upstream" rev-parse HEAD)" = "$revision" || git -C "$upstream" checkout "$revision"
+fetch() {
+  local target="$scratch/wake-assets/$1.tar.gz"
+  test -f "$target" || curl -fL "https://huggingface.co/datasets/rhasspy/rhasspy-speech/resolve/$assets/$2" -o "$target"
+  echo "$3  $target" | sha256sum -c -
+  mkdir -p "$upstream/voice_support/local/$4"
+  tar -xzf "$target" -C "$upstream/voice_support/local/$4"
+}
+fetch tools tools/rhasspy-speech_amd64.tar.gz 003a2e992c20bb96f5f7ad0774a66998f4da7c4b58ad79eafd958f831df1d680 wake-kaldi-tools
+fetch model models/en_US-rhasspy.tar.gz 3dbf8c16b2d08767eba4866a444f075d0a5b1304c73ca366d2c60346b28759e7 wake-kaldi-models
+bash "$upstream/voice_support/voice/kaldi/decoderd/build.sh" "$upstream/voice_support/local/wake-kaldi-tools"
+# A complete synthesized utterance, not a clipped wake recording. Keep the
+# original plus raw conversion; test.py pads only the final transport frame.
+espeak-ng -v en-us -s 200 -w "$scratch/wake-assets/positive.wav" 'okay naboo'
+ffmpeg -y -loglevel error -i "$scratch/wake-assets/positive.wav" -ar 16000 -ac 1 -f s16le "$scratch/wake-assets/positive.pcm"
+echo 'Ready: see lab/assist-wake/README.md for supervised services and checks'

@@ -1,6 +1,6 @@
 // Package assist maps the ESPHome native API to shared session contracts.
 // This baseline is API-audio-only: no UDP, media player, pushed models, timers,
-// wake verification or multi-channel claims are advertised.
+// multi-channel claims are advertised. Wake audio is an explicit dev opt-in.
 package assist
 
 import (
@@ -8,7 +8,9 @@ import (
 	"encoding/binary"
 	"errors"
 	"net"
+	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	esphome "github.com/ygelfand/go-esphome-device"
@@ -27,15 +29,23 @@ const subscribeAPIAudio uint32 = 1 << 2
 
 type Server struct {
 	Engine *session.Engine
+	// ExperimentalWakeWords maps actual host model IDs to their spoken phrases.
+	// Nil keeps feature bits exactly 7. Configure only hosts that supply real
+	// contiguous wake pre-roll; compatibility is pinned in wake_audio.go.
+	ExperimentalWakeWords map[string]string
 	// Trace is optional diagnostic output; it must not block the protocol reader.
-	Trace       func(string, map[string]string)
-	mu          sync.Mutex
-	connections map[*esphome.Conn]*connection
+	Trace           func(string, map[string]string)
+	mu              sync.Mutex
+	connections     map[*esphome.Conn]*connection
+	activeWakeWords []string
 }
 
 type connection struct {
 	*outbox.Queue
-	generation uint64
+	generation     uint64
+	wakeAudio      bool
+	closeTransport atomic.Bool
+	done           chan struct{}
 }
 
 func (*connection) Backend() session.Backend { return session.Assist }
@@ -45,6 +55,17 @@ func (s *Server) Serve(ctx context.Context, listener net.Listener, info esphome.
 		return errors.New("assist: a unique nonzero Noise PSK is required")
 	}
 	info.VoiceFeatures = Features
+	if len(s.ExperimentalWakeWords) > 0 {
+		for id, phrase := range s.ExperimentalWakeWords {
+			if id == "" || phrase == "" || len(id) > 128 || len(phrase) > 128 {
+				return errors.New("assist: invalid experimental wake model")
+			}
+		}
+		info.VoiceFeatures |= featureWakeAudio
+	}
+	for id := range s.ExperimentalWakeWords {
+		s.activeWakeWords = append(s.activeWakeWords, id)
+	}
 	info.ESPHomeVersion = "2026.10.1" // Pinned generated schema, not a firmware identity.
 	server := esphome.Server{Info: info, PSK: &key, Handler: s, WriteTimeout: 2 * time.Second}
 	return server.Serve(ctx, listener)
@@ -63,16 +84,39 @@ func (s *Server) Handle(ctx context.Context, c *esphome.Conn, message proto.Mess
 	}
 	if m, ok := message.(*api.VoiceAssistantConfigurationRequest); ok {
 		s.trace("configuration", nil)
-		_ = m // No downloaded/executable models; report an empty selection honestly.
-		return c.Send(&api.VoiceAssistantConfigurationResponse{})
+		_ = m // No downloaded/executable models are accepted.
+		return c.Send(s.wakeConfiguration())
+	}
+	if m, ok := message.(*api.VoiceAssistantSetConfiguration); ok {
+		return s.setWakeWords(m.ActiveWakeWords)
 	}
 	if m, ok := message.(*api.SubscribeVoiceAssistantRequest); ok {
 		if !m.Subscribe {
+			s.mu.Lock()
+			link := s.connections[c]
+			if link != nil && len(s.ExperimentalWakeWords) > 0 {
+				// HA toggles verification by unsubscribing and subscribing on
+				// this connection. Stop/fence the voice writer before rebinding;
+				// closing TCP here loses HA's freshly loaded wake configuration.
+				link.closeTransport.Store(false)
+			}
+			s.mu.Unlock()
 			s.ConnClosed(c)
+			if link != nil {
+				<-link.done
+				if !link.closeTransport.Load() {
+					// HA re-subscribes callbacks without aborting its old
+					// pipeline. End it before the next voice generation.
+					return c.Send(&api.VoiceAssistantRequest{Start: false})
+				}
+			}
 			return nil
 		}
 		if m.Flags&subscribeAPIAudio == 0 {
 			return errors.New("assist: peer did not negotiate API audio")
+		}
+		if m.Flags&subscribeWakeAudio != 0 && len(s.ExperimentalWakeWords) == 0 {
+			return errors.New("assist: wake audio requested without configured models")
 		}
 		s.mu.Lock()
 		if s.connections == nil {
@@ -82,7 +126,14 @@ func (s *Server) Handle(ctx context.Context, c *esphome.Conn, message proto.Mess
 			s.mu.Unlock()
 			return nil
 		}
-		link := &connection{Queue: outbox.New(c.Close)}
+		link := &connection{wakeAudio: m.Flags&subscribeWakeAudio != 0, done: make(chan struct{})}
+		link.closeTransport.Store(true)
+		link.Queue = outbox.New(func() error {
+			if link.closeTransport.Load() {
+				return c.Close()
+			}
+			return nil
+		})
 		generation, err := s.Engine.Attach(link)
 		if err != nil {
 			s.mu.Unlock()
@@ -91,16 +142,18 @@ func (s *Server) Handle(ctx context.Context, c *esphome.Conn, message proto.Mess
 		link.generation = generation
 		s.connections[c] = link
 		s.mu.Unlock()
-		s.trace("subscribed", map[string]string{"api_audio": "true"})
+		s.trace("subscribed", map[string]string{"api_audio": "true", "wake_audio": strconv.FormatBool(link.wakeAudio)})
 		go func() {
+			defer close(link.done)
 			_ = link.Run(func(command session.Command) error {
 				switch command.Kind {
 				case "start":
-					phrase := command.Detection.Word
-					if phrase == "manual" {
-						phrase = ""
+					request, err := s.startRequest(command, link.wakeAudio)
+					if err != nil {
+						s.trace("invalid_wake_evidence", nil)
+						return err
 					}
-					return c.Send(&api.VoiceAssistantRequest{Start: true, WakeWordPhrase: phrase, AudioSettings: &api.VoiceAssistantAudioSettings{VolumeMultiplier: 1}})
+					return c.Send(request)
 				case "audio":
 					b := make([]byte, len(command.Samples)*2)
 					for i, sample := range command.Samples {
@@ -167,6 +220,11 @@ func (s *Server) Handle(ctx context.Context, c *esphome.Conn, message proto.Mess
 			event.Kind, event.Reason = "error", data["code"]
 		case api.VoiceAssistantEvent_VOICE_ASSISTANT_STT_START:
 			event.Kind = "listening"
+		case eventWakeRejected:
+			// This protocol has no turn ID. Fence rejected capture and late
+			// events through the same generation boundary as cancellation.
+			s.Engine.Disconnect(generation, "wake_rejected")
+			return nil
 		case api.VoiceAssistantEvent_VOICE_ASSISTANT_STT_VAD_END:
 			event.Kind = "processing"
 		case api.VoiceAssistantEvent_VOICE_ASSISTANT_STT_END:

@@ -53,6 +53,16 @@ async def provision():
             credentials_path.touch(mode=0o600)
             credentials_path.write_text(json.dumps({"username": "encore", "password": password, "refresh_token": tokens["refresh_token"]}))
         client = await login(session)
+        # Pinned HA dev trials migrated HTTP settings for five minutes. Our
+        # authenticated connection confirms this isolated instance is reachable;
+        # confirm only a healthy config actually running in the pending slot.
+        http_config = await client.command("http/config")
+        if http_config["active_config_type"] == "pending":
+            assert http_config["pending"]["error"] is None, "HTTP trial failed; do not promote it"
+            await client.command("http/config/promote")
+            confirmed = await client.command("http/config")
+            assert confirmed["pending"] is None and confirmed["revert_at"] is None
+            print("Confirmed active lab HTTP configuration; automatic rollback cancelled")
         async with session.get(HA + "/api/onboarding") as response:
             steps = await response.json() if response.status == 200 else []
         for step in steps:

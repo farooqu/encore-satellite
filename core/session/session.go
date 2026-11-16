@@ -61,6 +61,7 @@ type Engine struct {
 	active, discard                 bool
 	inputOpen, outputOpen, runEnded bool
 	outputReceived                  bool
+	announcing                      bool
 	pre                             audio.PreRoll
 	lastSequence                    uint64
 	lastTime                        time.Duration
@@ -133,6 +134,7 @@ func (e *Engine) disconnect(reason string) {
 	e.active, e.discard, e.haveFrame = false, false, false
 	e.inputOpen, e.outputOpen, e.runEnded = false, false, false
 	e.outputReceived = false
+	e.announcing = false
 	e.state = presentation.State{Backend: e.state.Backend, Muted: e.state.Muted, Phase: "disconnected", Reason: reason}
 	if e.state.Muted {
 		e.state.Phase = "muted"
@@ -239,6 +241,7 @@ func (e *Engine) Stop() error {
 	e.discard = e.discard || e.active || e.outputOpen
 	active, alert := e.active, e.state.Alert
 	e.active = false
+	e.announcing = false
 	e.inputOpen, e.outputOpen = false, false
 	e.state.Heard, e.state.Reply, e.state.Alert = "", "", false
 	e.state.Reason = "cancelled"
@@ -286,7 +289,13 @@ func (e *Engine) Handle(generation uint64, event Event) error {
 		// Incubator owns election. A losing candidate returns quietly; its
 		// evidence was already sent without any local peer pre-election.
 		if event.Reason == "answered_elsewhere" || event.Reason == "wake_rejected" {
-			e.disconnect(event.Reason)
+			// HANGUP ends the call, not the healthy native connection. Closing
+			// it here makes ordinary wake rejection trigger upstream backoff.
+			e.cancelOutput()
+			e.player.Flush()
+			e.outputOpen, e.outputReceived = false, false
+			e.state.Heard, e.state.Reply = "", ""
+			e.resetOutput()
 			return nil
 		}
 		if event.Listen && !e.discard {
@@ -298,6 +307,8 @@ func (e *Engine) Handle(generation uint64, event Event) error {
 		return nil
 	}
 	switch event.Kind {
+	case "announcement":
+		e.announcing = event.Active
 	case "timer_ringing":
 		e.state.Alert = true
 	case "timer_stopped":
@@ -349,6 +360,12 @@ func (e *Engine) Output(generation uint64, samples []int16) error {
 	// a local turn and its TTS_STREAM_START. HA can send a cancelled task's
 	// final STREAM_END on its freshly reconnected client.
 	if e.state.Backend == string(Assist) && (!e.active || !e.outputOpen) {
+		e.mu.Unlock()
+		return nil
+	}
+	// Native call output ends at HANGUP. Only explicitly signaled upstream
+	// alerts/announcements may play outside a call; idle frames cannot revive it.
+	if e.state.Backend == string(Incubator) && !e.active && !e.state.Alert && !e.announcing {
 		e.mu.Unlock()
 		return nil
 	}

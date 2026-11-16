@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root="$(cd "$(dirname "$0")/../.." && pwd)"
+cd "$root"
+work="$root/.amp/in/orb-backup"
+mkdir -p "$work"
+checkout() {
+  local url="$1" dir="$2" pin="$3"
+  if ! test -d "$dir/.git"; then git clone "$url" "$dir"; fi
+  # Upstream tracks these optional native extensions; our build replaces only
+  # those binaries. Never reset or silently accept modified upstream source.
+  git -C "$dir" diff --quiet -- . ':!adapt_ctc/_grammar.abi3.so' ':!adapt_ctc/_viterbi.abi3.so'
+  git -C "$dir" fetch origin "$pin"
+  git -C "$dir" checkout --detach "$pin"
+  test "$(git -C "$dir" rev-parse HEAD)" = "$pin"
+}
+checkout https://github.com/OHF-Voice/voice-incubator "$work/voice-incubator" 38b573b13a92f0654b24611a3a6355c8e8c4d5c3
+checkout https://github.com/OHF-Voice/integration-voice-incubator "$work/integration-voice-incubator" e02de9447868b7cdc90dc6437618662b3ebef6f6
+sudo apt-get update -qq
+sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq libopenblas0-pthread libsndfile1 build-essential libfluidsynth3 musescore-general-soundfont-small
+app="$work/voice-incubator"
+uv venv --allow-existing --python 3.13.5 "$app/.venv"
+uv pip sync --python "$app/.venv/bin/python" --require-hashes lab/incubator/requirements.lock
+"$app/.venv/bin/python" lab/incubator/models.py
+(
+  cd "$app"
+  mkdir -p models/wake-kaldi-decoderd
+  bash wyoming_wake_kaldi/decoderd/build.sh "$app/models/wake-kaldi-tools" "$app/models/wake-kaldi-decoderd/verify_decoderd"
+  .venv/bin/python setup.py build_ext --inplace
+)
+state="${ENCORE_LAB_STATE:-$HOME/.local/state/encore-lab}"
+mkdir -p "$state/ha/custom_components"
+ln -sfn "$work/integration-voice-incubator/custom_components/voice_incubator" "$state/ha/custom_components/voice_incubator"
+echo 'Restart HA after installing its custom integration. See lab/incubator/README.md.'

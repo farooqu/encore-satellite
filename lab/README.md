@@ -35,7 +35,10 @@ fixture integration/configuration; restart Encore after changing Go code.
 
 Provisioning onboards **only this isolated loopback instance**, selects the
 deterministic pipeline, exposes `input_boolean.encore_lamp`, and pairs the virtual
-satellite through HA's actual mDNS/configuration/Noise flow. It removes cloud/demo
+satellite through HA's actual mDNS/configuration/Noise flow. After authenticated
+login, it confirms a healthy active HTTP configuration trial so this HA dev
+build does not roll it back and restart after five minutes. Failed/inactive
+trials are never promoted. It removes cloud/demo
 integrations automatically created by onboarding. It never reads a production HA
 token. State is private under `$HOME/.local/state/encore-lab` (override with
 `ENCORE_LAB_STATE` consistently for both services and clients). Credentials and
@@ -49,6 +52,27 @@ restarts the Encore service to reset its virtual playback instrumentation. It
 changes only lab helpers/scenarios, leaves HA authentication intact, and restores
 playback hold/mute on exit. Do not repurpose these scripts for a real household
 instance.
+
+## Optional real upstream service suites
+
+Run these separately and serially; they share HA and port 8100. Stop Incubator
+before starting the Assist wake host, and stop that host before Incubator. Use
+the scoped setup/reproduction instructions rather than assuming shared setup
+downloads models or installs the custom integration:
+
+- [Native Incubator](incubator/README.md): actual upstream Kaldi, CTC/TDT,
+  HA integration/intents and Piper, with synthetic capture/detection and a
+  clocked virtual speaker. Covers upstream elections, rejection, confirmation,
+  announcements and duration timers without implementing assistant logic here.
+- [Experimental Assist wake verification](assist-wake/README.md): actual pinned
+  HA and app-voice Kaldi, with fixture STT/TTS/capture/playback. Explicit opt-in;
+  default Assist capabilities stay 7. Verifier fault injection is labeled and
+  demonstrates HA's fail-open fallback, not confirmed wake acceptance.
+
+The scoped scripts run only in this isolated lab. Their downloaded services,
+models and tools keep separate licenses; [Incubator notices](incubator/NOTICES.md)
+include the GPL-licensed Piper dependency and model-specific terms. No binary
+distribution permission or device support follows from running these tests.
 
 ## Real services versus fixtures
 
@@ -69,27 +93,34 @@ Do not expose these lab control/Incubator ports to an untrusted network.
 
 ## Compatibility boundary and gaps
 
-Advertised Assist bits are exactly voice assistant, speaker and API audio (7).
-There are no invented partial captions, timer scheduling, media-player entities,
-announcements, downloads, AEC/multichannel audio or working hardware profiles.
+Default Assist bits are exactly voice assistant, speaker and API audio (7).
+There are no invented partial captions, local timer scheduling, media-player
+entities, Assist announcements, downloads, AEC/multichannel audio or working
+hardware profiles. Native Incubator can supply explicit announcement and timer
+audio; Encore only presents and drains it, and forwards Stop upstream.
 An empty entity list terminates normally. Only one selected backend owns a
 session; unsupported/competing subscribers cannot displace it.
 
 HA's experimental wake-audio verification path additionally requires negotiated
-`WAKE_WORD_AUDIO`, actual wake evidence and a configured upstream Voice Support
-verifier. Encore does **not** yet advertise or implement that extension. Merely
-running this dev version or enabling a Labs option does not establish support.
+`WAKE_WORD_AUDIO`, actual wake evidence, active models supported by a configured
+upstream Voice Support verifier, and Labs enabled. The adapter implements the
+version-scoped opt-in; merely running this dev version or enabling Labs does not
+establish support. This HA revision needs the public wake-word configuration
+bootstrap again after TCP reconnect. A normal wake-end event cannot distinguish
+successful verification from upstream verifier-error fallback.
 Quality-based cross-device arbitration for Assist is also not implemented.
 
-Native Incubator has separate transport/core-contract checks. Those are not a
-claim that its full app, models, verifier, HA integration or real recognition has
-been tested. Keep its upstream election evidence intact; never run a competing
-local pre-election. An exploratory run of upstream commit
-`38b573b13a92f0654b24611a3a6355c8e8c4d5c3` installed its Python environment,
-downloaded wake assets and built its Kaldi verifier after installing OpenBLAS.
-Startup still failed its English shared CTC/transducer model check. That
-exploration is not part of the reproducible lab setup or a successful upstream
-integration. See [executed proof](proof.md) for coverage and remaining gaps.
+Native Incubator preserves upstream election evidence and honors its decision;
+no local pre-election runs. Negative HANGUP ends a call without disconnecting a
+healthy transport. See [executed proof](proof.md) and the scoped reports for
+real-service coverage and remaining gaps.
+
+The core and loopback fixture support live backend selection, not yet a product
+setup/HA selector. Common ESPHome controls should share one connection and stay
+independent of voice selection. The pinned Incubator integration creates a
+separate persistent timer device, not another Assist entity or a voice-availability
+signal. Marking only the existing Assist entity unavailable while retaining
+common controls needs HA-side support; no duplicate identity is fabricated here.
 
 There is no Dot/Android runtime, installer, APK, update mechanism or binary
 release. The user's planned hardware remains aspirational. New Encore code's

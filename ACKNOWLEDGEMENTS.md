@@ -38,6 +38,15 @@ Encore assistant. No Kiosk Satellite application code or assets are included.
 - Home Assistant and its Python dependencies are downloaded separately for the
   development lab under their respective upstream licenses. The lab fixtures are
   Encore test instrumentation, not replacement implementations of HA protocols.
+- The optional real-service labs download **Voice Incubator**, its HA integration
+  and **OHF Voice Support / app-voice** separately at documented source pins.
+  Their Apache-2.0 app licenses do not relicense their dependencies or models.
+  In particular the tested `piper-tts 1.8.0` is GPL-3.0-or-later. Models, voices,
+  soundfonts and system libraries have separate terms; see
+  [Incubator lab notices](lab/incubator/NOTICES.md) and the
+  [Assist wake lab](lab/assist-wake/README.md). These are local validation
+  environments, not dependencies bundled into Encore's Go runtime or approved
+  release packages.
 
 No Panel Java code, DSP frontend, wake model, TensorFlow implementation, FFT,
 native Incubator model runtime, firmware blob, sound or visual asset has been

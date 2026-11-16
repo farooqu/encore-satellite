@@ -29,12 +29,15 @@ with a small conversation overlay. Timers, alarms, and household automations
 stay with Home Assistant or Voice Incubator.
 
 **Early implementation has started.** There's nothing to install on a device
-yet, and device support hasn't been verified. The first increment is a shared
-Go protocol core and a [reproducible Home Assistant lab](lab/README.md), tested
-against a pinned 2026.12 development build with virtual audio and deterministic
-speech fixtures. Native Incubator has protocol-contract tests; full upstream
-integration is not yet verified. See the [foundation scope](docs/foundation.md)
-for what works and what remains.
+yet, and device support hasn't been verified. The shared Go protocol core has a
+[reproducible Home Assistant lab](lab/README.md) pinned to a 2026.12 development
+build. [Native Incubator](docs/incubator-validation.md) is tested with its real
+upstream wake verification, recognition, HA actions and speech output.
+[Experimental Assist wake verification](docs/assist-wake-validation.md) is an
+explicit opt-in. Capture and playback are virtual; these are protocol checks,
+not hardware or acoustic-quality results. See the [foundation scope](docs/foundation.md)
+for what works and what remains, including the planned backend selector and
+shared device controls.
 
 ## Devices
 
@@ -52,11 +55,20 @@ My planned home setup includes multiple units and variations of:
 
 These are the devices I intend to use, not a tested compatibility list.
 
+The [device package sections](docs/device-packages/README.md) are planned
+metadata and documentation only, not installable support. The Tab A7 Lite is the
+intended first Android validation tablet.
+
 ## Want to help?
 
 Contributions for other devices are welcome where the shared core can work.
 If you have a way to run custom code on one and can help test it, I'd love to
 hear from you.
+
+The [foundation checks](.github/workflows/check.yml) run code and build checks;
+the real-service suites run separately in the lab. The
+[CI and release policy](release/README.md) explains that boundary and why there
+are no device releases, updater or signing trust yet.
 
 I intend to use a permissive license so others can build on the work. The license
 hasn't been selected yet.

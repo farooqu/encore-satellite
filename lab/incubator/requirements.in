@@ -1,0 +1,4 @@
+# Compile from the exact upstream checkout installed by setup.
+-r ../../.amp/in/orb-backup/voice-incubator/requirements.txt
+setuptools==84.2.1
+wheel==0.48.0

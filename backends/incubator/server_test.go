@@ -188,12 +188,49 @@ func TestNativeWireEvidenceEndpointingDrainAndFollowUp(t *testing.T) {
 		t.Fatal(follow)
 	}
 	send(t, c, 0x13, []byte(`{"reason":"answered_elsewhere","listen":true}`))
-	_ = c.SetReadDeadline(time.Now().Add(time.Second))
-	if _, err := c.Read(byteRead[:]); err != io.EOF {
-		t.Fatalf("upstream election did not close loser: %v", err)
+	deadline = time.Now().Add(time.Second)
+	for e.Snapshot().Reason != "answered_elsewhere" {
+		if time.Now().After(deadline) {
+			t.Fatal("upstream election not received")
+		}
+		time.Sleep(time.Millisecond)
 	}
-	if e.Snapshot().Reason != "answered_elsewhere" {
-		t.Fatal(e.Snapshot())
+	if err := e.StartManual(); err != nil {
+		t.Fatal("losing candidate needs reconnect", err)
+	}
+	next := object(t, receive(t, c, 0x02))
+	if next["wake_word"] != "manual" || next["preroll_bytes"] != float64(0) {
+		t.Fatal("loser followed up or reused old audio", next)
+	}
+}
+
+func TestNativeAnnouncementOwnsMultipleStreamsUntilInactive(t *testing.T) {
+	p := &speaker{}
+	e, address := start(t, p)
+	c := connect(t, address)
+	receive(t, c, 0x01)
+	send(t, c, 0x12, []byte(`{"type":"announcement","data":{"active":true}}`))
+	for _, pcm := range [][]byte{{31, 0, 0, 128}, {254, 255, 1, 1}} {
+		send(t, c, 0x10, pcm)
+		send(t, c, 0x11, nil)
+		receive(t, c, 0x06)
+	}
+	send(t, c, 0x12, []byte(`{"type":"announcement","data":{"active":false}}`))
+	send(t, c, 0x10, []byte{99, 0})
+	// A later timer event is a reader barrier, not authority for the earlier PCM.
+	send(t, c, 0x12, []byte(`{"type":"timer_ringing"}`))
+	deadline := time.Now().Add(time.Second)
+	for !e.Snapshot().Alert {
+		if time.Now().After(deadline) {
+			t.Fatal("wire reader stuck after announcement")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	p.mu.Lock()
+	got := slices.Clone(p.pcm)
+	p.mu.Unlock()
+	if !slices.Equal(got, []int16{31, -32768, -2, 257}) {
+		t.Fatal("announcement stream lost or inactive output accepted", got)
 	}
 }
 

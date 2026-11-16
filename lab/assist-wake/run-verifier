@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root="$(cd "$(dirname "$0")/../.." && pwd)"
+cd "$root/.amp/in/orb-backup/app-voice/voice_support"
+export OPENBLAS_NUM_THREADS=1
+# Upstream-supported Kaldi-only mode: do not imply the optional Parakeet second
+# opinion/placement has been downloaded or tested.
+exec "$root/lab/assist-wake/.venv/bin/python" -m voice --host 127.0.0.1 --no-mdns --no-ctc --debug

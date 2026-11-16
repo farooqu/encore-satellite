@@ -220,8 +220,40 @@ func TestIncubatorElectionAndFollowUp(t *testing.T) {
 		t.Fatal("invented missing caption")
 	}
 	_ = e.Handle(g, session.Event{Kind: "hangup", Reason: "answered_elsewhere", Listen: true})
-	if !l.closed || e.Snapshot().Reason != "answered_elsewhere" {
+	if l.closed || !e.Snapshot().Connected || e.Snapshot().Reason != "answered_elsewhere" {
 		t.Fatal("upstream election ignored")
+	}
+}
+
+func TestRejectedNativeCandidateKeepsConnectionAndFencesOldOutput(t *testing.T) {
+	for _, reason := range []string{"answered_elsewhere", "wake_rejected"} {
+		t.Run(reason, func(t *testing.T) {
+			e, l, p, g := fixture(t)
+			_ = e.StartManual()
+			_ = e.Handle(g, session.Event{Kind: "responding", Text: "old reply"})
+			_ = e.Handle(g, session.Event{Kind: "hangup", Reason: reason, Listen: true})
+			_ = e.Handle(g, session.Event{Kind: "responding", Text: "late reply"})
+			_ = e.Output(g, []int16{91})
+			_ = e.EndOutput(g)
+			if l.closed || !e.Snapshot().Connected || e.Snapshot().Phase != "idle" || e.Snapshot().Reply != "" || p.writes != 0 || len(l.commands) != 1 {
+				t.Fatal("rejection closed connection, followed up or revived old output", e.Snapshot())
+			}
+			if err := e.StartManual(); err != nil {
+				t.Fatal("next turn requires reconnect", err)
+			}
+			_ = e.Output(g, []int16{-17, 29})
+			_ = e.EndOutput(g)
+			if p.writes != 2 || l.commands[len(l.commands)-1].Kind != "drained" {
+				t.Fatal("next turn did not play and complete")
+			}
+			_ = e.Handle(g, session.Event{Kind: "hangup", Reason: reason})
+			_ = e.Handle(g, session.Event{Kind: "timer_ringing"})
+			_ = e.Output(g, []int16{43})
+			_ = e.EndOutput(g)
+			if p.writes != 3 {
+				t.Fatal("rejection suppressed a subsequent upstream timer")
+			}
+		})
 	}
 }
 
@@ -248,5 +280,30 @@ func TestAssistIdleStreamEndAfterReconnectDoesNotClaimPlayback(t *testing.T) {
 	_ = e.EndOutput(g)
 	if p.writes != 2 || l.commands[len(l.commands)-1].Kind != "drained" {
 		t.Fatal("valid response no longer plays/completes")
+	}
+}
+
+func TestNativeAnnouncementAllowsMultipleStreamsButNotIdleOrStoppedOutput(t *testing.T) {
+	e, l, p, g := fixture(t)
+	_ = e.Handle(g, session.Event{Kind: "announcement", Active: true})
+	for _, pcm := range [][]int16{{-7}, {13, -23}} {
+		_ = e.Output(g, pcm)
+		_ = e.EndOutput(g)
+	}
+	if p.writes != 3 || len(l.commands) != 2 || l.commands[0].Kind != "drained" || l.commands[1].Kind != "drained" {
+		t.Fatal("announcement chime and speech did not each play and complete")
+	}
+	_ = e.Handle(g, session.Event{Kind: "announcement", Active: false})
+	_ = e.Output(g, []int16{79})
+	_ = e.EndOutput(g)
+	_ = e.Handle(g, session.Event{Kind: "announcement", Active: true})
+	_ = e.Stop()
+	_ = e.Output(g, []int16{83})
+	_ = e.EndOutput(g)
+	if p.writes != 3 || len(l.commands) != 2 {
+		t.Fatal("idle/stopped announcement audio played or claimed completion")
+	}
+	if err := e.StartManual(); err != nil {
+		t.Fatal("stopping idle announcement wedged next turn", err)
 	}
 }

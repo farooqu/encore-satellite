@@ -67,26 +67,69 @@ the full-turn assertion that all expected samples had actually played with an
 empty sink queue. Restoring the real drain and rerunning the same suite passed,
 including the stronger held-sink case. The deliberate mutation is not included.
 
-## Native Incubator is contract-tested, not upstream-validated
+## Both upstream increments passed after integration
 
 Race-enabled TCP tests cover protocol-2 framing/hello, original pre-roll and
 candidate scores, continuing capture during upstream processing, upstream
 `answered_elsewhere`, zero-pre-roll follow-up, held playback drain, cancellation,
 late output, reconnect/backend selection, competing peers and malformed frames.
-They use explicit peer fixtures, not the full Voice Incubator service.
+Separate real-service suites now extend that contract coverage. On the combined
+checkout reconciled with `73f78a1` from main, the coordinator executed:
 
-An exploratory upstream startup reached the missing English shared
-CTC/transducer model check after installing dependencies, fetching wake assets
-and building Kaldi. It did not reach a running assistant. Resolving upstream
-model layout/download prerequisites and exercising actual wake verification,
-recognition, election and HA integration remain required.
+- `lab/incubator/setup` and its fixture generator, then actual supervised
+  app/integration/HA services and `lab/incubator/test_native.py`: all 13 cases
+  passed. Real Kaldi, shared CTC/TDT, HA lamp action and Piper were exercised;
+  original scores and the 32,000-byte pre-roll prefix were unchanged. Held drain,
+  Stop, rejection followed immediately by another turn on the same connection,
+  both upstream election outcomes, idle two-stream announcements, confirmation
+  follow-up and an HA duration timer/stop all passed. Capture/detection and sink
+  are fixtures; the second candidate is a named wire/sink fixture.
+- `lab/assist-wake/setup`, actual app-voice Kaldi and HA, then `test.py`: passed
+  twice. The real verifier aligned the 860-ms complete synthesized utterance at
+  680 ms; HA passed exactly 21,760 bytes to fixture STT. Real silence rejection,
+  recovery, missing configuration, cancellation, manual turns and live toggling
+  passed. This extension remains explicitly configured and default bits stay 7.
+- `lab/assist-wake/test_peers.py`: encrypted fixture peers passed metadata,
+  capability and malformed-evidence checks. `test_failures.py`: real HA plus
+  clearly labeled verifier fault fixtures passed cancellation/task-cleanup and
+  confirmed fail-open fallback, not a successful verifier verdict.
+- After stopping optional services, unchanged `make lab-test` passed again on
+  the combined tree, leaving baseline HA and Encore running.
+
+Integration exposed a fresh-state harness bug: the wake suite waited for a
+connection before creating its pairing entry. The initial run failed with
+`Timed out: clean connection before proof`; creating the entry before waiting
+and awaiting entity registration made the same cold-state sequence pass. A
+cold verifier readiness attempt also expired while upstream was still building
+graphs; waiting for the actual `/info` endpoint resolved it without patching
+the verifier. Earlier exploratory Piper cache layout was preserved and migrated
+to upstream's expected model symlinks before successful native setup.
+
+The native before/after suite independently failed on the original negative
+HANGUP disconnect and passed with the shared lifecycle fix. The native adapter
+now retains explicit announcement Active state rather than accepting arbitrary
+idle output. See [native evidence](../docs/incubator-validation.md) and
+[wake evidence](../docs/assist-wake-validation.md) for exact upstream pins,
+earlier fault-sensitivity runs, setup, provenance and limitations.
+
+HTTP provisioning now confirms only a healthy pending configuration that HA is
+actually running. A fresh private HA state promoted to stable with no rollback
+deadline; repeat provisioning and the full baseline suite passed. Failed or
+inactive trials are not promoted. No production credentials were used.
 
 ## Explicitly unproven
 
 No physical capture/playback, acoustic quality, AEC, EQ, wake model, hardware mute,
 Dot/Android runtime, dashboard host, installer, updater or performance claim.
-No Assist cross-device quality arbitration or experimental WAKE_WORD_AUDIO
-verification. No partial captions inferred when upstream supplies none. The
-lab remains running under supervised services; authentication and Noise secrets
-stay outside Git. New Encore licensing remains unselected; required included
-MIT notices are retained separately from design acknowledgements.
+No Assist cross-device quality arbitration, production backend-selector/common
+control surface, scheduled-alarm execution or trained host wake execution.
+Experimental WAKE_WORD_AUDIO is verified only against its documented development
+pin and real Kaldi path, not optional CTC or future HA versions. Upstream verifier
+faults fail open and are not distinguishable as verification success on the normal
+wake-end event. No partial captions are inferred when upstream supplies none.
+The baseline lab remains supervised; authentication and Noise secrets stay outside
+Git. Optional services are stopped after integration checks and can be restarted
+using their scoped instructions. New Encore licensing remains unselected;
+included MIT notices remain separate from design credit. Separately installed
+Piper is GPL-licensed and models have individual terms; this lab proof is not
+permission to bundle them into releases.

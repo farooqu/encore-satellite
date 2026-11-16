@@ -140,13 +140,14 @@ func (s *Server) serveConn(ctx context.Context, conn net.Conn) error {
 			var event struct {
 				Type string `json:"type"`
 				Data struct {
-					Text string `json:"text"`
+					Text   string `json:"text"`
+					Active bool   `json:"active"`
 				} `json:"data"`
 			}
 			if err = json.Unmarshal(data, &event); err != nil {
 				return fmt.Errorf("incubator: invalid event: %w", err)
 			}
-			err = s.Engine.Handle(generation, session.Event{Kind: event.Type, Text: event.Data.Text})
+			err = s.Engine.Handle(generation, session.Event{Kind: event.Type, Text: event.Data.Text, Active: event.Data.Active})
 		case 0x13:
 			var event struct {
 				Reason string `json:"reason"`
