@@ -62,12 +62,15 @@ type Engine struct {
 	inputOpen, outputOpen, runEnded bool
 	outputReceived                  bool
 	announcing                      bool
+	stoppingTimer                   bool
 	pre                             audio.PreRoll
 	lastSequence                    uint64
 	lastTime                        time.Duration
 	haveFrame                       bool
 	output                          context.Context
 	cancelOutput                    context.CancelFunc
+	activityHandler                 func(bool)
+	voiceActive                     bool
 }
 
 func New(player audio.Playback) *Engine {
@@ -80,6 +83,30 @@ func (e *Engine) Snapshot() presentation.State {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.state
+}
+
+// SetActivityHandler connects speaker policy to the entire local voice activity,
+// including listening, processing, response drain, announcements and alerts.
+// The handler runs under the session lock: it must return promptly and must not
+// call the engine. It receives current state immediately. Music gain, user mute
+// and privacy/stop gates remain the output host's responsibility.
+func (e *Engine) SetActivityHandler(handler func(bool)) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.activityHandler = handler
+	if handler != nil {
+		handler(e.voiceActive)
+	}
+}
+
+func (e *Engine) publishActivity() {
+	active := e.active || e.outputOpen || e.announcing || e.state.Alert
+	if active != e.voiceActive {
+		e.voiceActive = active
+		if e.activityHandler != nil {
+			e.activityHandler(active)
+		}
+	}
 }
 
 // Select explicitly changes ownership, even when the requested adapter is not
@@ -135,10 +162,12 @@ func (e *Engine) disconnect(reason string) {
 	e.inputOpen, e.outputOpen, e.runEnded = false, false, false
 	e.outputReceived = false
 	e.announcing = false
+	e.stoppingTimer = false
 	e.state = presentation.State{Backend: e.state.Backend, Muted: e.state.Muted, Phase: "disconnected", Reason: reason}
 	if e.state.Muted {
 		e.state.Phase = "muted"
 	}
+	e.publishActivity()
 }
 
 // SetMuted is fail-closed: close transport as well as clearing pre-roll and
@@ -217,6 +246,7 @@ func (e *Engine) start(detection wake.Detection, pre []int16) error {
 	e.inputOpen, e.runEnded = true, false
 	e.outputReceived = false
 	e.pre.Clear()
+	e.publishActivity() // Duck before the backend can begin capture or respond.
 	if err := e.send(Command{Kind: "start", Detection: detection, PreRollBytes: len(pre) * 2}); err != nil {
 		return err
 	}
@@ -231,13 +261,17 @@ func (e *Engine) start(detection wake.Detection, pre []int16) error {
 }
 
 // Stop silences locally before notifying the peer; late output and presentation
-// cannot revive the cancelled call. A new call waits for AUDIO_OUT_END or reconnect.
+// cannot revive the cancelled call. A new call waits for AUDIO_OUT_END or reconnect;
+// a timer-only cancellation may instead finish with timer_stopped.
 func (e *Engine) Stop() error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.cancelOutput()
 	e.player.Flush()
 	e.pre.Clear()
+	if !e.discard && e.state.Alert && e.outputOpen && !e.active && !e.announcing {
+		e.stoppingTimer = true
+	}
 	e.discard = e.discard || e.active || e.outputOpen
 	active, alert := e.active, e.state.Alert
 	e.active = false
@@ -252,6 +286,7 @@ func (e *Engine) Stop() error {
 	if e.state.Muted {
 		e.state.Phase = "muted"
 	}
+	e.publishActivity()
 	if alert {
 		if err := e.send(Command{Kind: "stop_alert"}); err != nil {
 			return err
@@ -266,6 +301,7 @@ func (e *Engine) Stop() error {
 func (e *Engine) Handle(generation uint64, event Event) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	defer e.publishActivity()
 	if generation != e.generation || e.link == nil {
 		return ErrStale
 	}
@@ -302,6 +338,13 @@ func (e *Engine) Handle(generation uint64, event Event) error {
 			return e.start(wake.Detection{Word: "follow_up"}, nil)
 		}
 		return nil
+	}
+	if event.Kind == "timer_stopped" && e.stoppingTimer {
+		// Cancelling paced timer PCM can skip AUDIO_OUT_END. This ordered
+		// upstream acknowledgement ends only a timer-owned discard fence,
+		// never a cancelled call or announcement that overlapped the timer.
+		e.stoppingTimer, e.discard = false, false
+		e.resetOutput()
 	}
 	if e.discard {
 		return nil
@@ -374,6 +417,7 @@ func (e *Engine) Output(generation uint64, samples []int16) error {
 		e.outputOpen = true
 		e.outputReceived = true
 	}
+	e.publishActivity()
 	e.mu.Unlock()
 	if discard {
 		return nil
@@ -401,6 +445,7 @@ func (e *Engine) EndOutput(generation uint64) error {
 		} else {
 			e.state.Phase = "working"
 		}
+		e.publishActivity()
 		e.mu.Unlock()
 		return nil
 	}
@@ -412,12 +457,14 @@ func (e *Engine) EndOutput(generation uint64) error {
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	defer e.publishActivity()
 	if generation != e.generation || e.link == nil {
 		return ErrStale
 	}
 	e.outputOpen = false
 	if ctx.Err() != nil || discarded || e.discard {
 		e.discard = false
+		e.stoppingTimer = false
 		e.resetOutput()
 		return nil // Cancelled samples were not played: never claim they drained.
 	}

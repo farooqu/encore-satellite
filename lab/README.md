@@ -68,6 +68,11 @@ downloads models or installs the custom integration:
   HA and app-voice Kaldi, with fixture STT/TTS/capture/playback. Explicit opt-in;
   default Assist capabilities stay 7. Verifier fault injection is labeled and
   demonstrates HA's fail-open fallback, not confirmed wake acceptance.
+- [Sendspin music and voice ducking](sendspin/README.md): actual Music Assistant
+  queue and C++ client, plus Assist/Incubator turns, feeding a virtual mixed
+  audio sink. Independently switchable and disabled by default; no physical
+  audio or synchronization claim. Follow its separate service instructions to
+  avoid two satellite hosts competing for port 8099.
 
 The scoped scripts run only in this isolated lab. Their downloaded services,
 models and tools keep separate licenses; [Incubator notices](incubator/NOTICES.md)

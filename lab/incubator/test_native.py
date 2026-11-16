@@ -416,6 +416,24 @@ async def main():
             stopped = await state()
             assert not stopped["session"]["alert"] and stopped["playback"]["queued"] == 0
             print("PASS real HA duration timer → upstream timer_ringing/audio → immediate device Stop → upstream timer_stopped", flush=True)
+
+            await request("PUT", APP + "/api/commands/encore_lamp", {"spec": {
+                "description": "turn on the lamp", "examples": ["turn on the lamp"],
+                "slots": {"entity": ["input_boolean.encore_lamp"]}, "intent": "HassTurnOn",
+                "response": "The lamp is on.",
+            }})
+            await ha.api("POST", "/api/services/input_boolean/turn_off", {"entity_id": "input_boolean.encore_lamp"})
+            wire.frames.clear()
+            before = (await state())["playback"]
+            await start()
+            await send(audio)
+            recovered = await until(idle, "next real turn after timer Stop, without reconnect")
+            assert (await ha.api("GET", "/api/states/input_boolean.encore_lamp"))["state"] == "on"
+            output = b"".join(wire.bodies("app", 0x10))
+            assert recovered["playback"]["played"] - before["played"] == len(output) // 2 > 0
+            assert not wire.bodies("encore", 1)
+            assert len(wire.bodies("encore", 6)) == 1
+            print("PASS timer Stop → next wake/recognition/HA intent/Piper drain, same native transport", flush=True)
         finally:
             await command("hold_playback", value=False)
             await command("stop")

@@ -18,6 +18,8 @@ type VirtualSpeaker struct {
 	hold                                      bool
 	queued, received, played, flushed, drains int
 	digest                                    hash.Hash
+	samples                                   []int16
+	music                                     *Music
 }
 
 type PlaybackState struct {
@@ -41,10 +43,16 @@ func NewSpeaker(ctx context.Context) *VirtualSpeaker {
 				return
 			case <-ticker.C:
 				p.mu.Lock()
+				var voice []int16
 				if !p.hold {
 					n := min(p.queued, 160)
 					p.queued -= n
 					p.played += n
+					voice = p.samples[:n]
+					p.samples = p.samples[n:]
+				}
+				if p.music != nil {
+					p.music.render(voice)
 				}
 				p.mu.Unlock()
 			}
@@ -65,6 +73,7 @@ func (p *VirtualSpeaker) Write(ctx context.Context, samples []int16) error {
 		if p.queued+len(samples) <= 8192 {
 			p.queued += len(samples)
 			p.received += len(samples)
+			p.samples = append(p.samples, samples...)
 			for _, sample := range samples {
 				var b [2]byte
 				binary.LittleEndian.PutUint16(b[:], uint16(sample))
@@ -110,7 +119,17 @@ func (p *VirtualSpeaker) Flush() {
 	defer p.mu.Unlock()
 	p.flushed += p.queued
 	p.queued = 0
+	p.samples = nil
 }
+
+// AttachMusic adds a separate 48 kHz stereo music route to this virtual clock.
+// Voice Flush/Drain still affect only the voice queue.
+func (p *VirtualSpeaker) AttachMusic(music *Music) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.music = music
+}
+
 func (p *VirtualSpeaker) Hold(hold bool) { p.mu.Lock(); defer p.mu.Unlock(); p.hold = hold }
 func (p *VirtualSpeaker) Snapshot() PlaybackState {
 	p.mu.Lock()

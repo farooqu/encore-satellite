@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT=$(git -C "$(dirname "$0")" rev-parse --show-toplevel)
+HERE="$ROOT/lab/sendspin/server"
+STATE="$HOME/.local/state/encore-sendspin-lab"
+SOURCE="$ROOT/.amp/in/orb-backup/upstream-research/music-assistant-server"
+TOOLS="$ROOT/.amp/in/orb-backup/sendspin-server-tools"
+REV=07780231361dd45668f937fc3fe950b38527fde0
+ARCHIVE=ffmpeg-n8.1.3-35-gf1acb0a266-linux64-gpl-8.1
+umask 077
+mkdir -p "$STATE" "$TOOLS" "$(dirname "$SOURCE")"
+if [[ ! -d "$SOURCE/.git" ]]; then
+  git clone --depth 1 --filter=blob:none https://github.com/music-assistant/server.git "$SOURCE"
+fi
+if [[ $(git -C "$SOURCE" rev-parse HEAD) != "$REV" ]]; then
+  git -C "$SOURCE" fetch --depth 1 origin "$REV"
+  git -C "$SOURCE" checkout --detach "$REV"
+fi
+[[ -z $(git -C "$SOURCE" status --porcelain) ]] || { echo 'MA source must be clean' >&2; exit 1; }
+if [[ ! -f "$TOOLS/ffmpeg.tar.xz" ]]; then
+  curl -fL --retry 2 "https://github.com/FFmpeg-Builds/FFmpeg-Builds/releases/download/autobuild-2026-11-16-15-29/$ARCHIVE.tar.xz" -o "$TOOLS/ffmpeg.tar.xz"
+fi
+echo "18565f806f14e81508f6fcdcaf54c514e8ae6d5d16f775418096e6354961bf52  $TOOLS/ffmpeg.tar.xz" | sha256sum -c -
+if [[ ! -x "$TOOLS/$ARCHIVE/bin/ffmpeg" ]]; then
+  tar -xJf "$TOOLS/ffmpeg.tar.xz" -C "$TOOLS"
+fi
+URLLIB3_NO_OVERRIDE=1 UV_PROJECT_ENVIRONMENT="$STATE/venv" uv sync --frozen --project "$HERE"
+"$STATE/venv/bin/python" "$HERE/prepare.py"
+echo 'Ready. Start with:'
+printf 'amp orb service start sendspin-ma --command %q --port 8097\n' "$HERE/run"

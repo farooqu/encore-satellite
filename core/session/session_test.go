@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -65,6 +66,181 @@ func fixture(t *testing.T) (*session.Engine, *link, *player, uint64) {
 		t.Fatal(err)
 	}
 	return e, l, p, g
+}
+
+func TestVoiceActivityCoversListeningThroughPhysicalDrain(t *testing.T) {
+	for _, backend := range []session.Backend{session.Assist, session.Incubator} {
+		t.Run(string(backend), func(t *testing.T) {
+			p := &player{entered: make(chan struct{}), release: make(chan struct{})}
+			e := session.New(p)
+			_ = e.Select(backend)
+			g, err := e.Attach(&link{backend: backend})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var active atomic.Bool
+			e.SetActivityHandler(active.Store)
+			if active.Load() {
+				t.Fatal("idle voice claims output")
+			}
+			if err := e.Wake(wake.Detection{Word: "lab-wake"}); err != nil {
+				t.Fatal(err)
+			}
+			if !active.Load() {
+				t.Fatal("microphone listening did not claim ducking")
+			}
+			_ = e.Handle(g, session.Event{Kind: "processing"})
+			if !active.Load() {
+				t.Fatal("processing released ducking")
+			}
+			_ = e.Handle(g, session.Event{Kind: "output_start"})
+			_ = e.Output(g, []int16{307, -891})
+			if backend == session.Assist {
+				_ = e.Handle(g, session.Event{Kind: "run_end"})
+			} else {
+				_ = e.Handle(g, session.Event{Kind: "hangup"})
+			}
+			done := make(chan error, 1)
+			go func() { done <- e.EndOutput(g) }()
+			<-p.entered
+			if !active.Load() {
+				t.Fatal("wire end released ducking before physical drain")
+			}
+			close(p.release)
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+			if active.Load() {
+				t.Fatal("finished turn retained ducking")
+			}
+			_ = e.StartManual()
+			_ = e.Stop()
+			if active.Load() {
+				t.Fatal("cancelled turn retained ducking")
+			}
+		})
+	}
+}
+
+func TestVoiceActivityKeepsOtherOwnersAndFencesOldConnection(t *testing.T) {
+	e, _, _, g := fixture(t)
+	var active atomic.Bool
+	e.SetActivityHandler(active.Store)
+	_ = e.StartManual()
+	_ = e.Handle(g, session.Event{Kind: "timer_ringing"})
+	_ = e.Handle(g, session.Event{Kind: "hangup", Reason: "wake_rejected"})
+	if !active.Load() {
+		t.Fatal("rejection released an active timer")
+	}
+	_ = e.Handle(g, session.Event{Kind: "timer_stopped"})
+	if active.Load() {
+		t.Fatal("last owner did not release ducking")
+	}
+	_ = e.Select(session.Assist)
+	ng, err := e.Attach(&link{backend: session.Assist})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = e.StartManual()
+	e.Disconnect(g, "old reader")
+	if !active.Load() {
+		t.Fatal("old connection released current turn")
+	}
+	e.Disconnect(ng, "current reader")
+	if active.Load() {
+		t.Fatal("disconnect retained activity")
+	}
+}
+
+func TestTimerStopRecoversWithoutStreamEndAndKeepsCallFence(t *testing.T) {
+	for _, tt := range []struct {
+		name                                        string
+		callActive, announcementActive, streamEnded bool
+	}{
+		{name: "timer only"},
+		{name: "timer overlaps call", callActive: true},
+		{name: "timer overlaps announcement", announcementActive: true},
+		{name: "timer ended before acknowledgement and next call cancelled", streamEnded: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			e, l, p, g := fixture(t)
+			if tt.callActive {
+				if err := e.StartManual(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tt.announcementActive {
+				if err := e.Handle(g, session.Event{Kind: "announcement", Active: true}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := e.Handle(g, session.Event{Kind: "timer_ringing"}); err != nil {
+				t.Fatal(err)
+			}
+			if err := e.Output(g, []int16{123, -789}); err != nil {
+				t.Fatal(err)
+			}
+			if err := e.Stop(); err != nil {
+				t.Fatal(err)
+			}
+			// Repeated Stop must not forget the outstanding cancellation.
+			if err := e.Stop(); err != nil {
+				t.Fatal(err)
+			}
+			if err := e.StartManual(); !errors.Is(err, session.ErrUnavailable) {
+				t.Fatal("new capture accepted before upstream cancellation", err)
+			}
+			if err := e.Output(g, []int16{999}); err != nil {
+				t.Fatal(err)
+			}
+			if p.writes != 2 {
+				t.Fatal("late timer audio was played")
+			}
+			if tt.streamEnded {
+				if err := e.EndOutput(g); err != nil {
+					t.Fatal(err)
+				}
+				if err := e.StartManual(); err != nil {
+					t.Fatal(err)
+				}
+				if err := e.Stop(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// Real upstream cancellation can send only this, no AUDIO_OUT_END.
+			if err := e.Handle(g, session.Event{Kind: "timer_stopped"}); err != nil {
+				t.Fatal(err)
+			}
+			if tt.callActive || tt.announcementActive || tt.streamEnded {
+				if err := e.StartManual(); !errors.Is(err, session.ErrUnavailable) {
+					t.Fatal("timer completion released unrelated cancelled output", err)
+				}
+				if err := e.EndOutput(g); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := e.Output(g, []int16{777}); err != nil {
+				t.Fatal(err)
+			}
+			if p.writes != 2 {
+				t.Fatal("idle late audio revived the timer")
+			}
+			if err := e.StartManual(); err != nil {
+				t.Fatal("timer stop requires reconnect", err)
+			}
+			if err := e.Output(g, []int16{-41, 903, 7}); err != nil {
+				t.Fatal("next turn retained cancelled output context", err)
+			}
+			if p.writes != 5 || !e.Snapshot().Connected {
+				t.Fatal("next turn did not play on the same connection")
+			}
+			for _, c := range l.commands {
+				if c.Kind == "drained" {
+					t.Fatal("cancelled timer falsely acknowledged as played")
+				}
+			}
+		})
+	}
 }
 
 func TestWakeRetainsEvidenceAndBoundedPreRoll(t *testing.T) {

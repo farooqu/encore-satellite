@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root="$(cd "$(dirname "$0")/../.." && pwd)"
+source="$root/.amp/in/orb-backup/upstream-research/sendspin-cpp"
+pin=a4a9b65fb356657e3a39a2ab70b4aae957bf53e0
+mkdir -p "$(dirname "$source")"
+if ! test -d "$source/.git"; then git clone https://github.com/Sendspin/sendspin-cpp "$source"; fi
+git -C "$source" diff --exit-code --quiet
+git -C "$source" fetch origin "$pin"
+git -C "$source" checkout --detach "$pin"
+test "$(git -C "$source" rev-parse HEAD)" = "$pin"
+build="$root/.amp/in/orb-backup/sendspin-receiver-build"
+uv tool run --from cmake==4.4.5 cmake -S "$root/lab/sendspin/receiver" -B "$build" \
+  -DSENDSPIN_SOURCE_DIR="$source" -DCMAKE_BUILD_TYPE=Release
+uv tool run --from cmake==4.4.5 cmake --build "$build" --target encore-sendspin -j 2
+echo 'Receiver built. See lab/sendspin/README.md for the isolated server and opt-in host.'

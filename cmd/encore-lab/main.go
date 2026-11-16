@@ -70,6 +70,12 @@ func run() error {
 	}
 	player := lab.NewSpeaker(ctx)
 	engine := session.New(player)
+	var music *lab.Music
+	if os.Getenv("ENCORE_SENDSPIN_LAB_CLIENT") != "" {
+		music = lab.NewMusic()
+		player.AttachMusic(music)
+		engine.SetActivityHandler(music.SetVoiceActive)
+	}
 	if err := engine.Select(session.Assist); err != nil {
 		return err
 	}
@@ -112,6 +118,15 @@ func run() error {
 	var sequence uint64
 	var capturedSamples int64
 	mux := http.NewServeMux()
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8099"
+	}
+	if music != nil {
+		if err := lab.ServeMusic(ctx, mux, music, os.Getenv("ENCORE_SENDSPIN_LAB_CLIENT"), state, port); err != nil {
+			return err
+		}
+	}
 	respond := func(w http.ResponseWriter, data any) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(data)
@@ -147,8 +162,14 @@ func run() error {
 		case "end":
 			err = engine.FinishInput()
 		case "stop":
+			if music != nil {
+				music.Stop()
+			}
 			err = engine.Stop()
 		case "mute":
+			if music != nil {
+				music.SetPrivacy(c.Value)
+			}
 			engine.SetMuted(c.Value)
 		case "backend":
 			err = engine.Select(c.Backend)
@@ -169,10 +190,6 @@ func run() error {
 		}
 		respond(w, engine.Snapshot())
 	})
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8099"
-	}
 	httpServer := &http.Server{Addr: "127.0.0.1:" + port, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go func() { errCh <- httpServer.ListenAndServe() }()
 	log.Printf("Virtual satellite ready; controls loopback-only; Noise key at %s (not logged)", keyPath)
