@@ -246,6 +246,7 @@ func (e *Engine) SetMuted(muted bool) {
 	e.state.Muted = muted
 	if muted {
 		active, alert := e.active || e.outputOpen || e.announcing, e.state.Alert
+		wasCancelling := e.cancelling
 		e.cancelling = e.cancelling || active || e.discard
 		e.cancelOutput()
 		e.player.Flush()
@@ -260,7 +261,9 @@ func (e *Engine) SetMuted(muted bool) {
 		if e.cancelling && e.state.Backend == string(Incubator) {
 			// Also retire interrupted output whose Stop/drain already cleared
 			// active ownership. Never wait for a terminal that cannot arrive.
-			_ = e.send(Command{Kind: "cancel", Reason: "cancelled"})
+			if !wasCancelling {
+				_ = e.send(Command{Kind: "cancel", Reason: "cancelled"})
+			}
 		} else if active && e.runStarted {
 			_ = e.send(Command{Kind: "cancel", Reason: "cancelled"})
 		} else if active {
@@ -361,6 +364,16 @@ func (e *Engine) WakeState(generation uint64) (listen, stop bool) {
 	return
 }
 
+// IdleFor permits connection-local configuration storage even while muted.
+// Unlike presentation phase, it includes outstanding output/cancellation owners.
+// It grants no permission to capture or execute wake models.
+func (e *Engine) IdleFor(generation uint64) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return generation == e.generation && e.link != nil && !e.active && !e.outputOpen &&
+		!e.announcing && !e.state.Alert && !e.discard && !e.cancelling
+}
+
 // WakeFor accepts a model result only for the connection that supplied its
 // model. Both generation and arming are checked again after inference. Unlike
 // host/manual Wake, the reserved stop identity cancels rather than starts a call.
@@ -426,8 +439,8 @@ func (e *Engine) start(detection wake.Detection, pre []int16) error {
 }
 
 // Stop silences locally before notifying the peer; late output and presentation
-// cannot revive the cancelled call. A new call waits for AUDIO_OUT_END (or a
-// native timer's timer_stopped), or reconnect.
+// cannot revive the cancelled call. Native calls/announcements retire their
+// connection, just like mute; timer-only cancellation keeps its own end fence.
 func (e *Engine) Stop() error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -445,11 +458,19 @@ func (e *Engine) StopFor(generation uint64) error {
 }
 
 func (e *Engine) stop() error {
+	active, alert := e.active, e.state.Alert
+	// A timer-only stream has an unambiguous dismissal. Calls and announcements
+	// do not: an ordinary end/HANGUP may already be buffered before Stop.
+	retire := e.state.Backend == string(Incubator) && !e.cancelling &&
+		(e.active || e.announcing || (e.outputOpen && !e.outputTimer))
 	e.cancelOutput()
 	e.player.Flush()
 	e.pre.Clear()
 	e.discard = e.discard || e.active || e.outputOpen
-	active, alert := e.active, e.state.Alert
+	if e.state.Backend == string(Incubator) {
+		e.discard = e.discard || e.announcing
+	}
+	e.cancelling = e.cancelling || retire
 	e.active = false
 	e.announcing = false
 	e.inputOpen, e.outputOpen = false, false
@@ -466,8 +487,23 @@ func (e *Engine) stop() error {
 	}
 	if e.cancelling {
 		e.finishCancellation()
+	} else if !e.discard {
+		// Idle Stop (including MODEL_CLEAR) has no cancelled owner to await.
+		e.resetOutput()
 	}
 	e.publishActivity()
+	if e.state.Backend == string(Incubator) {
+		// Dismiss timers before cancellation closes this voice connection.
+		if alert {
+			if err := e.send(Command{Kind: "stop_alert"}); err != nil {
+				return err
+			}
+		}
+		if retire {
+			return e.send(Command{Kind: "cancel", Reason: "cancelled"})
+		}
+		return nil
+	}
 	// End discards unsent capture in the transport queue. Send it first so
 	// it cannot discard the timer dismissal when both owners are active.
 	if active {

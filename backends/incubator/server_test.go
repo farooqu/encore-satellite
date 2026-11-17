@@ -265,60 +265,42 @@ func TestNativeCancelFencesLateOutputAndReconnect(t *testing.T) {
 	if got := object(t, receive(t, c, 0x04)); got["reason"] != "cancelled" {
 		t.Fatal(got)
 	}
-	send(t, c, 0x10, []byte{9, 0})
-	send(t, c, 0x12, []byte(`{"type":"responding","data":{"text":"late"}}`))
-	send(t, c, 0x11, nil)
-	// A timer event is a wire-reader barrier following the cancellation fence.
-	send(t, c, 0x12, []byte(`{"type":"timer_ringing"}`))
-	deadline := time.Now().Add(time.Second)
-	for !e.Snapshot().Alert {
-		if time.Now().After(deadline) {
-			t.Fatal("wire reader stuck")
-		}
-		time.Sleep(time.Millisecond)
-	}
-	p.mu.Lock()
-	n := len(p.pcm)
-	p.mu.Unlock()
-	if n != 0 || e.Snapshot().Reply != "" {
-		t.Fatal("late cancelled output revived")
-	}
-	if err := e.Stop(); err != nil {
-		t.Fatal(err)
-	}
-	if got := object(t, receive(t, c, 0x09)); got["type"] != "stop_timer" {
-		t.Fatal(got)
-	}
-	if err := e.StartManual(); err != nil {
-		t.Fatal(err)
-	}
-	receive(t, c, 0x02)
-	// Selecting Assist revokes the native connection; old callbacks cannot win.
-	if err := e.Select(session.Assist); err != nil {
-		t.Fatal(err)
-	}
+	// Stop retires the socket: no ambiguous ordinary end/HANGUP can be
+	// mistaken for acknowledgement and then reopen input on this generation.
 	var b [1]byte
 	_ = c.SetReadDeadline(time.Now().Add(time.Second))
 	if _, err := c.Read(b[:]); err != io.EOF {
 		t.Fatal(err)
 	}
-	if err := e.Select(session.Incubator); err != nil {
-		t.Fatal(err)
-	}
 	// The listener may still be finishing the old reader. Wait for its slot
 	// to clear by reconnecting, bounded by a deadline rather than sleeping once.
-	deadline = time.Now().Add(time.Second)
+	deadline := time.Now().Add(time.Second)
 	for {
-		next, err := net.Dial("tcp", address)
-		if err != nil {
-			t.Fatal(err)
-		}
+		next := connect(t, address)
+		var head [3]byte
 		_ = next.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
-		_, err = io.ReadFull(next, b[:])
-		_ = next.Close()
-		if err == nil && b[0] == 0x01 {
+		if _, err := io.ReadFull(next, head[:]); err == nil && head[0] == 0x01 {
+			body := make([]byte, binary.BigEndian.Uint16(head[1:]))
+			if _, err := io.ReadFull(next, body); err != nil {
+				t.Fatal(err)
+			}
+			if err := e.StartManual(); err != nil {
+				t.Fatal(err)
+			}
+			receive(t, next, 0x02)
+			send(t, next, 0x12, []byte(`{"type":"listening"}`))
+			send(t, next, 0x10, []byte{17, 0, 173, 255})
+			send(t, next, 0x11, nil)
+			receive(t, next, 0x06)
+			p.mu.Lock()
+			got := slices.Clone(p.pcm)
+			p.mu.Unlock()
+			if !slices.Equal(got, []int16{17, -83}) {
+				t.Fatal("fresh native connection lost playback", got)
+			}
 			break
 		}
+		_ = next.Close()
 		if time.Now().After(deadline) {
 			t.Fatal("listener did not recover")
 		}
@@ -448,6 +430,102 @@ func pushModel(t *testing.T, c net.Conn, id string, blob []byte, edit func(map[s
 	return object(t, receive(t, c, 0x07))
 }
 
+func TestStartupModelUploadPreservesIdlePlaybackAndMute(t *testing.T) {
+	blob, err := os.ReadFile("../../core/wake/mixednet/testdata/pooled.mnb")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, muted := range []bool{false, true} {
+		for _, kind := range []string{"announcement", "timer_ringing"} {
+			t.Run(fmt.Sprintf("muted=%v/%s", muted, kind), func(t *testing.T) {
+				p := &speaker{}
+				s, address := startServer(t, p, true)
+				s.Engine.SetMuted(muted)
+				c := connect(t, address)
+				receive(t, c, 0x01)
+				send(t, c, 0x23, nil)
+				if got := pushModel(t, c, "nabu", blob, nil, "nabu"); got["ok"] != true || got["models"] != float64(1) {
+					t.Fatal("startup upload rejected", got)
+				}
+				if state := s.Snapshot(true); state.Muted != muted || state.InputOpen || state.WakeArmed || state.WakeReady || s.ModelCount() != 1 {
+					t.Fatal("model storage armed capture or lost mute", state)
+				}
+				s.Engine.SetMuted(false)
+				if s.ModelCount() != 1 {
+					t.Fatal("unmute lost startup model")
+				}
+				// No local call repairs the output context between CLEAR and PCM.
+				b, _ := json.Marshal(map[string]any{"type": kind, "data": map[string]any{"active": true}})
+				send(t, c, 0x12, b)
+				send(t, c, 0x10, []byte{17, 0, 173, 255})
+				send(t, c, 0x11, nil)
+				receive(t, c, 0x06)
+				p.mu.Lock()
+				got := slices.Clone(p.pcm)
+				p.mu.Unlock()
+				if !slices.Equal(got, []int16{17, -83}) {
+					t.Fatal("first startup stream did not play", got)
+				}
+			})
+		}
+	}
+}
+
+func TestPushedModelsRejectActiveOwnership(t *testing.T) {
+	blob, err := os.ReadFile("../../core/wake/mixednet/testdata/pooled.mnb")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, kind := range []string{"call", "announcement", "timer_ringing", "hung_up_output", "call_during_upload"} {
+		t.Run(kind, func(t *testing.T) {
+			s, address := startServer(t, &speaker{}, true)
+			c := connect(t, address)
+			receive(t, c, 0x01)
+			if kind == "call_during_upload" {
+				header, _ := json.Marshal(map[string]any{"format": "mixednet", "id": "nabu", "size": len(blob), "sha256": fmt.Sprintf("%x", sha256.Sum256(blob))})
+				send(t, c, 0x20, header)
+				for off := 0; off < len(blob); off += 4096 {
+					send(t, c, 0x21, blob[off:min(off+4096, len(blob))])
+				}
+				// Reject a valid transfer that became busy before END as well
+				// as one that was already busy when START arrived.
+				send(t, c, 0x12, []byte(`{"type":"night","data":{"on":true}}`))
+				deadline := time.Now().Add(time.Second)
+				for s.Engine.Snapshot().Night != "on" {
+					if time.Now().After(deadline) {
+						t.Fatal("upload staging barrier timed out")
+					}
+					time.Sleep(time.Millisecond)
+				}
+			}
+			if kind == "call" || kind == "hung_up_output" || kind == "call_during_upload" {
+				if err := s.Engine.StartManual(); err != nil {
+					t.Fatal(err)
+				}
+				receive(t, c, 0x02)
+			} else {
+				b, _ := json.Marshal(map[string]any{"type": kind, "data": map[string]any{"active": true}})
+				send(t, c, 0x12, b)
+			}
+			if kind == "hung_up_output" {
+				send(t, c, 0x12, []byte(`{"type":"listening"}`))
+				send(t, c, 0x10, []byte{17, 0})
+				send(t, c, 0x13, []byte(`{"reason":"done"}`))
+			}
+			var got map[string]any
+			if kind == "call_during_upload" {
+				send(t, c, 0x22, []byte(`{"id":"nabu"}`))
+				got = object(t, receive(t, c, 0x07))
+			} else {
+				got = pushModel(t, c, "nabu", blob, nil, "nabu")
+			}
+			if got["ok"] != false || got["models"] != float64(0) {
+				t.Fatal("active owner admitted model upload", got)
+			}
+		})
+	}
+}
+
 func TestPushedModelsValidateBeforeAckAndPreserveReplacement(t *testing.T) {
 	blob, err := os.ReadFile("../../core/wake/mixednet/testdata/pooled.mnb")
 	if err != nil {
@@ -500,7 +578,11 @@ func TestPushedModelsValidateBeforeAckAndPreserveReplacement(t *testing.T) {
 	if result := object(t, receive(t, c, 0x04)); result["reason"] != "cancelled" {
 		t.Fatal("model clear did not cancel active voice", result)
 	}
-	check(pushModel(t, c, "after-clear", blob, nil, "after-clear"), true, 1)
+	var b [1]byte
+	_ = c.SetReadDeadline(time.Now().Add(time.Second))
+	if _, err := c.Read(b[:]); err != io.EOF {
+		t.Fatal("active model clear did not retire voice connection", err)
+	}
 	_ = c.Close()
 	// Models are volatile per connection; a new connection starts with no
 	// residents even when the same server and engine survive.
@@ -551,8 +633,10 @@ func TestPushedModelRunsPCMAndStopCancelsInsteadOfCalling(t *testing.T) {
 	}
 	blob[len(blob)-256+128] = 0
 	s, address := startServer(t, &speaker{}, true)
+	s.Engine.SetMuted(true)
 	c := connect(t, address)
 	receive(t, c, 1)
+	send(t, c, 0x23, nil)
 	if result := pushModel(t, c, "energy-fixture", blob, nil, "energy-fixture"); result["ok"] != true {
 		t.Fatal(result)
 	}
@@ -577,6 +661,12 @@ func TestPushedModelRunsPCMAndStopCancelsInsteadOfCalling(t *testing.T) {
 			time.Sleep(20 * time.Millisecond)
 		}
 	}
+	feed(false, 100)
+	feed(true, 5)
+	if state := s.Snapshot(true); state.WakeArmed || state.WakeReady || state.InputOpen || state.Turn != 0 || !state.Muted {
+		t.Fatal("muted startup models executed or armed capture", state)
+	}
+	s.Engine.SetMuted(false) // Upstream uploads only once; do not resend models.
 	feed(false, 100)
 	feed(true, 5)
 	call := object(t, receive(t, c, 2))
@@ -608,13 +698,13 @@ func TestPushedModelRunsPCMAndStopCancelsInsteadOfCalling(t *testing.T) {
 		if head[0] == 0x03 {
 			continue
 		}
-		if head[0] != 0x04 || object(t, body)["reason"] != "cancelled" {
-			t.Fatal("stop started a new call instead of cancelling", head[0], string(body))
+		if head[0] != 0x09 || object(t, body)["type"] != "stop_timer" {
+			t.Fatal("stop did not dismiss timer before retiring call", head[0], string(body))
 		}
 		break
 	}
-	if result := object(t, receive(t, c, 0x09)); result["type"] != "stop_timer" {
-		t.Fatal("call end discarded timer dismissal", result)
+	if result := object(t, receive(t, c, 0x04)); result["reason"] != "cancelled" {
+		t.Fatal("stop started a new call instead of cancelling", result)
 	}
 }
 

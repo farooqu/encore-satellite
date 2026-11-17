@@ -190,8 +190,8 @@ func TestButtonsActionStopsAlertBeforeStartingVoice(t *testing.T) {
 	buttonWait(t, "Action voice did not duck music", func() bool { return sample() == 100 })
 	key(138, 0)
 	key(138, 1)
-	buttonWait(t, "second Action did not stop voice/music", func() bool { return e.Snapshot().Phase == "idle" && sample() == 0 })
-	if command := <-l.commands; command != "end" {
+	buttonWait(t, "second Action did not stop voice/music", func() bool { return e.Snapshot().Phase == "recovering" && sample() == 0 })
+	if command := <-l.commands; command != "cancel" {
 		t.Fatalf("active Action sent %q", command)
 	}
 }

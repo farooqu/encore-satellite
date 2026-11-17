@@ -257,7 +257,7 @@ func (m *modelSession) handle(kind byte, data []byte, send func(byte, any) error
 				return reply(h.ID, err)
 			}
 		}
-		if m.engine.Snapshot().Phase != "idle" {
+		if !m.engine.IdleFor(m.generation) {
 			return reply(h.ID, errors.New("model upload requires an idle call"))
 		}
 		m.upload = &modelUpload{header: h, blob: make([]byte, 0, h.Size)}
@@ -281,6 +281,9 @@ func (m *modelSession) handle(kind byte, data []byte, send func(byte, any) error
 		sum := sha256.Sum256(u.blob)
 		if json.Unmarshal(data, &end) != nil || end.ID != u.header.ID || len(u.blob) != u.header.Size || hex.EncodeToString(sum[:]) != u.header.SHA256 {
 			return reply(u.header.ID, errors.New("model id, size or sha256 mismatch"))
+		}
+		if !m.engine.IdleFor(m.generation) {
+			return reply(u.header.ID, errors.New("model upload requires an idle call"))
 		}
 		return reply(u.header.ID, m.install(u))
 	}

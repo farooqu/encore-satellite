@@ -247,8 +247,19 @@ func TestTimerStopRecoversWithoutStreamEndAndKeepsCallFence(t *testing.T) {
 			if p.writes != 2 {
 				t.Fatal("idle late audio revived the timer")
 			}
+			if tt.callActive || tt.announcementActive || tt.streamEnded {
+				if err := e.StartManual(); err != session.ErrUnavailable {
+					t.Fatal("stream end released retiring native owner", err)
+				}
+				e.Disconnect(g, "connection_closed")
+				var err error
+				g, err = e.Attach(&link{backend: session.Incubator})
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
 			if err := e.StartManual(); err != nil {
-				t.Fatal("timer stop requires reconnect", err)
+				t.Fatal("timer stop did not recover", err)
 			}
 			_ = e.Handle(g, session.Event{Kind: "listening"})
 			if err := e.Output(g, []int16{-41, 903, 7}); err != nil {
@@ -569,8 +580,13 @@ func TestStopInterruptsDrainAndRejectsLateAudio(t *testing.T) {
 			t.Fatal("cancelled audio falsely acknowledged")
 		}
 	}
-	// Cancel another active call before any output; late audio must be fenced
-	// until its stream-end arrives. An idle Stop does not create a phantom call.
+	// Neither drain cancellation nor another stream end releases this native
+	// generation. Only the adapter's disconnect admits a fresh manual call.
+	if err := e.StartManual(); err != session.ErrUnavailable {
+		t.Fatal("cancelled drain released native generation", err)
+	}
+	e.Disconnect(g, "connection_closed")
+	g, _ = e.Attach(&link{backend: session.Incubator})
 	if err := e.StartManual(); err != nil {
 		t.Fatal(err)
 	}
@@ -581,8 +597,8 @@ func TestStopInterruptsDrainAndRejectsLateAudio(t *testing.T) {
 		t.Fatal("late output revived cancelled turn")
 	}
 	_ = e.EndOutput(g)
-	if err := e.StartManual(); err != nil {
-		t.Fatal(err)
+	if err := e.StartManual(); err != session.ErrUnavailable {
+		t.Fatal("stream end released cancelled native input", err)
 	}
 }
 
@@ -652,8 +668,8 @@ func TestTimerStoppedDoesNotReleaseCancelledCall(t *testing.T) {
 				t.Fatal("timer event released a cancelled voice call", err)
 			}
 			_ = e.EndOutput(g)
-			if err := e.StartManual(); err != nil {
-				t.Fatal("stream end did not release cancelled call", err)
+			if err := e.StartManual(); err != session.ErrUnavailable {
+				t.Fatal("stream end released cancelled native call", err)
 			}
 		})
 	}
@@ -780,11 +796,11 @@ func TestNativeAnnouncementAllowsMultipleStreamsButNotIdleOrStoppedOutput(t *tes
 	_ = e.Stop()
 	_ = e.Output(g, []int16{83})
 	_ = e.EndOutput(g)
-	if p.writes != 3 || len(l.commands) != 2 {
+	if p.writes != 3 || len(l.commands) != 3 || l.commands[2].Kind != "cancel" {
 		t.Fatal("idle/stopped announcement audio played or claimed completion")
 	}
-	if err := e.StartManual(); err != nil {
-		t.Fatal("stopping idle announcement wedged next turn", err)
+	if err := e.StartManual(); err != session.ErrUnavailable {
+		t.Fatal("stopped announcement reused its native connection", err)
 	}
 }
 
@@ -851,6 +867,62 @@ func TestNativeMuteCannotReuseBufferedStreamBoundary(t *testing.T) {
 	_ = e.Output(ng, []int16{99})
 	if p.writes != 2 {
 		t.Fatal("stale native tail silenced the replacement call", p.writes)
+	}
+}
+
+func TestNativeStopCannotReuseBufferedStreamBoundary(t *testing.T) {
+	e, l, p, g := fixture(t)
+	_ = e.StartManual()
+	_ = e.Handle(g, session.Event{Kind: "listening"})
+	_ = e.Output(g, []int16{17, -83})
+	_ = e.Stop()
+	_ = e.Stop()
+	_ = e.EndOutput(g) // Ordinary response end buffered before Stop.
+	if err := e.StartManual(); err != session.ErrUnavailable {
+		t.Fatal("ordinary end released cancelled native call", err)
+	}
+	_ = e.Handle(g, session.Event{Kind: "hangup", Listen: true})
+	if s := e.Snapshot(); s.Turn != 1 || s.InputOpen || !s.Inhibited {
+		t.Fatal("old HANGUP reopened capture", s)
+	}
+	if len(l.commands) != 2 || l.commands[1].Kind != "cancel" {
+		t.Fatal("Stop did not request exactly one native retirement", l.commands)
+	}
+	e.Disconnect(g, "connection_closed")
+	ng, err := e.Attach(&link{backend: session.Incubator})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.StartManual(); err != nil {
+		t.Fatal(err)
+	}
+	_ = e.Handle(g, session.Event{Kind: "hangup", Listen: true})
+	if s := e.Snapshot(); s.Turn != 2 || !s.InputOpen {
+		t.Fatal("old HANGUP clobbered fresh manual turn", s)
+	}
+	_ = e.Handle(ng, session.Event{Kind: "listening"})
+	if err := e.Output(ng, []int16{-31}); err != nil || p.writes != 3 {
+		t.Fatal("fresh native playback failed", err, p.writes)
+	}
+}
+
+func TestIdleStopPreservesUnsolicitedPlayback(t *testing.T) {
+	for _, kind := range []string{"announcement", "timer_ringing"} {
+		t.Run(kind, func(t *testing.T) {
+			e, l, p, g := fixture(t)
+			_ = e.Stop()
+			_ = e.Stop()
+			_ = e.Handle(g, session.Event{Kind: kind, Active: true})
+			if err := e.Output(g, []int16{17, -83}); err != nil {
+				t.Fatal("idle Stop poisoned next playback context", err)
+			}
+			if err := e.EndOutput(g); err != nil {
+				t.Fatal(err)
+			}
+			if p.writes != 2 || len(l.commands) != 1 || l.commands[0].Kind != "drained" {
+				t.Fatal("first idle output did not play and drain", l.commands, p.writes)
+			}
+		})
 	}
 }
 
