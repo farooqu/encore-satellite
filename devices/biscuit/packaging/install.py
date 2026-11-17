@@ -179,12 +179,22 @@ class ADB:
         self.prefix = ["adb", "-s", serial]
 
     def shell(self, command, data=None):
-        result = subprocess.run([*self.prefix, "exec-out", "sh", "-c", shlex.quote("set -eu; " + command)],
+        # Raw shell forwards binary stdin/EOF, unlike legacy exec-out. Recovery
+        # still merges stderr and loses exit status, so require a status trailer.
+        marker = "\nENCORE_STATUS_" + secrets.token_hex(16) + ":"
+        script = ("sh -c " + shlex.quote("set -eu; " + command)
+                  + "\nstatus=$?\nprintf " + shlex.quote(marker + "%d\n") + ' "$status"')
+        result = subprocess.run([*self.prefix, "shell", "-T", "sh -c " + shlex.quote(script)],
                                 input=data, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=300)
         if result.returncode:
             # Never echo stdin: configuration and PSKs travel only there.
             raise RuntimeError("recovery operation failed: " + result.stderr.decode(errors="replace")[-1000:])
-        return result.stdout
+        output, found, status = result.stdout.rpartition(marker.encode())
+        if not found or not re.fullmatch(rb"(?:0|[1-9][0-9]{0,2})\n", status) or int(status) > 255:
+            raise RuntimeError("recovery operation returned no valid remote exit status")
+        if int(status):
+            raise RuntimeError(f"recovery operation failed with remote exit status {int(status)}")
+        return output
 
     def write(self, path, data, mode="600"):
         self.shell(f"umask 077; cat > {shlex.quote(path)}; chmod {mode} {shlex.quote(path)}", data)
@@ -199,8 +209,9 @@ def preflight(adb):
     if adb.shell("cat /proc/idme/device_type_id").strip(b"\0\r\n ") != b"A3S5BH2HU6VAYF":
         raise ValueError("this installer is only for Echo Dot 2 / biscuit")
     for name, number in (("misc", 8), ("recovery", 12), ("cache", 15), ("userdata", 16)):
-        value = adb.shell(f"readlink -f /dev/block/platform/*/by-name/{name}").decode().strip()
-        if value != f"/dev/block/mmcblk0p{number}":
+        # TWRP can expose several aliases, and its readlink accepts one path.
+        values = adb.shell(f'for path in /dev/block/platform/*/by-name/{name}; do readlink -f "$path"; done').decode().splitlines()
+        if not values or any(value != f"/dev/block/mmcblk0p{number}" for value in values):
             raise ValueError(f"unexpected {name} partition layout; refusing writes")
 
 
@@ -382,7 +393,8 @@ def apply_locked(args, adb, manifest, files, store, name, recovery, image):
                   f"echo {target} > {store}/active.new; sync; mv {store}/active.new {store}/active; sync")
         # Updating from TWRP restores the SAME saved Encore recovery image, not
         # a new kernel or initramfs supplied by the application update.
-        adb.shell(f"dd if={store}/linux.img of=/dev/block/mmcblk0p12 bs=4096 conv=fsync; sync")
+        # Recovery dd can disable conv; flush with the checked sync below.
+        adb.shell(f"dd if={store}/linux.img of=/dev/block/mmcblk0p12 bs=4096; sync")
         if sha(adb.shell(f"head -c {len(image)} /dev/block/mmcblk0p12")) != sha(image):
             raise RuntimeError("recovery flash read-back failed; keep TWRP running and restore the host backup")
         adb.shell(f"rm -rf {stage}; sync")

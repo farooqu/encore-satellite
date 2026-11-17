@@ -58,6 +58,49 @@ def write_bundle(path, rootfs, ramdisk, revision, userspace="b" * 64, target="bi
     return package.sha(path.read_bytes())
 
 
+class ADBTests(unittest.TestCase):
+    def test_legacy_transport_preserves_binary_data_and_requires_remote_success(self):
+        scratch = package.ROOT / ".amp/in/orb-backup"
+        scratch.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=scratch) as directory:
+            root = Path(directory)
+            adb = root / "adb"
+            # Legacy exec-out loses stdin; raw shell forwards it including EOF.
+            # Both merge stderr and lose remote status. No real ADB is contacted.
+            adb.write_text('#!/usr/bin/env python3\n'
+                           'import os, signal, subprocess, sys\n'
+                           'assert sys.argv[1:3] == ["-s", "test-unit"]\n'
+                           'raw_shell = sys.argv[3:5] == ["shell", "-T"]\n'
+                           'assert raw_shell or sys.argv[3] == "exec-out"\n'
+                           'args = sys.argv[5:] if raw_shell else sys.argv[4:]\n'
+                           'if len(args) == 1: args = ["sh", "-c", args[0]]\n'
+                           'child = subprocess.Popen(args, stdin=None if raw_shell else subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)\n'
+                           'try: child.wait(timeout=3)\n'
+                           'except subprocess.TimeoutExpired:\n'
+                           '    os.killpg(child.pid, signal.SIGKILL); child.wait(); sys.exit(24)\n'
+                           'sys.exit(0)\n')
+            adb.chmod(0o755)
+            with patch.dict(os.environ, {"PATH": str(root) + ":" + os.environ["PATH"]}):
+                transport = install.ADB("test-unit")
+                payload = b"\x00\xff\r\nprivate input ' ; $()\nENCORE_STATUS_not-a-trailer:0\n"
+                self.assertEqual(transport.shell(f"head -c {len(payload)}", payload), payload)
+                self.assertEqual(transport.shell("printf 'first; '; printf second"), b"first; second")
+                target = root / "quoted ' file"
+                for data in (payload, b"", bytes(range(256)) * 4097):
+                    with self.subTest(size=len(data)):
+                        transport.write(str(target), data)
+                        self.assertEqual(target.read_bytes(), data)
+                for command, status in (("exit 7", 7), (f"head -c {len(payload)}; exit 9", 9), ("false; printf unsafe", 1)):
+                    with self.subTest(command=command), self.assertRaisesRegex(
+                            RuntimeError, f"remote exit status {status}$") as failure:
+                        transport.shell(command, payload)
+                    self.assertNotIn("private input", str(failure.exception))
+                # A disconnected shell must not turn missing status into success.
+                adb.write_text('#!/bin/sh\nexit 0\n')
+                with self.assertRaisesRegex(RuntimeError, "no valid remote exit status"):
+                    transport.shell("true")
+
+
 class ProvisioningTests(unittest.TestCase):
     def test_default_custom_and_invalid_names(self):
         self.assertRegex(install.device_name("unit-one"), r"^encore-biscuit-[0-9a-f]{6}$")
@@ -350,7 +393,8 @@ class RecoveryTests(unittest.TestCase):
         (self.device / "proc/mounts").write_text("".join(
             f"{self.device}/dev/block/mmcblk0p{number} {self.device}/{mount} ext4 rw 0 0\n"
             for mount, number in (("cache", 15), ("data", 16))))
-        for filename, script in (("sbin/recovery", "exit 0"), ("tools/mountpoint", "exit 0"), ("tools/id", "echo 0")):
+        for filename, script in (("sbin/recovery", "exit 0"), ("tools/mountpoint", "exit 0"), ("tools/id", "echo 0"),
+                                 ("tools/dd", 'for operand; do case "$operand" in conv=*) echo "dd: conv option disabled" >&2; exit 1;; esac; done\nexec /usr/bin/dd "$@"')):
             p = self.device / filename
             p.write_text("#!/bin/sh\n" + script + "\n")
             p.chmod(0o755)
@@ -397,6 +441,25 @@ class RecoveryTests(unittest.TestCase):
 
     def store(self, path):
         return self.device / "cache/encore" / path
+
+    def test_dry_run_accepts_matching_partition_aliases_but_rejects_any_mismatch(self):
+        self.bundle(1)
+        self.args.apply = False
+        aliases = self.device / "dev/block/platform/other/by-name"
+        aliases.mkdir(parents=True)
+        for name, number in (("misc", 8), ("recovery", 12), ("cache", 15), ("userdata", 16)):
+            (aliases / name).symlink_to(self.device / f"dev/block/mmcblk0p{number}")
+        readlink = self.device / "tools/readlink"
+        readlink.write_text('#!/bin/sh\n[ "$#" -eq 2 ] || exit 1\nexec /usr/bin/readlink "$@"\n')
+        readlink.chmod(0o755)
+        install.install(self.args)
+        self.assertFalse(self.store("").exists())
+        (aliases / "misc").unlink()
+        (aliases / "misc").symlink_to(self.device / "dev/block/mmcblk0p12")
+        with self.assertRaisesRegex(ValueError, "unexpected misc partition layout"):
+            install.install(self.args)
+        self.assertFalse(self.store("").exists())
+        self.assertEqual((self.device / "dev/block/mmcblk0p12").read_bytes(), self.twrp)
 
     def test_clean_install_and_alternating_updates_preserve_identity_and_good_slot(self):
         self.bundle(1)
