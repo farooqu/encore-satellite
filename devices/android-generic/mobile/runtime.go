@@ -18,8 +18,10 @@ import (
 	"time"
 
 	"github.com/farooqu/encore-satellite/backends/bluetooth"
+	lightapi "github.com/farooqu/encore-satellite/backends/illuminance"
 	"github.com/farooqu/encore-satellite/backends/incubator"
 	"github.com/farooqu/encore-satellite/core/audio"
+	"github.com/farooqu/encore-satellite/core/illuminance"
 	"github.com/farooqu/encore-satellite/core/session"
 	androidhost "github.com/farooqu/encore-satellite/platforms/android"
 	esphome "github.com/ygelfand/go-esphome-device"
@@ -63,6 +65,7 @@ type Runtime struct {
 	proxy               *bluetooth.Proxy
 	radio               *androidhost.BluetoothScanner
 	bluetoothConfigured bool
+	light               *illuminance.Monitor
 }
 
 func Open(directory string, output Audio) (*Runtime, error) {
@@ -150,6 +153,9 @@ func (r *Runtime) Start() error {
 	r.control = &esphome.Server{Info: esphome.Info{Name: r.Name(), FriendlyName: "Encore Incubator", MACAddress: r.config.MAC, Manufacturer: "Encore", Model: "Generic Android", Version: "0.1.0", ProjectName: "encore.incubator"}, PSK: &key, Handler: r, WriteTimeout: 2 * time.Second}
 	r.control.Info.BluetoothFeatures = r.proxy.Features()
 	r.done.Go(func() { r.proxy.Run(ctx) })
+	if r.light.Supported() {
+		r.done.Go(func() { r.light.Run(ctx, func() { _ = r.control.Broadcast(lightapi.State(r.light)) }) })
+	}
 	r.done.Go(func() {
 		if err := r.voice.Serve(ctx, vl); err != nil {
 			r.fail(err)
@@ -244,6 +250,9 @@ const reloadKey uint32 = 0x454e4302
 func (r *Runtime) Handle(ctx context.Context, c *esphome.Conn, msg proto.Message) error {
 	switch m := msg.(type) {
 	case *api.ListEntitiesRequest:
+		if err := lightapi.List(c, r.light); err != nil {
+			return err
+		}
 		if err := c.Send(&api.ListEntitiesTextResponse{ObjectId: "dashboard_url", Key: dashboardKey, Name: "Dashboard URL", EntityCategory: esphome.CategoryConfig, MaxLength: 1024}); err != nil {
 			return err
 		}
@@ -261,6 +270,11 @@ func (r *Runtime) Handle(ctx context.Context, c *esphome.Conn, msg proto.Message
 		}
 		return r.proxy.Handle(ctx, c, msg)
 	case *api.SubscribeStatesRequest:
+		if state := lightapi.State(r.light); state != nil {
+			if err := c.Send(state); err != nil {
+				return err
+			}
+		}
 		r.mu.Lock()
 		v := r.config.Dashboard
 		channel := r.config.Channel

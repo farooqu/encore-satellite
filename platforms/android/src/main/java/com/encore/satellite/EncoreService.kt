@@ -38,6 +38,7 @@ class EncoreService : Service() {
     private val advertisements = mutableListOf<NsdManager.RegistrationListener>()
     private var musicHost: MusicHost? = null
     private var music: MusicPlayer? = null
+    private var light: LightSensorHost? = null
     private var microphoneForeground = false
     private val focus by lazy {
         SatelliteAudioFocus(getSystemService(AudioManager::class.java)) { focused ->
@@ -109,6 +110,9 @@ class EncoreService : Service() {
             else startForeground(1, notification)
             val engine = checkNotNull(runtime) { "Engine unavailable" }
             if (!mutable.value.running) {
+                // Optional sensor failure never prevents voice/music startup.
+                light = runCatching { LightSensorHost(this) }.getOrNull()
+                engine.setLightHost(light)
                 if (!microphoneForeground && !bluetoothStart) engine.setMuted(true)
                 engine.start()
                 updates?.start()
@@ -239,6 +243,8 @@ class EncoreService : Service() {
         stopMicrophone()
         bluetooth.running(false)
         runtime?.close()
+        light?.close()
+        light = null
         disconnectMusic()
         val manager = getSystemService(NsdManager::class.java)
         advertisements.forEach { runCatching { manager.unregisterService(it) } }

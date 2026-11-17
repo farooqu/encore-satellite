@@ -7,6 +7,31 @@ try; Meta Portal installation remains unverified, not ordinary tablet support.
 `profile.json` and the central release registry remain planning/revision-zero
 metadata, not runtime settings or a release declaration.
 
+## Optional illuminance
+
+The service discovers an actual Android `Sensor.TYPE_LIGHT` at startup. Only
+sensor-equipped hosts list the ESPHome **Illuminance** measurement entity (`lx`);
+no model/SKU assumptions or required manifest hardware feature are added. A
+registration/permission failure retains a supported entity with unknown state,
+not a permanently invented sensor on hardware that lacks one. Values are Android
+HAL-reported lux, not an Encore calibration claim.
+
+An independent low-rate listener/worker owns readings, without microphone/audio
+focus resources. Event timestamps determine age; polling never refreshes a cached
+sample's timestamp. Values older than 30 seconds, invalid readings and errors
+publish missing state. On-change sensors are re-registered after 20 seconds
+without a new event to request another initial sample; an old HAL timestamp is
+still rejected. Stop unregisters the listener and clears the value. Sensor
+capability is rediscovered on service/satellite restart, not hot-added to an
+already connected catalog. No new dangerous permission is required.
+
+This is optional follow-on functionality, not a first-dev-release gate. Native
+and protocol fixture checks are not a physical pass: the first Tab A7 Lite is
+owner-confirmed LineageOS 21 GSI / Android 14 / API 34, but actual HAL samples,
+background behavior and voice/music coexistence still require qualification.
+Portal 2 remains a separate unqualified target. Biscuit's separate
+[driver audit and integration gates](../biscuit/ILLUMINANCE.md) still apply.
+
 ## Build locally
 
 Requirements: Go 1.27, JDK 21, Gradle 9.4.1, Android SDK platform/build-tools 36,
