@@ -127,7 +127,7 @@ def main():
     parser.add_argument("--jobs", type=int, default=4)
     args = parser.parse_args()
     cache = args.cache.resolve()
-    out = (args.out or ROOT / "build/echo-dot-2/sendspin").resolve()
+    out = (args.out or ROOT / "build/biscuit/sendspin").resolve()
     cache.mkdir(parents=True, exist_ok=True)
     # Hold one persistent lock inode through checkout, extraction, compilation,
     # source-kit copying and provenance. A second invocation must not replace
@@ -141,7 +141,7 @@ def build_locked(args, cache, out):
     out.mkdir(parents=True, exist_ok=True)
     lock = json.loads((HERE / "dependencies.lock.json").read_text())
     inputs = [HERE / "build.py", HERE / "dependencies.lock.json", HERE / "bridge_linux.go",
-              ROOT / "devices/echo-dot-2/packaging/sendspin.sh"]
+              ROOT / "devices/biscuit/packaging/sendspin.sh"]
     inputs += sorted(p for p in (HERE / "native").rglob("*") if p.is_file())
     integration_hashes = {str(p.relative_to(ROOT)): sha(p) for p in inputs}
     sources = {}
@@ -214,7 +214,7 @@ def build_locked(args, cache, out):
                     if name != "micro_ogg":  # already inside micro_flac
                         add_tree(tar, src, "sources/" + name)
                 add_tree(tar, HERE, "integration/platforms/linuxsendspin")
-                add_tree(tar, ROOT / "devices/echo-dot-2/packaging/sendspin.sh", "integration/devices/echo-dot-2/packaging/sendspin.sh")
+                add_tree(tar, ROOT / "devices/biscuit/packaging/sendspin.sh", "integration/devices/biscuit/packaging/sendspin.sh")
                 if zig:
                     for rel in ["LICENSE", "lib/libc/musl", "lib/libc/include", "lib/libcxx", "lib/libcxxabi", "lib/libunwind", "lib/compiler_rt", "lib/compiler_rt.zig", "lib/std", "lib/include"]:
                         if (zig / rel).exists():

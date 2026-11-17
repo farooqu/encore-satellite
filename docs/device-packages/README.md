@@ -5,11 +5,11 @@ There is no profile loader. Android now has a local development APK build and
 host described in its target notes; neither target has a supported release.
 Both profiles remain planned/revision-zero release metadata. Passing validation
 below establishes metadata consistency only, not the APK or hardware behavior.
-[Dot development package](../../devices/echo-dot-2/README.md) separately implements
+[Dot development package](../../devices/biscuit/README.md) separately implements
 a full Linux environment builder, hardware runtime and USB/recovery tooling,
 without qualified support.
 
-- [Echo Dot 2](../../devices/echo-dot-2/README.md): local hardware wiring,
+- [Echo Dot (2nd gen), Biscuit](../../devices/biscuit/README.md): local hardware wiring,
   kernel/base services, calibration and Linux-environment bundle.
 - [Generic Android](../../devices/android-generic/README.md): conservative APK
   profile; Samsung Galaxy Tab A7 Lite is the intended first validation tablet.
@@ -22,7 +22,7 @@ closed at this planning stage; every field is required and unknown fields fail.
 | Field | Schema 1 value and purpose |
 | --- | --- |
 | `schema` | Integer `1`; identifies this planning-data contract, not an IPC version. |
-| `target` | Exact directory/central target ID: `echo-dot-2` or `android-generic`; prevents cross-target profile substitution. |
+| `target` | Exact directory/central target ID: `biscuit` or `android-generic`; prevents cross-target profile substitution. |
 | `status` | `planned`; no supported release. Development build evidence belongs in the target notes, not this metadata. |
 
 Profiles contain only identity and planning status. They do not configure audio
@@ -51,10 +51,15 @@ to concrete device packages or adding speculative configuration.
 
 Device owners maintain their own profiles, wiring/calibration, target composition
 roots, packaging inputs and hardware acceptance records. Shared Go contracts and
-DSP belong in `core/`; reusable OS integration belongs in `platforms/echo/` or
+DSP belong in `core/`; reusable OS integration belongs in `platforms/linux/` or
 `platforms/android/`. The Android host is now implemented for development; the
-profile itself is not its runtime configuration. Echo supplies Linux
+profile itself is not its runtime configuration. The Linux host supplies
 ALSA/evdev/privacy/playback primitives. Backend adapters remain in `backends/`.
+
+Biscuit means Echo Dot (2nd gen); Radar means Echo (2nd gen). Radar is not an
+alias or an implemented package. Board routes, mixer control names, sysfs nodes,
+key mappings and tuning stay in the board module. MT8163 is the shared SoC name,
+not evidence that the boards have identical wiring or capabilities.
 
 Composition roots explicitly select the shared engine, one platform host,
 their own configuration and exactly one voice adapter per installed package.

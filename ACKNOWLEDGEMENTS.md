@@ -69,16 +69,16 @@ Encore assistant. No Kiosk Satellite application code or assets are included.
   model-transfer validation/lifecycle contract. Device packaging includes the
   runtime notices. No trained wake model is shipped in the runtime; transferred
   models retain their own terms independently of the executor.
-- `platforms/echo/{alsa,input}` adapts the pinned Techo5 daemon's Linux ALSA/evdev
+- `platforms/linux/{alsa,input}` adapts the pinned Techo5 daemon's Linux ALSA/evdev
   primitives, originally from Yuri Gelfand's MIT EchoLocal. Its license and source
-  inventory are retained in `platforms/echo/LICENSE.techo5` and `NOTICE`. Dot-local
+  inventory are retained in `platforms/linux/LICENSE.techo5` and `NOTICE`. Dot-local
   routing/control mappings cite that same source rather than claiming new measurements.
-- `devices/echo-dot-2/cmd/wmtup` copies Techo5 Dot's two-file MediaTek bring-up
+- `devices/biscuit/cmd/wmtup` copies Techo5 Dot's two-file MediaTek bring-up
   helper at the pin above. That work credits Wil Bowes's MIT EchoMuse/emOS findings.
-  `devices/echo-dot-2/packaging/Techo5-Dot-{MIT,NOTICE}.txt` retain its license and
+  `devices/biscuit/packaging/Techo5-Dot-{MIT,NOTICE}.txt` retain its license and
   complete historical provenance; the latter lists upstream components **not** all
   included here. Encore's small image/slot tooling is informed by that boot-chain work.
-- `devices/echo-dot-2/packaging/kernel.sh` invokes the exact Techo5 Dot kernel
+- `devices/biscuit/packaging/kernel.sh` invokes the exact Techo5 Dot kernel
   recipe at the same pin with its Bluetooth/security patch series and AOSP
   arm-eabi 4.8 toolchain at `26e93f6af47f7bd3a9beb5c102a5f45e19bfa38a`.
   The separately built kernel combines Amazon's checksum-verified biscuit GPL

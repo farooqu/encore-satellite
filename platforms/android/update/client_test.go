@@ -65,7 +65,7 @@ func TestSignedChannelDownloadAndRejections(t *testing.T) {
 	}
 	for name, mutate := range map[string]func(*update.Release){
 		"backend":       func(r *update.Release) { r.Backend = "assist" },
-		"target":        func(r *update.Release) { r.Target = "echo-dot-2" },
+		"target":        func(r *update.Release) { r.Target = "biscuit" },
 		"channel":       func(r *update.Release) { r.Channel = "stable" },
 		"package":       func(r *update.Release) { r.ApplicationID += ".other" },
 		"certificate":   func(r *update.Release) { r.CertificateSHA256 = strings.Repeat("c", 64) },

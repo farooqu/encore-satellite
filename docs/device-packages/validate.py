@@ -5,7 +5,7 @@ from pathlib import Path
 import sys
 
 
-TARGETS = ("echo-dot-2", "android-generic")
+TARGETS = ("biscuit", "android-generic")
 
 
 def unique_object(pairs):

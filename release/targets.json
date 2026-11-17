@@ -15,10 +15,10 @@
       "build": "go build ./cmd/encore-lab"
     },
     {
-      "id": "echo-dot-2",
+      "id": "biscuit",
       "status": "planned",
-      "platform": "echo",
-      "depends_on": ["platforms/echo/", "devices/echo-dot-2/"],
+      "platform": "linux",
+      "depends_on": ["platforms/linux/", "devices/biscuit/"],
       "package_revision": 0,
       "release_supported": false
     },

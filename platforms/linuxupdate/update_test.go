@@ -61,7 +61,7 @@ func fixture(t *testing.T, malicious string) (update.Store, update.Manifest, upd
 	store := update.Store{Directory: filepath.Join(d, "store"), Booted: filepath.Join(d, "booted"), Recovery: filepath.Join(d, "recovery"), Misc: filepath.Join(d, "misc")}
 	base := map[string]string{"userspace_sha256": sha([]byte("userspace")), "kernel_inputs_sha256": sha([]byte("kernel inputs")), "kernel_sha256": sha([]byte("kernel")), "initramfs_sha256": sha([]byte("initramfs"))}
 	baseJSON := fmt.Sprintf(`{"initramfs_sha256": %q, "kernel_inputs_sha256": %q, "kernel_sha256": %q, "userspace_sha256": %q}`, base["initramfs_sha256"], base["kernel_inputs_sha256"], base["kernel_sha256"], base["userspace_sha256"])
-	m := update.Manifest{Schema: 1, Target: "echo-dot-2", Backend: "incubator", Format: "encore-dot-2-v1", Channel: "dev", CoreVersion: "1.9.0-dev.9", Revision: 11, BaseSHA256: sha([]byte(baseJSON)), Base: base}
+	m := update.Manifest{Schema: 1, Target: "biscuit", Backend: "incubator", Format: "encore-biscuit-v1", Channel: "dev", CoreVersion: "1.9.0-dev.9", Revision: 11, BaseSHA256: sha([]byte(baseJSON)), Base: base}
 	b, _ := json.Marshal(m)
 	write(t, filepath.Join(store.Directory, "slots/a/etc/encore-package.json"), b)
 	write(t, filepath.Join(store.Directory, "slots/a/sbin/init"), []byte("#!/bin/sh\n"))
@@ -151,7 +151,7 @@ func TestStagePythonBuilderOutput(t *testing.T) {
 	cmd := exec.Command("python3", "-c", `
 import shutil,sys
 from pathlib import Path
-sys.path.insert(0,str(Path.cwd()/"../../devices/echo-dot-2/packaging"))
+sys.path.insert(0,str(Path.cwd()/"../../devices/biscuit/packaging"))
 import package,test_package
 original=package.build
 class Captured(Exception): pass
@@ -217,7 +217,7 @@ func TestSignedDiscoveryDownloadStageAndRollback(t *testing.T) {
 	metadata.Store([]byte{})
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		switch req.URL.Path {
-		case "/echo-dot-2/incubator/stable.jws":
+		case "/biscuit/incubator/stable.jws":
 			w.Write(metadata.Load().([]byte))
 		case "/bundle.zip":
 			w.Write(bundle)
@@ -258,7 +258,7 @@ func TestSignedDiscoveryDownloadStageAndRollback(t *testing.T) {
 	}
 	// Run the real unchanged boot-slot selector, not a simulated rollback model.
 	for n, want := range []string{"b", "b", "a"} {
-		cmd := exec.Command("sh", "../../devices/echo-dot-2/packaging/slotctl", "next")
+		cmd := exec.Command("sh", "../../devices/biscuit/packaging/slotctl", "next")
 		cmd.Env = append(os.Environ(), "STORE="+s.Directory, "BOOTED="+s.Booted)
 		b, e := cmd.CombinedOutput()
 		if e != nil || strings.TrimSpace(string(b)) != want {
@@ -291,7 +291,7 @@ func TestFeedEligibilityAndTrust(t *testing.T) {
 			var body atomic.Value
 			body.Store([]byte{})
 			srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, q *http.Request) {
-				if q.URL.Path != "/echo-dot-2/incubator/dev.jws" {
+				if q.URL.Path != "/biscuit/incubator/dev.jws" {
 					t.Errorf("wrong selected path %s", q.URL.Path)
 				}
 				w.Write(body.Load().([]byte))

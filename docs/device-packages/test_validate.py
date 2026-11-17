@@ -23,7 +23,7 @@ class PackageContractTest(unittest.TestCase):
         shutil.copyfile(ROOT / "docs/device-packages/validate.py", script)
         self.script = script
         self.profiles = {}
-        for target in ("echo-dot-2", "android-generic"):
+        for target in ("biscuit", "android-generic"):
             path = self.root / "devices" / target / "profile.json"
             path.parent.mkdir(parents=True)
             shutil.copyfile(ROOT / "devices" / target / "profile.json", path)
@@ -31,7 +31,7 @@ class PackageContractTest(unittest.TestCase):
         (self.root / "release").mkdir()
         # Deliberately minimal registry fixture, independent of the validator.
         self.registry = {"targets": [
-            {"id": "echo-dot-2", "status": "planned", "package_revision": 0,
+            {"id": "biscuit", "status": "planned", "package_revision": 0,
              "release_supported": False},
             {"id": "android-generic", "status": "planned", "package_revision": 0,
              "release_supported": False},
@@ -54,7 +54,7 @@ class PackageContractTest(unittest.TestCase):
         self.run_check(True)
         # Central release metadata may grow without widening this planning contract.
         self.registry["channels"] = ["dev", "stable"]
-        self.registry["targets"][0]["depends_on"] = ["platforms/echo/", "devices/echo-dot-2/"]
+        self.registry["targets"][0]["depends_on"] = ["platforms/linux/", "devices/biscuit/"]
         self.registry["targets"].append({"id": "lab-linux-amd64", "status": "test-fixture"})
         self.write_registry(self.registry)
         self.run_check(True)
@@ -63,7 +63,7 @@ class PackageContractTest(unittest.TestCase):
         for target, original in self.profiles.items():
             path = self.root / "devices" / target / "profile.json"
             for patch in (
-                {"target": "android-generic" if target == "echo-dot-2" else "echo-dot-2"},
+                {"target": "android-generic" if target == "biscuit" else "biscuit"},
                 {"status": "released"},
                 {"schema": True},
                 {"schema": 1.0},

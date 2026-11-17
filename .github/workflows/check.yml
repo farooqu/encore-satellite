@@ -33,7 +33,7 @@ jobs:
         run: python3 -m unittest discover -s release -p 'test_*.py' -v
       - name: Validate planned package scaffold when present
         run: |
-          if test -d devices/echo-dot-2 || test -d devices/android-generic || test -d docs/device-packages; then
+          if test -d devices/biscuit || test -d devices/android-generic || test -d docs/device-packages; then
             python3 docs/device-packages/validate.py
             python3 -m unittest discover -s docs/device-packages -p 'test_*.py' -v
           else
@@ -88,6 +88,6 @@ jobs:
           make -j2 PROGRAMS='dropbear dropbearkey'
           echo "$PWD" >> "$GITHUB_PATH"
       - name: Check and cross-build the experimental Dot package
-        run: make dot-check dot-build
+        run: make biscuit-check biscuit-build
       # Deliberately not make lab-test: it needs pinned HA, onboarding and
       # Amp-supervised service restart support. See release/README.md.

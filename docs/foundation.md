@@ -26,7 +26,7 @@ and exact source commit.
   The encrypted selector and restart controls are private to the lab command,
   not a shared backend package.
 - `lab`: pinned real HA service, deterministic speech fixtures and integration checks.
-- `platforms/echo` and `devices/echo-dot-2`: experimental Linux hardware host and
+- `platforms/linux` and `devices/biscuit`: shared Linux host primitives and
   complete Dot Linux environment: project kernel/source artifacts, initramfs,
   Alpine radio services and runtime, recovery-only clean provisioning and local
   inactive-slot app updates. Not hardware-qualified; see the device README for missing

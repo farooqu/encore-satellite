@@ -14,10 +14,10 @@ local development builder and explicitly invoked USB/recovery installer/updater;
 its local revisions do not change this release inventory or qualify hardware.
 Its bundle is the Dot Linux environment, including a project-built kernel,
 recovery initramfs and radio/userspace services, not an app for preinstalled Linux.
-The dedicated `dot-kernel.yml` workflow builds and verifies pinned kernel inputs.
+The dedicated `biscuit-kernel.yml` workflow builds and verifies pinned kernel inputs.
 Kernel/source-kit uploads are withheld while the embedded audio FPGA firmware's
 redistribution terms remain unresolved; see the
-[kernel source obligations](../devices/echo-dot-2/packaging/KERNEL-SOURCE.md).
+[kernel source obligations](../devices/biscuit/packaging/KERNEL-SOURCE.md).
 Durable corresponding-source retention and signing remain release gates.
 This directory does not establish a release channel.
 No production signing, uploading or publishing is performed by the foundation

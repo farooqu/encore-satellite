@@ -19,7 +19,7 @@ class InventoryTests(unittest.TestCase):
     def test_actual_foundation(self):
         check.validate(self.registry)
         self.assertEqual({t["id"] for t in self.registry["targets"]},
-                         {"echo-dot-2", "android-generic", "lab-linux-amd64"})
+                         {"biscuit", "android-generic", "lab-linux-amd64"})
 
     def test_semver(self):
         for version in ("0.1.0-dev.0", "1.2.3", "1.2.3-rc.1+build.005", "1.0.0-0alpha"):
@@ -36,8 +36,8 @@ class InventoryTests(unittest.TestCase):
         for field, value in (("release_supported", True), ("release_supported", 0),
                              ("package_revision", 1), ("package_revision", False),
                              ("status", "supported"), ("build", "make fake-package"),
-                             ("depends_on", []), ("depends_on", ["devices/echo-dot-2/"]),
-                             ("depends_on", ["platforms/echo/", "../escape/"])):
+                             ("depends_on", []), ("depends_on", ["devices/biscuit/"]),
+                             ("depends_on", ["platforms/linux/", "../escape/"])):
             with self.subTest(field=field, value=value):
                 registry = copy.deepcopy(self.registry)
                 registry["targets"][1][field] = value
@@ -77,27 +77,28 @@ class ImpactTests(unittest.TestCase):
 
     def test_platform_dependents_include_multiple_targets(self):
         extra = copy.deepcopy(self.registry["targets"][1])
-        extra.update(id="future-echo", depends_on=["platforms/echo/", "devices/future-echo/"])
+        extra.update(id="future-linux",
+                     depends_on=["platforms/linux/", "devices/future-linux/"])
         self.registry["targets"].append(extra)
         check.validate(self.registry)
-        self.assert_impact(["platforms/echo/audio.go"], ["echo-dot-2", "future-echo"])
+        self.assert_impact(["platforms/linux/audio.go"], ["biscuit", "future-linux", "lab-linux-amd64"])
         self.assert_impact(["platforms/android/Host.java"], ["android-generic"])
 
     def test_device_only_and_union(self):
-        self.assert_impact(["devices/echo-dot-2/profile.json"], ["echo-dot-2"])
+        self.assert_impact(["devices/biscuit/profile.json"], ["biscuit"])
         self.assert_impact(["devices/android-generic/package.gradle"], ["android-generic"])
-        self.assert_impact(["devices/echo-dot-2/profile.json", "platforms/android/Host.java"],
-                           ["echo-dot-2", "android-generic"])
+        self.assert_impact(["devices/biscuit/profile.json", "platforms/android/Host.java"],
+                           ["biscuit", "android-generic"])
 
     def test_lab_only_and_docs_only_keep_real_lab_check(self):
         self.assert_impact(["cmd/encore-lab/main.go", "lab/uv.lock"], ["lab-linux-amd64"])
         self.assert_impact(["README.md", "docs/foundation.md", "release/README.md",
-                            "devices/echo-dot-2/README.md"], [])
+                            "devices/biscuit/README.md"], [])
         self.assert_impact([], [])
 
     def test_unknown_unsafe_and_prefix_collisions_broaden(self):
         for path in ("devices/unregistered/profile.json", "platforms/unknown/a.go",
-                     "devices/echo-dot-20/profile.json", "Dockerfile", "docs/device-packages/validate.py",
+                     "devices/biscuit-extra/profile.json", "Dockerfile", "docs/device-packages/validate.py",
                      "../README.md", "/README.md", "a\\README.md"):
             with self.subTest(path=path):
                 self.assert_impact([path], self.all, [path])
@@ -131,7 +132,7 @@ class GitCLITests(unittest.TestCase):
                 return json.loads(result.stdout)
 
             git("init", "-q")
-            old = root / "devices/echo-dot-2/name with\nnewline.json"
+            old = root / "devices/biscuit/name with\nnewline.json"
             old.parent.mkdir(parents=True)
             old.write_text("{}")
             base = commit()
@@ -141,14 +142,14 @@ class GitCLITests(unittest.TestCase):
             commit()
             output = root / "github-output"
             result = run(base, "--github-output", str(output))
-            self.assertEqual(result["affected_targets"], ["android-generic", "echo-dot-2"])
+            self.assertEqual(result["affected_targets"], ["android-generic", "biscuit"])
             self.assertEqual(result["unknown_paths"], [])
             self.assertIn('lab_check=true\n', output.read_text())
             self.assertIn('package_targets=[]\n', output.read_text())
             for missing in ("0" * 40, "not-a-revision"):
                 result = run(missing)
                 self.assertEqual(result["affected_targets"],
-                                 ["android-generic", "echo-dot-2", "lab-linux-amd64"])
+                                 ["android-generic", "biscuit", "lab-linux-amd64"])
                 self.assertTrue(result["lab_check"])
                 self.assertEqual(result["unknown_paths"], ["<unavailable diff>"])
 

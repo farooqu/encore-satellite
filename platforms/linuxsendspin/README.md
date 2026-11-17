@@ -15,11 +15,11 @@ libc. No Docker daemon, target sysroot, target base changes, or kernel compiler
 is needed.
 
 ```sh
-devices/echo-dot-2/packaging/sendspin.sh --target host --out build/sendspin-host
-devices/echo-dot-2/packaging/sendspin.sh --target armv7
+devices/biscuit/packaging/sendspin.sh --target host --out build/sendspin-host
+devices/biscuit/packaging/sendspin.sh --target armv7
 ```
 
-ARM output defaults to `build/echo-dot-2/sendspin/`:
+ARM output defaults to `build/biscuit/sendspin/`:
 
 * `encore-sendspin`: stripped, **static**, ARMv7 Cortex-A7 EABI5 hard-float ELF.
 * `provenance.json`: schema 1, target, exact dependency lock, configure command,
@@ -207,7 +207,7 @@ python3 platforms/linuxsendspin/test_build.py -v
 go test -race ./platforms/linuxsendspin
 go vet ./platforms/linuxsendspin
 python3 platforms/linuxsendspin/test_native.py --binary build/sendspin-host/encore-sendspin -v
-python3 platforms/linuxsendspin/test_native.py --binary build/echo-dot-2/sendspin/encore-sendspin --runner qemu-arm -v
+python3 platforms/linuxsendspin/test_native.py --binary build/biscuit/sendspin/encore-sendspin --runner qemu-arm -v
 ```
 
 Builder tests use disposable local caches without downloads. They cover tampered

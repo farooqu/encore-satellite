@@ -64,7 +64,7 @@ stay with Home Assistant or Voice Incubator.
 **Early implementation has started; no device is release-supported.** An
 [Incubator-only Android development APK](devices/android-generic/README.md)
 can be built locally; device support has not been verified. An
-[experimental Echo Dot 2 package](devices/echo-dot-2/README.md) builds the Linux
+[experimental Echo Dot (2nd gen) package](devices/biscuit/README.md) builds the Linux
 environment itself: kernel, recovery initramfs, Alpine radio services and ARMv7
 runtime, with clean-slate recovery provisioning/update tools. It has not been
 booted or acoustically tested on hardware. Activation supports Action and
@@ -73,6 +73,10 @@ Bluetooth proxy with active connections are integrated, but require a compatible
 Bluetooth-enabled kernel and hardware validation. The installer stages the
 bundled project-built kernel from ordinary TWRP; no installed Linux or Fire OS
 version is required.
+Internal board names are **Biscuit** for Echo Dot (2nd gen) and **Radar** for
+Echo (2nd gen). Radar has no device implementation here; shared Linux helpers
+do not establish board compatibility. The unpublished internal target is
+`biscuit`; see the [Biscuit naming notes](devices/biscuit/README.md#internal-names).
 The shared Go protocol core has a
 [reproducible Home Assistant lab](lab/README.md) pinned to a 2026.12 development
 build. [Native Incubator](docs/incubator-validation.md) is tested with its real

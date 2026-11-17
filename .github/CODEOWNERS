@@ -32,5 +32,5 @@
 
 # Device scopes are separate. Until real device maintainers are appointed, the
 # owner reviews these too. Privileges/installers also require central review.
-/devices/echo-dot-2/ @farooqu
+/devices/biscuit/ @farooqu
 /devices/android-generic/ @farooqu

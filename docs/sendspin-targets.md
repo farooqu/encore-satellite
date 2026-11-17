@@ -68,10 +68,10 @@ See the lab README and [dependency notices](../lab/sendspin/NOTICES.md).
 ## Echo Dot 2 package integration
 
 The [Echo packaging thread](https://ampcode.com/threads/T-01a1e5ab-b7b7-72ae-b3ec-ff58e6f691a2)
-owns `devices/echo-dot-2/`, `platforms/echo/` and its package/base. At handoff it
+owns `devices/biscuit/`, `platforms/linux/` and its package/base. At handoff it
 reports a locally built, unflashed Alpine 3.22 ARMv7 package with ALSA, controls
 and Action-activated voice. Its experimental integration is documented in the
-[Dot package](../devices/echo-dot-2/README.md#sendspin-music). The production adapter
+[Dot package](../devices/biscuit/README.md#sendspin-music). The production adapter
 is `platforms/linuxsendspin`, not the lab receiver. Physical qualification remains
 outstanding; these checked items describe implementation, not Dot measurements.
 
