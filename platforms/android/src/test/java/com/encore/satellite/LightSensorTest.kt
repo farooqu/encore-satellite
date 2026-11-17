@@ -32,20 +32,25 @@ class LightSensorTest {
         val sensor = ShadowSensor.newInstance(Sensor.TYPE_LIGHT)
         manager.addSensor(sensor)
         manager.setForceListenersToFail(true)
-        val host = LightSensorHost(context)
-        ShadowLooper.getAllLoopers().forEach { shadowOf(it).idle() }
-        assertTrue(host.supported())
-        assertEquals("Light sensor registration failed", JSONObject(host.sample()).getString("problem"))
-        manager.setForceListenersToFail(false)
-        host.sample()
-        ShadowLooper.getAllLoopers().forEach { shadowOf(it).idle() }
-        SystemClock.sleep(10)
-        manager.sendSensorEventToListeners(SensorEventBuilder.newBuilder().setSensor(sensor)
-            .setTimestamp(SystemClock.elapsedRealtimeNanos()).setValues(floatArrayOf(71f)).build())
-        assertEquals(71.0, JSONObject(host.sample()).getDouble("lux"), 0.0)
-        host.close()
-        ShadowLooper.getAllLoopers().forEach { shadowOf(it).idle() }
-        assertFalse(manager.hasListener(host))
+        val existingLoopers = ShadowLooper.getAllLoopers().toSet()
+        LightSensorHost(context).use { host ->
+            // Other test classes can leave quit loopers in Robolectric's registry.
+            val sensorLooper = ShadowLooper.getAllLoopers().single { it !in existingLoopers }
+            shadowOf(sensorLooper).idle()
+            assertTrue(host.supported())
+            assertEquals("Light sensor registration failed", JSONObject(host.sample()).getString("problem"))
+            manager.setForceListenersToFail(false)
+            host.sample()
+            shadowOf(sensorLooper).idle()
+            SystemClock.sleep(10)
+            manager.sendSensorEventToListeners(SensorEventBuilder.newBuilder().setSensor(sensor)
+                .setTimestamp(SystemClock.elapsedRealtimeNanos()).setValues(floatArrayOf(71f)).build())
+            assertEquals(71.0, JSONObject(host.sample()).getDouble("lux"), 0.0)
+            host.close()
+            sensorLooper.thread.join(2_000)
+            assertFalse(sensorLooper.thread.isAlive)
+            assertFalse(manager.hasListener(host))
+        }
     }
 
     @Test fun luxUsesEventAgeAndCapabilitySurvivesBadSamplesAndShutdown() {
