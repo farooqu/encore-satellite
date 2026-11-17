@@ -34,6 +34,8 @@ jobs:
       - name: Use Java 21
         run: echo "JAVA_HOME=$JAVA_HOME_21_X64" >> "$GITHUB_ENV"
       - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+        with:
+          packages: platform-tools
       - name: Install SDK and NDK
         run: sdkmanager 'platforms;android-36' 'build-tools;36.0.0' 'ndk;28.0.13004108'
       - name: Regenerate engine, assemble, test and lint
@@ -63,6 +65,8 @@ jobs:
       - name: Use Java 21
         run: echo "JAVA_HOME=$JAVA_HOME_21_X64" >> "$GITHUB_ENV"
       - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+        with:
+          packages: platform-tools
       - name: Install SDK and NDK
         run: sdkmanager 'platforms;android-36' 'build-tools;36.0.0' 'ndk;28.0.13004108'
       - name: Build signed candidate with private keystore
