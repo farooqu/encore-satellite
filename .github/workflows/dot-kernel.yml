@@ -46,7 +46,10 @@ jobs:
           path: .amp/in/orb-backup/dot-kernel/dl
           key: dot-kernel-sources-${{ hashFiles('devices/echo-dot-2/packaging/kernel-inputs.json') }}
       - name: Build and verify the kernel and source kit
-        run: make dot-kernel
+        run: |
+          # Checkout's container action and this shell can use different HOME paths.
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          make dot-kernel
       - name: Retain the exact development artifact and corresponding source
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
