@@ -20,6 +20,57 @@ import (
 	"github.com/farooqu/encore-satellite/platforms/linux/input"
 )
 
+func TestButtonDiscoveryRequiresBothHardwareGroups(t *testing.T) {
+	for _, tc := range []struct {
+		name, gpioName, gpioPhys string
+		keypad, wantOK           bool
+	}{
+		{"stock Biscuit", "keys", "gpio-keys/input0", true, true},
+		{"driver name", "gpio-keys", "", true, true},
+		{"generic keys without identity", "keys", "", true, false},
+		{"unrelated keys", "keys", "usb/input0", true, false},
+		{"wrong physical input", "keys", "gpio-keys/input1", true, false},
+		{"missing keypad", "keys", "gpio-keys/input0", false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			node := func(name, phys string) *input.Device {
+				t.Helper()
+				path := filepath.Join(t.TempDir(), "events")
+				if err := os.WriteFile(path, nil, 0600); err != nil {
+					t.Fatal(err)
+				}
+				d, err := input.Open(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { d.Close() })
+				d.Name, d.Phys = name, phys
+				return d
+			}
+			unrelated := node("ACCDET", "")
+			gpio := node(tc.gpioName, tc.gpioPhys)
+			devices := []*input.Device{unrelated, gpio}
+			if tc.keypad {
+				devices = append(devices, node("mtk-kpd", ""))
+			}
+			got, err := buttonDevices(devices)
+			if (err == nil) != tc.wantOK {
+				t.Fatalf("discovery error = %v, want success %v", err, tc.wantOK)
+			}
+			if tc.wantOK && (len(got) != 2 || got[0] != gpio || got[1] != devices[2]) {
+				t.Fatal("discovery did not retain exactly the two hardware groups")
+			}
+			for _, d := range devices {
+				_, readErr := d.Read()
+				wantClosed := !tc.wantOK || d == unrelated
+				if errors.Is(readErr, os.ErrClosed) != wantClosed {
+					t.Fatalf("%q closed = %v, want %v (read error %v)", d.Name, errors.Is(readErr, os.ErrClosed), wantClosed, readErr)
+				}
+			}
+		})
+	}
+}
+
 // Use real evdev records through the production input reader, not direct calls
 // to a key mapping helper. Only the event node and audio hardware are virtual.
 func buttonEvents(t *testing.T, gate *linux.Privacy, engine *session.Engine, player *speaker) func(uint16, int32) {

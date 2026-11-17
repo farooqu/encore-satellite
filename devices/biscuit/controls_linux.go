@@ -35,15 +35,23 @@ func openButtons() ([]*input.Device, error) {
 	if err != nil {
 		return nil, err
 	}
-	// The stock driver names are source evidence, not a discovered Encore
-	// hardware matrix. Refuse a base that does not expose both key groups.
+	return buttonDevices(devices)
+}
+
+// buttonDevices takes ownership of the discovered nodes, closing unrelated
+// devices and refusing a base that does not expose both key groups.
+func buttonDevices(devices []*input.Device) ([]*input.Device, error) {
 	var kept []*input.Device
 	keypad, gpio := false, false
 	for _, d := range devices {
-		if strings.Contains(d.Name, "mtk-kpd") || strings.Contains(d.Name, "gpio-keys") {
+		isKeypad := strings.Contains(d.Name, "mtk-kpd")
+		// The Biscuit stock kernel reports Name="keys" for gpio-keys.
+		// Its physical identity distinguishes it from unrelated generic keys.
+		isGPIO := strings.Contains(d.Name, "gpio-keys") || (d.Name == "keys" && d.Phys == "gpio-keys/input0")
+		if isKeypad || isGPIO {
 			kept = append(kept, d)
-			keypad = keypad || strings.Contains(d.Name, "mtk-kpd")
-			gpio = gpio || strings.Contains(d.Name, "gpio-keys")
+			keypad = keypad || isKeypad
+			gpio = gpio || isGPIO
 		} else {
 			_ = d.Close()
 		}

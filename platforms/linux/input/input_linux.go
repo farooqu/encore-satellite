@@ -87,19 +87,22 @@ func (e Event) String() string {
 type Device struct {
 	Path string
 	Name string
+	Phys string
 	f    *os.File
 
 	closeOnce sync.Once
 	closeErr  error
 }
 
-// Open opens one event node and reads its reported name.
+// Open opens one event node and reads its reported name and physical path.
 func Open(path string) (*Device, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
-	return &Device{Path: path, Name: nameFor(path), f: f}, nil
+	// Not all drivers expose a physical path; absence leaves it unspecified.
+	phys, _ := os.ReadFile("/sys/class/input/" + filepath.Base(path) + "/device/phys")
+	return &Device{Path: path, Name: nameFor(path), Phys: strings.TrimSpace(string(phys)), f: f}, nil
 }
 
 // nameFor reads the device name from sysfs, which avoids an EVIOCGNAME ioctl.
