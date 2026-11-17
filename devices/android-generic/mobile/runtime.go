@@ -196,10 +196,12 @@ func (r *Runtime) Capture(pcm []byte) error {
 func (r *Runtime) Talk() error { return r.engine.StartManual() }
 func (r *Runtime) Stop()       { _ = r.engine.Stop() }
 func (r *Runtime) SetMuted(muted bool) error {
-	// Gate first. A persistence failure must never leave capture open.
-	r.engine.SetMuted(true)
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	// Gate before saving and retain effective mute for subsequent settings saves.
+	// Only an explicitly requested, successfully saved unmute clears this latch.
+	r.engine.SetMuted(true)
+	r.config.Muted = true
 	c := r.config
 	c.Muted = muted
 	if err := r.save(c); err != nil {
