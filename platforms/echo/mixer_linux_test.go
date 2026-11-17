@@ -62,6 +62,23 @@ func (p *mixerPCM) Delay() (int, error) {
 	defer p.mu.Unlock()
 	return len(p.ring) / 4, p.delayErr
 }
+func (p *mixerPCM) waitBuffered(t *testing.T, frames int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for {
+		n, err := p.Delay()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n >= frames {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("PCM buffered %d frames, want at least %d", n, frames)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
 func (p *mixerPCM) consume(n int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -190,13 +207,19 @@ func TestMixerIndependentFlushDrainGainAndConsumption(t *testing.T) {
 	if err := m.MusicWrite(ctx, 8, fillPCM(4800, 10000, -6000)); err != nil {
 		t.Fatal(err)
 	}
+	p.waitBuffered(t, 960)
 	m.SetVoiceActive(true)
 	m.MusicVolume(50, false)
 	p.heardPCM()
-	pump(p, 1200)
+	// Retire the existing 20-ms DMA queue, then the full 20-ms gain ramp.
+	pump(p, 960+960)
 	p.heardPCM()
 	pump(p, 240)
-	for i, v := range p.heardPCM() {
+	samples := p.heardPCM()
+	if len(samples) != 480 {
+		t.Fatalf("ducked PCM samples %d want 480", len(samples))
+	}
+	for i, v := range samples {
 		want := int16(1000)
 		if i%2 == 1 {
 			want = -600
@@ -209,12 +232,17 @@ func TestMixerIndependentFlushDrainGainAndConsumption(t *testing.T) {
 	if err := m.MusicWrite(ctx, 9, fillPCM(4800, 10000, -6000)); err != nil {
 		t.Fatal(err)
 	}
+	p.waitBuffered(t, 960)
 	m.MusicVolume(35, false)
 	m.SetVoiceActive(false)
-	pump(p, 1440)
+	pump(p, 960+960) // queued ducked audio plus the release ramp
 	p.heardPCM()
 	pump(p, 240)
-	for i, v := range p.heardPCM() {
+	samples = p.heardPCM()
+	if len(samples) != 480 {
+		t.Fatalf("released PCM samples %d want 480", len(samples))
+	}
+	for i, v := range samples {
 		want := int16(3500)
 		if i%2 == 1 {
 			want = -2100
