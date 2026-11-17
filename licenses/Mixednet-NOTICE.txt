@@ -1,0 +1,10 @@
+The mixednet executor, loader and detector are pure-Go adaptations of the
+Apache-2.0 Voice Incubator mixednet.cpp, mixednet_blob.cpp, wake_detector.cpp,
+and mixednet.py sources. The original executor is vendored by that firmware
+from https://github.com/synesthesiam/mixednet-executor. Quantization follows
+gemmlowp's SaturatingRoundingDoublingHighMul and RoundingDivideByPOT.
+
+Changes here include Go storage and bounds validation, a streaming PCM API,
+and reuse of TECHO5's microWakeWord frontend. The Apache License, Version 2.0
+is included in LICENSE-APACHE-2.0.txt. Test fixture provenance and source
+revisions are documented in testdata/README.md.

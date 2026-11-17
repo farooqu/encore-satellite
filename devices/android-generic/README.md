@@ -1,95 +1,149 @@
-# Generic Android: planned APK target
+# Generic Android: Incubator development APK
 
-**Planned, never released, not installable.** This directory contains a
-planning profile and package notes, not an Android app, build, installer or
-on-device validation. **Samsung Galaxy Tab A7 Lite is the intended first validation
-tablet**, not a tested compatibility claim. Other devices in the root README are
-future intentions, not a supported/tested list. See the
-[package contract](../../docs/device-packages/README.md).
+This target now contains an **Incubator-only Android app**, with a native Kotlin /
+Jetpack Compose host and an in-process Go engine. It is not a released or
+hardware-qualified package. Samsung Galaxy Tab A7 Lite is the first device to
+try; Meta Portal installation remains unverified, not ordinary tablet support.
+`profile.json` and the central release registry remain planning/revision-zero
+metadata, not runtime settings or a release declaration.
 
-## Local ownership
+## Build locally
 
-This target owns its explicit composition, target profile, APK packaging
-inputs and tested-device records. Shared Android service/Activity, audio,
-permissions, IPC and display integration belong in `platforms/android/`, not in
-this device directory. Add measured model-specific profiles only when justified;
-do not create a separate APK simply because a tablet has another brand.
+Requirements: Go 1.27, JDK 21, Gradle 9.4.1, Android SDK platform/build-tools 36,
+and NDK 28.0.13004108. Set `ANDROID_HOME` and put Gradle on `PATH` (or set `GRADLE`
+to its executable). From the repository root:
 
-`profile.json` records target identity and planned status only; it contains no
-audio settings or capability declarations. Future Android integration must not
-inherit Dot wiring, EQ, gain or calibration. Ordinary microphone
-input does not imply a raw/reference pair, aligned capture, reliable platform AEC,
-or Incubator's second processed capture/enrollment capability. OS effect
-availability is not proof of cancellation quality; never stack OS and software
-AEC blindly. Screen/touch/brightness and dashboard intent are not implemented
-facilities in this scaffold.
+```sh
+devices/android-generic/build-android
+```
 
-## Source evidence and intended assembly
+The script binds the matching Go engine into an AAR for `arm64-v8a` and
+`armeabi-v7a`, downloads and SHA-256-checks a pinned SendspinDroid player library,
+then builds `app/build/outputs/apk/debug/app-debug.apk` under this directory.
+It does not install, upload, publish or update a device. Gradle uses its normal
+local development signing key; do not use that identity for a production release.
+The provisional application ID is `com.encore.satellite.incubator.dev`, versionCode
+2 (`0.1.1-incubator-dev`), minimum API 26, target API 35. Final package identity, signing and upgrade policy
+are not decided by these development defaults.
 
-[Techo5 Panel's PanelService](https://github.com/farooqu/techo5-panel/blob/14c16fea2fbc64ce9b706009a3fed16766523e6d/app/src/app/techo5/panel/PanelService.java)
-uses native `AudioRecord`/`AudioTrack` and starts an APK-bundled Go executable as a
-child process from the native-library directory. Its
-[LocalPeer check](https://github.com/farooqu/techo5-panel/blob/14c16fea2fbc64ce9b706009a3fed16766523e6d/app/src/app/techo5/panel/LocalPeer.java)
-restricts local peers to the app UID. This is implementation evidence for the
-intended design, **not fresh hardware validation, an Encore port or a guarantee
-that current Android versions permit every execution/provisioning mode**.
+Use a build machine with sufficient RAM: the initial 2 GB orb exhausted memory;
+the complete APK/test/lint build passed in an `a1.large` orb. Default settings use
+two Gradle workers and a 3 GB Gradle heap.
 
-A future target composition root would select the shared Go engine, native
-Android host, this profile and only the native Incubator backend. Assist remains
-in the repository for a possible later, separately qualified APK for the
-**Home Assistant Assist pipeline**. Incubator is the default APK; the Assist APK
-would be explicitly opt-in. Do not
-bundle a second voice backend or runtime backend selection/fallback. One signed
-APK must bundle its matching host and engine for each explicitly supported ABI. The host
-owns engine lifetime independently of dashboard reloads; it adapts
-actual audio routes to the engine's bounded mono PCM16/16 kHz capture contract.
-IPC must check same-UID peers on both sides, reject incompatible protocol versions,
-and preserve bounded audio plus prompt control/cancellation. No socket, protocol,
-executable or handshake is implemented here, and no Dot-specific code belongs in
-the APK. Do not fetch a separately updated engine executable.
+## Use the development app
 
-Native playback needs real position/timestamp-based drain validation; a completed
-`AudioTrack.write` or socket delivery is not proof the speaker finished. Permission
-loss/mute must stop or gate capture immediately and clear queued/pre-roll audio.
-The native dashboard/overlay must not expose a general device-command bridge to
-dashboard JavaScript. These are acceptance requirements, not existing behavior.
+1. Install the debug APK using Android's ordinary user-approved sideloading flow.
+   Open it and choose **Start satellite**, granting microphone permission. It runs
+   a microphone/media foreground service with a persistent notification. No boot
+   receiver, root, device owner or unattended kiosk privileges are required.
+2. On a trusted LAN, pair the device with Voice Incubator using the advertised
+   `_voice-incubator._tcp` service, or its IP and TCP port 6055. This protocol is
+   **unencrypted/unauthenticated**; do not expose it to untrusted networks.
+   Incubator sends mixednet models, which execute locally through the compatible
+   microWakeWord frontend. No wake model is bundled or downloaded independently.
+   The app shows connected state and installed model count. **Talk** is a manual
+   fallback, not a replacement for local wake detection.
+3. Add the device's separate ESPHome integration on TCP 6053 using the encryption
+   key revealed in local **Settings**. Set its single **Dashboard URL** text entity
+   to a full URL, for example `https://home.example/lovelace/home`. This supplies
+   both the HA origin and dashboard path; no separate tablet origin setup exists.
+   Prefer HTTPS; explicitly choosing `http://` permits trusted-LAN HTTP, including
+   unencrypted HA sign-in traffic. The paired ESPHome controller can change the
+   full URL, including its origin. Invalid URLs retain the previous configuration.
+   **Reload dashboard** is a separate button entity. No dashboard list or backend
+   selector exists. Previously configured full dashboard URLs remain valid.
+4. Sign into HA in the dashboard itself. Only the HA dashboard is a WebView;
+   settings, privacy, voice, waveform and music controls are Compose. Initial
+   login supports same-origin flows only (no external-IdP allowlist yet).
+5. Optionally connect a **current Noise-capable Sendspin server** by host:port in
+   Settings. Reveal the independent Sendspin pairing token locally and provision
+   it on the server. The player uses encrypted, Keystore-protected identity/trust;
+   it does not silently fall back to plaintext or admit unpaired playback.
+   Older plaintext-only servers are not compatible. Music can be disconnected
+   without changing voice, and microphone mute does not disable music. A voice
+   turn reduces the music track gain to 15%, retaining player volume/mute and sync.
 
-## Prerequisites still to establish on the first tablet
+The foreground service owns audio and network sockets independently of dashboard
+reloads and Activity rotation. Closing the notification's **Stop satellite** action
+stops it; restarting never silently reverses persisted microphone privacy.
+This initial package does not automatically resume after reboot or process death.
+The music server address/connection is entered explicitly each time; identity and
+pairing records persist. The screen stays awake while the Activity is visible.
 
-| Area | Missing fact/decision |
-| --- | --- |
-| Device / OS | Exact Tab A7 Lite model, firmware/Android version, patch level and maintained OS/base path; no minimum/supported API range selected. |
-| Binary compatibility | Supported CPU ABIs, Go/NDK/JDK/Android SDK toolchain, native dependencies and APK executable extraction/launch behavior; do not inherit Panel's ABI/API matrix as Encore support. |
-| Permissions / lifecycle | Microphone permission, foreground-service rules/types, notifications, audio focus/routes, background/reboot recovery and battery restrictions under the actual OS. |
-| Provisioning / kiosk | Ordinary user-granted installation and operation first; root, device-owner privileges, lock-task/kiosk mode and unattended installation are not assumed or supplied. |
-| Installation / signing | App ID, signing identity and secure key custody, versionCode mapping, user-consent/update flow and failed-install recovery are unresolved; no debug key or privileged installer is provided. |
-| Audio / display | Actual sample routes, platform processing quality, wake during playback, drain/stop timing and display-control privileges; no measurements recorded. |
-| Ownership | Named hardware maintainer and reproducible acceptance record still required before a support commitment. |
+## Display and privacy behavior
 
-Application updates are signed APK replacements, independent of maintained Android
-OS/security updates. Preserve Android signature/version constraints through a
-centrally reviewed packaging policy; core SemVer and package revision alone are
-not an Android versionCode algorithm. Current central revision is zero and release
-support is false. There is no APK, updater or installation procedure to run.
+- One dashboard fills the main display. During the entire voice turn it is dimmed,
+  touch-shielded and hidden from accessibility interaction; stop and privacy remain
+  usable. The horizontal Horizon braid draws real microphone PCM, not a timed
+  speaking animation. It is static when microphone visualization is inactive.
+- Actual upstream recognition/reply text is shown by default, with no synthetic
+  transcript. Muting clears the shared session/pre-roll, cancels active voice and
+  releases the microphone; idle connections can stay attached while muted.
+  Transcript text is not persisted. Android screenshots
+  are disabled for the running Activity, including locally revealed pairing keys.
+- Only server-requested Incubator follow-ups exist. No Assist, runtime route
+  switching, Assist-only follow-up toggle, enrollment/reference stream, claimed
+  AEC, BLE proxy or ESPHome `media_player` is included.
+- Dashboard JavaScript has no native command bridge, file/content access,
+  camera/mic grants or external-intent launch path. TLS errors are not bypassed.
+  Navigation stays within the origin derived from the current ESPHome URL;
+  changing origin recreates the WebView, independently of voice and music.
+
+## Checks
+
+```sh
+make check
+devices/android-generic/build-android :app:assembleDebug :app:testDebugUnitTest :app:lintDebug
+python3 docs/device-packages/validate.py
+```
+
+Go tests exercise model transfer/digest/capacity/privacy plus existing voice and
+drain contracts. JVM Robolectric/Roborazzi tests render the actual Compose controls and
+exercise touch shielding, stop/privacy access, transcripts, waveform state,
+capability-gated music controls and same-origin navigation. Native-rendered test
+captures are written to `app/build/reports/screenshots/`; their audio, transcript
+and music states are explicitly test fixtures, not on-device evidence.
+
+The one-URL development build passed APK assembly, all three native UI tests and
+lint (zero errors, 15 warnings, including deliberately unsupported x86/ChromeOS
+and newer-version suggestions). The APK's v2 development signature and ARM-only
+native library contents were independently checked. These checks do not establish
+installation, microphone quality, real Sendspin playback or physical audio timing.
+The full-URL configuration, origin changes, invalid-input rejection, persistence
+and voice-independent controls were also exercised through a real encrypted
+`aioesphomeapi` client. The rebuilt APK retains the previous development signing
+certificate and uses a higher versionCode; on-device updating remains untested.
+
+The remaining practical check is installation and a real Incubator turn on the
+Tab A7 Lite: model push/local wake, capture/reply audio, playback-head drain,
+stop/privacy/permission loss, music duck/restore, HA login/dashboard reload,
+background survival and route/network recovery. No physical-device result is
+claimed. Portal sideload access/OS/ABI/WebView and hardware mic/speaker access must
+be established on the exact unit before claiming it works there.
+
+Before support is claimed, record the actual tablet/OS/ABI/toolchain and pinned
+backend versions, native Incubator timer behavior, wake during playback, measured
+resource use, latency and underruns. Inspect the APK dependency closure and contents
+to exclude the Assist adapter. Assist qualification and switching tests are not
+gates for the Incubator APK.
+
+Application updates are signed APK replacements, independent of Android OS/security
+updates. Preserve signature/version constraints through a centrally reviewed
+packaging policy; core SemVer and package revision alone are not an Android
+versionCode algorithm. Central release revision remains zero and support is false.
 Future package/update metadata must bind the backend variant and routine updates
-must preserve it. A later change to Assist requires explicit application-package
-replacement with validated state migration/recovery and Android signing/version
-compatibility, not a runtime toggle or an OS reflash.
+must preserve it. A later, explicitly opt-in Assist package requires its own
+qualification, validated state migration/recovery and signing/version compatibility,
+not a runtime toggle or an OS reflash. No production updater is implemented.
 
-Before support is claimed, record actual tablet/OS/ABI/toolchain and pinned backend
-versions plus native Incubator voice/timer behavior, capture/playback/drain, wake
-during playback, immediate stop/mute/permission revocation, network/audio-route recovery,
-dashboard reload without voice loss, background/reboot behavior under real
-provisioning and a signed same-backend app update without an OS update. Inspect
-the APK dependency closure and contents to exclude the Assist adapter. Assist
-qualification and live-switching tests are not gates for the Incubator APK.
-Measure resource use, latency and underruns. A profile check or a future successful
-APK build does not establish any of those hardware results.
+## Ownership and attribution
 
-## Acknowledgement
+This directory owns composition and APK inputs. Reusable Android Activity/service,
+audio and display code lives in `platforms/android/`; shared frontend/executor code
+lives in `core/wake/`. No Dot hardware settings are inherited. The Go library is
+bundled in the APK, not fetched as a separate executable.
 
-Techo5 Panel and Techo5's upstream work informed this boundary. See
-[ACKNOWLEDGEMENTS.md](../../ACKNOWLEDGEMENTS.md) and the
-[package attribution/licensing caveat](../../docs/device-packages/README.md#evidence-attribution-and-licensing).
-No Panel Java/Go code, UI assets or models are copied here. New Encore material's
-license remains unselected; audit all included material before distribution.
+See [ACKNOWLEDGEMENTS.md](../../ACKNOWLEDGEMENTS.md) for pinned Techo5/frontend,
+mixednet and SendspinDroid provenance. Included notices are also packaged as APK
+assets. New Encore material's license remains unselected; release distribution
+needs its own complete dependency/license review.

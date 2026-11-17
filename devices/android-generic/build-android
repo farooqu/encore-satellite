@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Build a local debug APK. No upload, device install, release key or updater.
+set -euo pipefail
+root="$(cd "$(dirname "$0")/../.." && pwd)"
+out="$root/build/android"
+mkdir -p "$out"
+pin=bd1d90a8f79b8b78c1ee924a0e6c14016ed1f1e2
+if [[ ! -f "$out/sendspindroid/.encore-pin" ]] || [[ "$(cat "$out/sendspindroid/.encore-pin")" != "$pin" ]]; then
+  curl -fL "https://codeload.github.com/chrisuthe/SendspinDroid/tar.gz/$pin" -o "$out/sendspindroid.tar.gz"
+  echo "07e7d854c6156136ddea961fe759aae122c8827f12723e22404d44ecd6f72942  $out/sendspindroid.tar.gz" | sha256sum -c -
+  mkdir -p "$out/sendspindroid"
+  tar -xzf "$out/sendspindroid.tar.gz" --strip-components=1 -C "$out/sendspindroid"
+  printf '%s' "$pin" > "$out/sendspindroid/.encore-pin"
+fi
+: "${ANDROID_HOME:?Set ANDROID_HOME to an Android SDK with platform 36 and NDK 28.0.13004108}"
+export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/28.0.13004108"
+export PATH="$(go env GOPATH)/bin:$PATH"
+if [[ "${SKIP_GO_BIND:-0}" != 1 ]]; then
+  go install golang.org/x/mobile/cmd/gomobile@v0.0.0-20261011034528-197770444867
+  go install golang.org/x/mobile/cmd/gobind@v0.0.0-20261011034528-197770444867
+  (cd "$root" && gomobile bind -target="${ANDROID_TARGETS:-android/arm64,android/arm}" -androidapi 26 -javapkg com.encore.engine -o "$out/encore.aar" ./devices/android-generic/mobile)
+fi
+gradle="${GRADLE:-$out/sendspindroid/android/gradlew}"
+if [[ $# == 0 ]]; then set -- :app:assembleDebug; fi
+"$gradle" -p "$root/devices/android-generic" "$@" --console=plain
+echo "APK: $root/devices/android-generic/app/build/outputs/apk/debug/app-debug.apk"

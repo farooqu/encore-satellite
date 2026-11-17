@@ -44,8 +44,9 @@ on more hardware. On displays, that also means your Home Assistant dashboard
 with a small conversation overlay. Timers, alarms, and household automations
 stay with Home Assistant or Voice Incubator.
 
-**Early implementation has started.** There's nothing to install on a device
-yet, and device support hasn't been verified. The shared Go protocol core has a
+**Early implementation has started.** An [Incubator-only Android development
+APK](devices/android-generic/README.md) can be built locally; device support has
+not been verified and no supported release is published. The shared Go protocol core has a
 [reproducible Home Assistant lab](lab/README.md) pinned to a 2026.12 development
 build. [Native Incubator](docs/incubator-validation.md) is tested with its real
 upstream wake verification, recognition, HA actions and speech output.
@@ -57,7 +58,8 @@ packages must link one voice backend: Incubator by default, with a possible
 separate Home Assistant Assist pipeline package later. Changing backend requires
 application-package replacement, not a runtime switch. See the
 [foundation scope](docs/foundation.md) for what works and what remains.
-Production device hosts and their shared controls remain to be implemented.
+Android starts with Incubator and shared dashboard controls; other production
+device hosts remain to be implemented.
 
 ## Devices
 

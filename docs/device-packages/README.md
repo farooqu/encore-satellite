@@ -1,9 +1,10 @@
 # Planned device package contract (schema 1)
 
 These are **planning profiles, not runtime configuration or release manifests**.
-There is no profile loader, device host, device build command, installer or
-installable artifact in these sections. Both targets remain planned and never
-released. Passing validation below establishes metadata consistency only.
+There is no profile loader. Android now has a local development APK build and
+host described in its target notes; neither target has a supported release.
+Both profiles remain planned/revision-zero release metadata. Passing validation
+below establishes metadata consistency only, not the APK or hardware behavior.
 
 - [Echo Dot 2](../../devices/echo-dot-2/README.md): local hardware wiring,
   calibration, base prerequisites and intended application bundle.
@@ -19,7 +20,7 @@ closed at this planning stage; every field is required and unknown fields fail.
 | --- | --- |
 | `schema` | Integer `1`; identifies this planning-data contract, not an IPC version. |
 | `target` | Exact directory/central target ID: `echo-dot-2` or `android-generic`; prevents cross-target profile substitution. |
-| `status` | `planned`; explicitly denies runtime or installability claims. |
+| `status` | `planned`; no supported release. Development build evidence belongs in the target notes, not this metadata. |
 
 Profiles contain only identity and planning status. They do not configure audio
 or advertise runtime capabilities. Audio, control and display requirements remain
@@ -48,11 +49,12 @@ to concrete device packages or adding speculative configuration.
 Device owners maintain their own profiles, wiring/calibration, target composition
 roots, packaging inputs and hardware acceptance records. Shared Go contracts and
 DSP belong in `core/`; reusable OS integration belongs in `platforms/echo/` or
-`platforms/android/`. These platform paths are architectural boundaries, not
-implemented hosts. Backend adapters remain in `backends/`.
+`platforms/android/`. The Android host is now implemented for development; the
+profile itself is not its runtime configuration. Backend adapters remain in `backends/`.
 
-Future composition roots explicitly select the shared engine, one platform host,
-their own profile and exactly one voice backend adapter. The engine never
+Composition roots explicitly select the shared engine, one platform host,
+their own configuration and exactly one voice adapter per installed package.
+The initial Android package includes only Incubator, not Assist or switching UI. The engine never
 imports device modules or branches on device model names. A Dot package must not
 contain Android host code; an Android APK must not contain Dot hardware code.
 Static profiles do not implement dependency isolation; the existing import-boundary
@@ -135,7 +137,8 @@ Their work and upstream EchoLocal, echo-dot-assist, TensorFlow Lite Micro, KISS 
 microwakeword, ESPHome, Home Assistant and Voice Incubator deserve acknowledgement;
 see [ACKNOWLEDGEMENTS.md](../../ACKNOWLEDGEMENTS.md) for exact provenance and
 included third-party notices. No runtime code, model, calibration, firmware or
-asset is copied into these device sections. Source inspection is not fresh
+asset is declared by the planning profiles. Android's included frontend/executor
+and downloaded Sendspin libraries are identified in the acknowledgements. Source inspection is not fresh
 hardware validation and upstream compatibility claims are not Encore guarantees.
 
 The license for new Encore material is still **not selected**. Existing third-party

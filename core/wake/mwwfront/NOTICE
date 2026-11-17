@@ -1,0 +1,8 @@
+Imported from Techo5's echod/internal/lib/mwwfront at
+2b091439765d5f881de4b89255b8cf0637d80cba. The pure-Go frontend derives from
+Julian Imhof's MIT echo-dot-assist frontend (b9ed1848), TensorFlow Lite Micro's
+Apache-2.0 audio frontend and Mark Borgerding's BSD-3-Clause KISS FFT.
+
+Full copyright, permission and disclaimer texts are retained in
+../../../licenses/Techo5-NOTICE.txt and ../../../licenses/Apache-2.0.txt.
+Encore imports this implementation and test fixtures without algorithm changes.

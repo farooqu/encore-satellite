@@ -25,6 +25,19 @@ Encore assistant. No Kiosk Satellite application code or assets are included.
 
 ## Code actually included in this increment
 
+- `core/wake/mwwfront` and `core/wake/mixednet` reuse Techo5's pure-Go
+  microWakeWord frontend and Voice Incubator mixednet executor at the Techo5 pin
+  above, with Encore imports. The frontend's Julian Imhof MIT, TensorFlow Authors
+  Apache-2.0 and Mark Borgerding BSD-3-Clause notices are in
+  `licenses/Techo5-NOTICE.txt`; the executor's provenance and Apache-2.0 license
+  are in its package and `licenses/Mixednet-NOTICE.txt` / `licenses/Apache-2.0.txt`.
+  Model/reference fixtures are test-only; no production wake model is bundled.
+- The Android build downloads pinned source and compiles only the `player` and `shared` library modules of
+  [SendspinDroid](https://github.com/chrisuthe/SendspinDroid) at
+  `bd1d90a8f79b8b78c1ee924a0e6c14016ed1f1e2`, verified by archive SHA-256.
+  `licenses/SendspinDroid-MIT.txt` preserves its MIT license. No upstream Android
+  app UI is included. Its pinned Gradle dependencies retain their respective
+  upstream licenses; a release still needs a complete transitive inventory.
 - `backends/incubator/protocol.go` adapts the small protocol framing implementation
   from Techo5's `echod/internal/feature/incubator/protocol.go` at the commit above.
   Its MIT copyright/permission text is retained in `licenses/Techo5-MIT.txt`.

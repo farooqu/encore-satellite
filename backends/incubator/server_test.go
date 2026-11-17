@@ -2,10 +2,13 @@ package incubator_test
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net"
+	"os"
 	"slices"
 	"sync"
 	"testing"
@@ -409,5 +412,85 @@ func TestNativeMalformedFramesAndCompetingClient(t *testing.T) {
 				t.Fatal("malformed frame accepted")
 			}
 		})
+	}
+}
+
+func TestNativeModelTransferValidationCapacityAndPrivacy(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	e := session.New(&speaker{})
+	s := &incubator.Server{Engine: e, Name: "models", MAC: "02:00:00:00:00:02", EnableModels: true}
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- s.Serve(ctx, l) }()
+	t.Cleanup(func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Error(err)
+		}
+	})
+	c := connect(t, l.Addr().String())
+	hello := object(t, receive(t, c, 0x01))
+	if hello["wake_format"] != "mixednet" || hello["model_slots"] != float64(6) || hello["stop_word"] != true || hello["aec"] != false {
+		t.Fatal(hello)
+	}
+	blob, err := os.ReadFile("../../core/wake/mixednet/testdata/pooled.mnb")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(blob)
+	upload := func(id, hash string) map[string]any {
+		t.Helper()
+		header, _ := json.Marshal(map[string]any{"id": id, "slot": 99, "wake_word": id, "format": "mixednet", "size": len(blob), "sha256": hash})
+		send(t, c, 0x20, header)
+		for offset := 0; offset < len(blob); offset += 4000 {
+			send(t, c, 0x21, blob[offset:min(offset+4000, len(blob))])
+		}
+		end, _ := json.Marshal(map[string]string{"id": id})
+		send(t, c, 0x22, end)
+		return object(t, receive(t, c, 0x07))
+	}
+	if got := upload("nabu", string(make([]byte, 64))); got["ok"] != false || got["models"] != float64(0) {
+		t.Fatal("bad hash activated a model", got)
+	}
+	for i, id := range []string{"nabu", "jarvis", "computer", "okay", "hey", "stop"} {
+		if got := upload(id, hex.EncodeToString(sum[:])); got["ok"] != true || got["models"] != float64(i+1) {
+			t.Fatal("valid model rejected or slot treated as array offset", got)
+		}
+	}
+	if got := upload("nabu", hex.EncodeToString(sum[:])); got["ok"] != true || got["models"] != float64(6) {
+		t.Fatal("replacement consumed a new slot", got)
+	}
+	if got := upload("seventh", hex.EncodeToString(sum[:])); got["ok"] != false || got["models"] != float64(6) {
+		t.Fatal("capacity not enforced", got)
+	}
+	// Execute the installed detectors through the same public capture entry
+	// point the Android host uses.
+	if err := s.Capture(audio.Frame{Samples: make([]int16, 320)}); err != nil {
+		t.Fatal(err)
+	}
+	// Idle mute preserves the connection upstream; an active native turn
+	// must cancel and retire it, including its connection-scoped models.
+	if err := e.StartManual(); err != nil {
+		t.Fatal(err)
+	}
+	receive(t, c, 0x02)
+	e.SetMuted(true)
+	if got := object(t, receive(t, c, 0x04)); got["reason"] != "cancelled" {
+		t.Fatal("mute did not cancel the model-backed turn", got)
+	}
+	var b [1]byte
+	_ = c.SetReadDeadline(time.Now().Add(time.Second))
+	if _, err := c.Read(b[:]); err != io.EOF {
+		t.Fatal("privacy left the model connection open", err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for s.ModelCount() != 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("models survived privacy disconnect")
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
