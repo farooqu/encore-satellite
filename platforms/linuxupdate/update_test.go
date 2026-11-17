@@ -429,6 +429,63 @@ func TestStagingFailsClosed(t *testing.T) {
 	}
 }
 
+func TestDownloadHTTPSQueryRedirect(t *testing.T) {
+	for _, name := range []string{"valid", "corrupt", "truncated", "http", "credentials", "fragment", "loop"} {
+		t.Run(name, func(t *testing.T) {
+			payload := []byte("release bundle bytes")
+			asset := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, q *http.Request) {
+				if q.URL.Query().Get("token") != "temporary" {
+					t.Error("redirect query was lost")
+				}
+				switch name {
+				case "corrupt":
+					w.Write(bytes.Repeat([]byte("x"), len(payload)))
+				case "truncated":
+					w.Write(payload[:len(payload)-1])
+				default:
+					w.Write(payload)
+				}
+			}))
+			defer asset.Close()
+			origin := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, q *http.Request) {
+				target := asset.URL + "/bundle.zip?token=temporary"
+				switch name {
+				case "http":
+					target = strings.Replace(target, "https://", "http://", 1)
+				case "credentials":
+					target = strings.Replace(target, "https://", "https://user:password@", 1)
+				case "fragment":
+					target += "#fragment"
+				case "loop":
+					target = "/bundle.zip?token=temporary"
+				}
+				http.Redirect(w, q, target, http.StatusFound)
+			}))
+			defer origin.Close()
+			now := time.Now().Unix()
+			r := update.Release{URL: origin.URL + "/bundle.zip", Size: int64(len(payload)), SHA256: sha(payload), Issued: now - 60, Expires: now + 3600}
+			c := update.Client{Directory: t.TempDir(), HTTP: origin.Client()}
+			path, err := c.Download(t.Context(), r)
+			if name == "valid" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got := read(t, path); got != string(payload) {
+					t.Fatalf("download = %q, want %q", got, payload)
+				}
+			} else {
+				if err == nil {
+					t.Fatal("unsafe or invalid download accepted")
+				}
+				files, err := os.ReadDir(c.Directory)
+				if err != nil || len(files) != 0 {
+					t.Fatalf("failed download retained files: %v, err=%v", files, err)
+				}
+			}
+		})
+	}
+}
+
 func TestFailedDownloadRemovesPartial(t *testing.T) {
 	_, i, r, b := fixture(t, "")
 	pub, key, _ := ed25519.GenerateKey(rand.Reader)

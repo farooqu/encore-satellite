@@ -156,7 +156,7 @@ and downloaded Sendspin libraries are identified in the acknowledgements. Echo
 low-level code and Dot's wmtup retain their MIT notices. Source inspection is not fresh
 hardware validation and upstream compatibility claims are not Encore guarantees.
 
-The license for new Encore material is still **not selected**. Existing third-party
+Encore-owned material uses the [MIT License](../../LICENSE). Existing third-party
 licenses/notices remain applicable; audit all bundled code, models, assets and
-base requirements before any distribution. Neither a proposed permissive license
-nor a passing profile check grants rights to redistribute upstream material.
+base requirements before any distribution. Neither Encore's MIT license nor a
+passing profile check grants rights to redistribute upstream material.

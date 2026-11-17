@@ -20,9 +20,10 @@ does not publish releases; durable source retention and signing remain release g
 This directory does not establish a release channel.
 No production signing, uploading or publishing is performed by the foundation
 workflow; the separate Android workflow only signs manually approved candidates.
-The new code's license remains
-unselected; keep `ACKNOWLEDGEMENTS.md` and included notices intact. A distribution
-license/dependency/model/asset audit is a prerequisite to eventual releases.
+Encore-owned code and documentation use the [MIT License](../LICENSE); keep
+`ACKNOWLEDGEMENTS.md` and third-party licenses/notices intact. A distribution
+license/dependency/model/asset and corresponding-source audit remains a
+prerequisite to eventual releases.
 
 ## Run the checks
 

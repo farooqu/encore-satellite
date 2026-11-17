@@ -257,6 +257,7 @@ def build(base, binary, wmtup, btbridge, revision, output, kernel_directory, sen
     add("root/.ssh/authorized_keys", b"", 0o777, tarfile.SYMTYPE, "/run/encore/ssh/authorized_keys")
     for directory in ("proc", "sys", "dev", "dev/pts", "run", "run/encore", "tmp", "data", "store", "etc/encore"):
         add(directory, b"", 0o1777 if directory == "tmp" else 0o755, tarfile.DIRTYPE)
+    add("usr/share/licenses/encore/LICENSE", (ROOT / "LICENSE").read_bytes())
     for path in (ROOT / "licenses").glob("*"):
         add("usr/share/licenses/encore/" + path.name, path.read_bytes())
     for path in HERE.glob("*.txt"):
@@ -302,7 +303,8 @@ def build(base, binary, wmtup, btbridge, revision, output, kernel_directory, sen
                 "files": {name: sha(data) for name, data in payload.items()}}
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_STORED) as archive:
         for name, data in {"manifest.json": json.dumps(manifest, sort_keys=True).encode(), **payload}.items():
-            archive.writestr(name, data)
+            # Like the tar/cpio payloads, ZIP headers must not record the build clock.
+            archive.writestr(zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0)), data)
     print(f"Development bundle: {output}\nSHA256: {sha(Path(output).read_bytes())}")
 
 
