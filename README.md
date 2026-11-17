@@ -123,8 +123,10 @@ the real-service suites run separately in the lab. The
 [CI and release policy](release/README.md) explains that boundary and why there
 are no device releases, updater or signing trust yet.
 
-I intend to use a permissive license so others can build on the work. The license
-hasn't been selected yet.
+Encore-owned code and documentation are available under the [MIT License](LICENSE)
+so others can build on the work. Included third-party code, dependencies, models,
+assets and operating-system components retain their own licenses and notices;
+the MIT license does not relicense them.
 
 Encore's design and proof of concept build on Techo5, Techo5 Panel and their
 upstream foundations. [Acknowledgements](ACKNOWLEDGEMENTS.md) distinguish that

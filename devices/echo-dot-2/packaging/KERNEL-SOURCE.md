@@ -9,6 +9,22 @@ It does not contain Wi-Fi/Bluetooth firmware or the compiled cross-toolchain.
 and actual kernel bytes. Build-input identity is not a promise of identical bytes
 on different build environments; retain the exact artifact you qualify.
 
+## Embedded audio FPGA firmware is a separate publication gate
+
+The retained config sets `CONFIG_EXTRA_FIRMWARE="i2s_to_spi_v34.bin"` and
+`CONFIG_EXTRA_FIRMWARE_DIR="firmware"`. The source kit contains that 30,964-byte
+bitstream at `src/firmware/i2s_to_spi_v34.bin`, SHA-256
+`77a558bacdaaf9e343f02f2d74f27a5f2bb2dc8b6d66cc2499b60ed14ef62fe6`.
+The matching kernel map contains its embedded firmware symbols. This is audio
+FPGA firmware, distinct from the owner's separately supplied radio firmware.
+
+No firmware-specific redistribution grant, preferred source or license has been
+established for this bitstream. Inclusion in the vendor archive and the kernel's
+GPL COPYING do not by themselves establish its terms. Resolve this before
+publishing the kernel, an image containing it, or the source kit. This is an
+unresolved classification, not a finding that redistribution is prohibited.
+Do not silently remove it or change the audio stack to bypass this gate.
+
 ## Rebuild the archived prepared source
 
 Extract the kit into a new working directory. Obtain the AOSP arm-eabi 4.8

@@ -367,7 +367,11 @@ core version, backend variant (`incubator`), base digest and payload digests.
 `make dot-check` also verifies that the Dot dependency closure includes Incubator
 and excludes Assist. The ZIP contains only the rootfs,
 recovery initramfs, project kernel, kernel provenance and manifest, with no
-credentials or vendor firmware. Its Linux-base identity binds the kernel bytes,
+credentials or separately supplied Wi-Fi/Bluetooth radio firmware. The kernel
+does embed `i2s_to_spi_v34.bin` audio FPGA firmware; its redistribution terms are
+unresolved, so do not publish the kernel/image or source kit as cleared for
+distribution. See [kernel source obligations](packaging/KERNEL-SOURCE.md).
+Its Linux-base identity binds the kernel bytes,
 kernel build inputs, Alpine base and recovery initramfs. The recovery image is
 assembled per unit using its saved header/load addresses and the bundled kernel.
 No package has been published and the central released revision remains zero.
@@ -559,8 +563,11 @@ JWS (RFC 7515, EdDSA/RFC 8037) with the exact protected header
 
 Times are Unix seconds; validity is at most seven days, with five minutes of
 future-issued tolerance. Metadata is bounded to 32 KiB and bundles to 256 MiB.
-HTTPS is required for metadata, artifacts and redirects, without URL credentials,
-query or fragment. Private per-channel replay checkpoints reject lower issue
+HTTPS is required for metadata, artifacts and redirects, without URL credentials
+or fragments. Query strings are allowed for hosts such as GitHub Releases that
+redirect to temporary signed download URLs. Put the permanent versioned release
+URL in metadata, not the expiring redirect URL.
+Private per-channel replay checkpoints reject lower issue
 times/revisions and replacement of an observed revision's immutable identity.
 The signed SHA-256 covers the entire ZIP, binding its manifest and all payloads;
 individual members and exact decompressed size limits are checked again locally.
@@ -612,7 +619,8 @@ Phone Improv, remote Bluetooth GATT/bonds and power-loss rollback were not cover
 ALSA/evdev and wmtup reuse retains MIT notices; full historical notices are not
 inventories of this package. Alpine packages retain their own licenses, including
 GPL BusyBox; source/dependency/license audit is still required before distribution.
-See [ACKNOWLEDGEMENTS](../../ACKNOWLEDGEMENTS.md). New Encore code's license is unselected.
+See [ACKNOWLEDGEMENTS](../../ACKNOWLEDGEMENTS.md). Encore-owned code uses the
+[MIT License](../../LICENSE); third-party components retain their own terms.
 
 Before support: record the exact unit/kernel/base/backend versions and test boot,
 Wi-Fi/BLE/Improv, full proxy toggle and pairing, capture/playback and drain, physical

@@ -217,12 +217,20 @@ class BundleTests(unittest.TestCase):
                     item.size = len(elf)
                     archive.addfile(item, io.BytesIO(elf))
             bundle = root / "bundle.zip"
-            package.build(base, binary, binary, binary, 7, bundle, artifact, music)
+            with patch("time.localtime", return_value=(2026, 1, 1, 0, 0, 0, 3, 1, -1)):
+                package.build(base, binary, binary, binary, 7, bundle, artifact, music)
+            first_build = bundle.read_bytes()
+            with patch("time.localtime", return_value=(2027, 6, 2, 12, 34, 56, 2, 153, -1)):
+                package.build(base, binary, binary, binary, 7, bundle, artifact, music)
+            self.assertEqual(bundle.read_bytes(), first_build,
+                             "identical package inputs must not depend on the build clock")
             manifest, files = install.load_bundle(bundle, package.sha(bundle.read_bytes()))
             self.assertEqual(files["kernel.zImage-dtb"], image)
             self.assertEqual(manifest["base"]["kernel_sha256"], package.sha(image))
             with tarfile.open(fileobj=io.BytesIO(files["rootfs.tar.gz"]), mode="r:gz") as archive:
                 self.assertEqual(json.load(archive.extractfile("etc/encore-kernel.json")), record)
+                self.assertEqual(archive.extractfile("usr/share/licenses/encore/LICENSE").read(),
+                                 (package.ROOT / "LICENSE").read_bytes())
                 self.assertEqual(archive.extractfile("usr/share/licenses/encore/Linux-COPYING").read(), b"kernel license")
                 self.assertIn(b"Apache License", archive.extractfile("usr/share/licenses/encore/mixednet/LICENSE-APACHE-2.0.txt").read())
                 self.assertIn(b"KISS FFT", archive.extractfile("usr/share/licenses/encore/mwwfront/NOTICE").read())

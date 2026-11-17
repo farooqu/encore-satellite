@@ -171,4 +171,5 @@ No hardware runtime, trained host wake execution, optional CTC, second capture,
 physical privacy/drain measurement, multi-device arbitration, local assistant,
 timer scheduler, native Incubator integration or production packaging is proven.
 Existing acknowledgements/notices are unchanged; separately downloaded upstream
-sources/assets retain their terms and new Encore code's license is unselected.
+sources/assets retain their terms. Encore-owned code now uses the
+[MIT License](../LICENSE).

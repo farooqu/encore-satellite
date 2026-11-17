@@ -81,11 +81,12 @@ func Newer(candidate, installed string) bool {
 }
 func secureURL(s string) bool {
 	u, err := url.Parse(s)
-	return err == nil && u.Scheme == "https" && u.Hostname() != "" && u.User == nil && u.Fragment == "" && u.RawQuery == ""
+	// Release hosts may redirect to temporary, query-signed HTTPS URLs.
+	return err == nil && u.Scheme == "https" && u.Hostname() != "" && u.User == nil && u.Fragment == ""
 }
 func (c *Client) get(ctx context.Context, address string) (*http.Response, error) {
 	if !secureURL(address) {
-		return nil, errors.New("updates require HTTPS without credentials, query or fragment")
+		return nil, errors.New("updates require HTTPS without credentials or fragment")
 	}
 	h := http.Client{Timeout: 5 * time.Minute}
 	if c.HTTP != nil {

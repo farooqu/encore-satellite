@@ -50,13 +50,7 @@ jobs:
           # Checkout's container action and this shell can use different HOME paths.
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           make dot-kernel
-      - name: Retain the exact development artifact and corresponding source
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: echo-dot-2-kernel-${{ github.run_id }}-${{ github.run_attempt }}
-          path: build/echo-dot-2/kernel/
-          include-hidden-files: true
-          if-no-files-found: error
-          retention-days: 90
-          compression-level: 0
+      # Do not upload the kernel or source kit while the embedded audio FPGA
+      # firmware's redistribution terms remain unresolved; see KERNEL-SOURCE.md.
+      # Building and verifying these inputs is separate from distributing them.
       # No release publication, signing, flashing or hardware qualification.

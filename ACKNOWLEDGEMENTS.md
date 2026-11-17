@@ -88,9 +88,15 @@ Encore assistant. No Kiosk Satellite application code or assets are included.
   prepared corresponding source, configuration and build inputs in `source.tar.gz`;
   the Linux-environment bundle includes that kernel and its provenance, and the
   rootfs retains its COPYING. Preserve the full source kit durably with any release.
+  The effective kernel config also embeds the audio FPGA bitstream
+  `firmware/i2s_to_spi_v34.bin`; it is present in the retained source kit. Its
+  firmware-specific license, preferred source and redistribution grant have not
+  been established. The kernel's COPYING does not by itself settle those terms;
+  resolve this before publishing the kernel, image or source kit.
 - The local Dot base builder fetches signature-verified Alpine ARMv7 packages,
-  including GPL BusyBox, musl and wpa_supplicant with their own licenses. No vendor
-  firmware or coefficient blob is committed or distributed in the environment bundle.
+  including GPL BusyBox, musl and wpa_supplicant with their own licenses. The
+  installer supplies Wi-Fi/Bluetooth radio firmware from the owner's unit or
+  private files, separately from the kernel's embedded audio FPGA firmware.
   A complete corresponding-source/license inventory is required before distribution;
   the development builder is not a release-compliance process.
 - The optional Dot Sendspin companion builds the official Apache-2.0
@@ -118,12 +124,14 @@ Encore assistant. No Kiosk Satellite application code or assets are included.
   release packages.
 
 No Panel Java code, trained wake model, TFLite interpreter, firmware blob,
-sound or visual asset is bundled in the Encore runtime. The MixedNet executor
+sound or visual asset is bundled in the Encore Go runtime. This is not a claim
+that the separate Dot kernel/image is firmware-free. The MixedNet executor
 and DSP frontend inclusion is described above; regression-only model/audio
 fixtures have their own provenance and are not packaged. The test tone is
 generated mathematically. Research acknowledgement is distinct from inclusion.
 
-The license for **new Encore code remains unselected**, as stated in the README.
-A permissive license is intended; Apache-2.0 is a recommendation, not an applied
-license. Required third-party notices above already apply to their material. A
-complete dependency/model/asset audit is required before binary distribution.
+Encore-owned code and documentation are licensed under the [MIT License](LICENSE).
+This does not relicense the third-party material identified above, including
+Apache-2.0 executor code and GPL/LGPL operating-system components. Preserve their
+applicable licenses and notices. A complete dependency/model/asset and matching
+source audit is still required before binary distribution.

@@ -14,15 +14,18 @@ local development builder and explicitly invoked USB/recovery installer/updater;
 its local revisions do not change this release inventory or qualify hardware.
 Its bundle is the Dot Linux environment, including a project-built kernel,
 recovery initramfs and radio/userspace services, not an app for preinstalled Linux.
-The dedicated `dot-kernel.yml` workflow builds pinned kernel inputs and retains
-the exact kernel/source kit as unsigned development artifacts for 90 days. It
-does not publish releases; durable source retention and signing remain release gates.
+The dedicated `dot-kernel.yml` workflow builds and verifies pinned kernel inputs.
+Kernel/source-kit uploads are withheld while the embedded audio FPGA firmware's
+redistribution terms remain unresolved; see the
+[kernel source obligations](../devices/echo-dot-2/packaging/KERNEL-SOURCE.md).
+Durable corresponding-source retention and signing remain release gates.
 This directory does not establish a release channel.
 No production signing, uploading or publishing is performed by the foundation
 workflow; the separate Android workflow only signs manually approved candidates.
-The new code's license remains
-unselected; keep `ACKNOWLEDGEMENTS.md` and included notices intact. A distribution
-license/dependency/model/asset audit is a prerequisite to eventual releases.
+Encore-owned code and documentation use the [MIT License](../LICENSE); keep
+`ACKNOWLEDGEMENTS.md` and third-party licenses/notices intact. A distribution
+license/dependency/model/asset and corresponding-source audit remains a
+prerequisite to eventual releases.
 
 ## Run the checks
 
