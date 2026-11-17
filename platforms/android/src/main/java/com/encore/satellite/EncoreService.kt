@@ -30,6 +30,7 @@ class EncoreService : Service() {
     val state = mutable.asStateFlow()
     private lateinit var audio: AudioIo
     private var runtime: Runtime? = null
+    private var updates: ApkUpdates? = null
     lateinit var bluetooth: BluetoothHost
         private set
     private var bluetoothRefresh = 0L
@@ -54,7 +55,7 @@ class EncoreService : Service() {
         audio = AudioIo(this)
         bluetooth = BluetoothHost(this)
         runCatching { Mobile.open(filesDir.resolve("engine").absolutePath, audio) }
-            .onSuccess { runtime = it; bluetooth.attach(it); mutable.value = mutable.value.copy(name = it.name()); ApkUpdates(this, it, scope) }
+            .onSuccess { runtime = it; bluetooth.attach(it); mutable.value = mutable.value.copy(name = it.name()); updates = ApkUpdates(this, it, scope) }
             .onFailure { problem("Engine could not start: ${it.message}") }
         scope.launch {
             while (isActive) {
@@ -104,6 +105,7 @@ class EncoreService : Service() {
             if (!mutable.value.running) {
                 if (!microphoneForeground && !bluetoothStart) engine.setMuted(true)
                 engine.start()
+                updates?.start()
                 mutable.value = mutable.value.copy(running = true)
                 bluetooth.running(true)
                 advertise(engine.name(), "_voice-incubator._tcp.", 6055, mapOf("mac" to engine.mac(), "protocol" to "2"))
@@ -220,6 +222,7 @@ class EncoreService : Service() {
     }
 
     private fun shutdown() {
+        updates?.stop()
         // Gate capture before BLE cleanup or any network subscriber can wait.
         runtime?.let { runCatching { it.setMuted(true) } }
         stopMicrophone()

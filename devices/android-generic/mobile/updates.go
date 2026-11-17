@@ -63,6 +63,8 @@ func (r *Runtime) UpdateStatus(channel string, generation int64, latest, status 
 type Updates struct {
 	mu     sync.Mutex
 	client update.Client
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 func NewUpdates(base, key, appID, certificate, abi, directory, installedCore string, installed int64, sdk int) (*Updates, error) {
@@ -70,22 +72,34 @@ func NewUpdates(base, key, appID, certificate, abi, directory, installedCore str
 	if err != nil || len(public) != 32 {
 		return nil, errors.New("update root not provisioned")
 	}
-	return &Updates{client: update.Client{BaseURL: base, Key: public, ApplicationID: appID, CertificateSHA256: certificate, ABI: abi, Directory: directory, InstalledCore: installedCore, Installed: installed, SDK: sdk}}, nil
+	ctx, cancel := context.WithCancel(context.Background())
+	return &Updates{ctx: ctx, cancel: cancel, client: update.Client{BaseURL: base, Key: public, ApplicationID: appID, CertificateSHA256: certificate, ABI: abi, Directory: directory, InstalledCore: installedCore, Installed: installed, SDK: sdk}}, nil
 }
+
+// Close cancels in-flight HTTP and permanently rejects further Fetch calls.
+// It must not take mu: Fetch holds that lock while waiting for HTTP.
+// A restarted Android worker creates a new Updates instance.
+func (u *Updates) Close() { u.cancel() }
 
 // Fetch returns metadata as JSON; download=true also supplies its verified path.
 func (u *Updates) Fetch(channel string, download bool) (string, error) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
+	if err := u.ctx.Err(); err != nil {
+		return "", err
+	}
 	var release *update.Release
 	var path string
 	var err error
 	if download {
-		release, path, err = u.client.Download(context.Background(), channel)
+		release, path, err = u.client.Download(u.ctx, channel)
 	} else {
-		release, err = u.client.Check(context.Background(), channel)
+		release, err = u.client.Check(u.ctx, channel)
 	}
 	if err != nil {
+		return "", err
+	}
+	if err := u.ctx.Err(); err != nil {
 		return "", err
 	}
 	b, err := json.Marshal(map[string]any{"release": release, "path": path})

@@ -12,6 +12,7 @@ import androidx.core.content.FileProvider
 import com.encore.engine.mobile.Mobile
 import com.encore.engine.mobile.Runtime
 import com.encore.engine.mobile.UpdateHost
+import com.encore.engine.mobile.Updates
 import kotlinx.coroutines.*
 import kotlinx.coroutines.sync.Mutex
 import org.json.JSONObject
@@ -20,52 +21,103 @@ import java.security.MessageDigest
 /** No channel/feed/key/installer commands come from dashboard JavaScript. */
 class ApkUpdates(private val context: Context, private val runtime: Runtime, private val scope: CoroutineScope) : UpdateHost {
     private val mutex = Mutex()
+    private val lifecycle = Any()
+    private inner class Worker {
+        val job = SupervisorJob(this@ApkUpdates.scope.coroutineContext[Job])
+        val scope = CoroutineScope(this@ApkUpdates.scope.coroutineContext + job)
+        var verifier: Updates? = null
+    }
+    private var worker: Worker? = null
     private val installed = context.packageManager.getPackageInfo(context.packageName, signingFlags())
     private val current = "${BuildConfig.CORE_VERSION} (${revision(installed)})"
-    private val verifier by lazy {
-        Mobile.newUpdates(BuildConfig.UPDATE_BASE_URL, BuildConfig.UPDATE_PUBLIC_KEY, context.packageName,
-            certificates(installed).single(), Build.SUPPORTED_ABIS.first(),
-            context.filesDir.resolve("updates/apks").absolutePath, BuildConfig.CORE_VERSION, revision(installed), Build.VERSION.SDK_INT.toLong())
-    }
 
     init {
         runtime.configureUpdates(this, current)
-        scope.launch { while (isActive) { requestUpdate(runtime.updateChannel(), runtime.updateGeneration(), false); delay(6 * 60 * 60 * 1000L) } }
+    }
+
+    /** Service Start, not binding/onCreate, owns the periodic update loop. */
+    fun start() = synchronized(lifecycle) {
+        if (worker?.job?.isActive == true) return@synchronized
+        val next = Worker()
+        worker = next
+        next.scope.launch {
+            while (isActive) {
+                requestUpdate(runtime.updateChannel(), runtime.updateGeneration(), false)
+                delay(6 * 60 * 60 * 1000L)
+            }
+        }
+        Unit
+    }
+
+    /** Fence side effects before returning, even if the service remains bound. */
+    fun stop() = synchronized(lifecycle) {
+        val previous = worker ?: return@synchronized
+        worker = null
+        previous.verifier?.close()
+        previous.job.cancel()
     }
 
     override fun requestUpdate(channel: String, generation: Long, install: Boolean) {
-        scope.launch(Dispatchers.IO) {
+        val active = synchronized(lifecycle) { worker?.takeIf { it.job.isActive } } ?: return
+        active.scope.launch(Dispatchers.IO) {
             // Serialize requests, then recheck channel; never install a download
             // for a channel changed while the network operation was in flight.
             mutex.lock()
             try {
-                if (runtime.updateChannel() != channel || runtime.updateGeneration() != generation) return@launch
-                val preferences = context.getSharedPreferences("updates", Context.MODE_PRIVATE)
-                val pending = preferences.getString("pending", null)?.let { JSONObject(it) }
-                if (pending != null && (pending.optString("channel") != channel || pending.optLong("selection_generation") != generation)) {
-                    preferences.edit().remove("pending").commit()
-                    context.getSystemService(NotificationManager::class.java).cancel(3)
-                }
-                runtime.updateStatus(channel, generation, "", if (install) "Downloading and verifying APK" else "Checking updates", false, install)
-                val result = JSONObject(verifier.fetch(channel, install))
-                if (runtime.updateChannel() != channel || runtime.updateGeneration() != generation) return@launch
-                val release = result.optJSONObject("release")
-                if (release == null) {
-                    runtime.updateStatus(channel, generation, current, "Up to date", true, false)
-                } else {
-                    val latest = "${release.getString("core_version")} (${release.getLong("revision")})"
-                    if (install) {
-                        release.put("selection_generation", generation)
-                        release.put("installed_core_version", BuildConfig.CORE_VERSION)
-                        validateAPK(context, release)
-                        context.getSharedPreferences("updates", Context.MODE_PRIVATE).edit()
-                            .putString("pending", release.toString()).commit().also { check(it) { "Could not retain update request" } }
-                        notifyReady(context)
+                val verifier = synchronized(lifecycle) {
+                    if (worker !== active || !active.job.isActive) return@launch
+                    if (runtime.updateChannel() != channel || runtime.updateGeneration() != generation) return@launch
+                    val preferences = context.getSharedPreferences("updates", Context.MODE_PRIVATE)
+                    val pending = preferences.getString("pending", null)?.let { JSONObject(it) }
+                    if (pending != null && (pending.optString("channel") != channel || pending.optLong("selection_generation") != generation)) {
+                        preferences.edit().remove("pending").commit()
+                        context.getSystemService(NotificationManager::class.java).cancel(3)
                     }
-                    runtime.updateStatus(channel, generation, latest, if (install) "Verified. Use Settings → Review downloaded update on this device to approve installation." else "Update available", true, false)
+                    runtime.updateStatus(channel, generation, "", if (install) "Downloading and verifying APK" else "Checking updates", false, install)
+                    active.verifier ?: Mobile.newUpdates(BuildConfig.UPDATE_BASE_URL, BuildConfig.UPDATE_PUBLIC_KEY, context.packageName,
+                        certificates(installed).single(), Build.SUPPORTED_ABIS.first(),
+                        context.filesDir.resolve("updates/apks").absolutePath, BuildConfig.CORE_VERSION, revision(installed), Build.VERSION.SDK_INT.toLong())
+                        .also { active.verifier = it }
                 }
+                val result = JSONObject(suspendCancellableCoroutine<String> { continuation ->
+                    // Cancellation of a coroutine alone cannot interrupt synchronous JNI.
+                    // This handler also covers destruction/cancellation of the parent scope.
+                    continuation.invokeOnCancellation { verifier.close() }
+                    continuation.resumeWith(runCatching { verifier.fetch(channel, install) })
+                })
+                ensureActive()
+                val release = result.optJSONObject("release")
+                if (release != null && install) {
+                    release.put("selection_generation", generation)
+                    release.put("installed_core_version", BuildConfig.CORE_VERSION)
+                    validateAPK(context, release)
+                }
+                // Stop and publication share one lock: a late Fetch/validation
+                // cannot publish into a stopped or subsequently restarted worker.
+                synchronized(lifecycle) {
+                    ensureActive()
+                    if (worker !== active || !active.job.isActive) return@launch
+                    if (runtime.updateChannel() != channel || runtime.updateGeneration() != generation) return@launch
+                    if (release == null) {
+                        runtime.updateStatus(channel, generation, current, "Up to date", true, false)
+                    } else {
+                        val latest = "${release.getString("core_version")} (${release.getLong("revision")})"
+                        if (install) {
+                            context.getSharedPreferences("updates", Context.MODE_PRIVATE).edit()
+                                .putString("pending", release.toString()).commit().also { check(it) { "Could not retain update request" } }
+                            notifyReady(context)
+                        }
+                        runtime.updateStatus(channel, generation, latest, if (install) "Verified. Use Settings → Review downloaded update on this device to approve installation." else "Update available", true, false)
+                    }
+                }
+            } catch (error: CancellationException) {
+                throw error
             } catch (error: Exception) {
-                runtime.updateStatus(channel, generation, "", "Update unavailable: ${error.message}", false, false)
+                synchronized(lifecycle) {
+                    if (worker === active && active.job.isActive) {
+                        runtime.updateStatus(channel, generation, "", "Update unavailable: ${error.message}", false, false)
+                    }
+                }
             } finally { mutex.unlock() }
         }
     }
