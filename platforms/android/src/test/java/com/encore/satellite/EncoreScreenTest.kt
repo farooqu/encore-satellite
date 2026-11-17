@@ -33,7 +33,7 @@ class EncoreScreenTest {
         var dashboardTaps = 0
         var stops = 0
         var privacy = false
-        val state = mutableStateOf(EncoreState(running = true, connected = true, models = 2))
+        val state = mutableStateOf(EncoreState(running = true, microphoneReady = true, connected = true, models = 2))
         compose.setContent {
             EncoreScreen(state.value, {}, {}, { stops++; state.value = state.value.copy(phase = "idle") },
                 { privacy = it }, { "" }, { "" }, {}, {}, {}, {}, dashboardContent = {
@@ -72,7 +72,7 @@ class EncoreScreenTest {
         capture("android-settings")
         compose.onNodeWithText("Done").performClick()
         compose.runOnIdle {
-            state.value = EncoreState(running = true, connected = true, models = 2, phase = "listening",
+            state.value = EncoreState(running = true, microphoneReady = true, connected = true, models = 2, phase = "listening",
                 heard = "Test transcript: turn on the kitchen lights", level = .6f,
                 waveform = List(64) { (sin(it * .6) * .7 * sin(it * .11)).toFloat() },
                 music = MusicState(true, "Connected", "Test audio · sample track", "UI test fixture", true, listOf("pause")))
@@ -90,6 +90,40 @@ class EncoreScreenTest {
         compose.onNodeWithTag("dashboard-shield").assertDoesNotExist()
         compose.onNodeWithText("Unmute mic").assertIsDisplayed()
         capture("android-muted")
+    }
+
+    @Test @Config(sdk = [34]) fun bluetoothFirstKeepsVoiceUnavailableUntilMicrophoneStarts() {
+        val state = mutableStateOf(EncoreState(running = true, connected = true, models = 2))
+        var starts = 0
+        var talks = 0
+        var muteChoice: Boolean? = null
+        compose.setContent {
+            EncoreScreen(state.value, { starts++ }, { talks++ }, {}, { muteChoice = it },
+                { "" }, { "" }, {}, {}, {}, {}, dashboardContent = {
+                    Text("Bluetooth-first startup · API 34 test fixture", color = androidx.compose.ui.graphics.Color.White)
+                })
+        }
+        compose.onNodeWithText("MICROPHONE OFF").assertIsDisplayed()
+        compose.onNodeWithText("Talk").assertDoesNotExist()
+        compose.onNodeWithText("Mute mic").assertDoesNotExist()
+        capture("android-bluetooth-first")
+        compose.onNodeWithText("Start microphone").performClick()
+        assertEquals(1, starts)
+        assertEquals(0, talks)
+        assertNull("Bluetooth-only startup must not change saved mute intent", muteChoice)
+        // Requesting permission is not successful capture: keep the action until ready.
+        compose.onNodeWithText("Start microphone").assertIsDisplayed()
+        compose.runOnIdle { state.value = state.value.copy(microphoneReady = true) }
+        compose.onNodeWithText("Start microphone").assertDoesNotExist()
+        compose.onNodeWithText("Talk").assertIsEnabled().performClick()
+        compose.onNodeWithText("Mute mic").assertIsDisplayed()
+        assertEquals(1, talks)
+        capture("android-bluetooth-microphone-ready")
+        compose.runOnIdle { state.value = state.value.copy(microphoneReady = false, muted = true) }
+        compose.onNodeWithText("Talk").assertIsNotEnabled()
+        compose.onNodeWithText("Unmute mic").performClick()
+        assertEquals(false, muteChoice)
+        capture("android-bluetooth-saved-muted")
     }
 
     @Test fun dashboardNavigationUsesOnlyTheConfiguredURL() {

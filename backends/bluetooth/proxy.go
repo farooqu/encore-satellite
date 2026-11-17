@@ -37,7 +37,7 @@ type Proxy struct {
 	modeSwitch bool
 	links      *connections
 	switchKey  uint32
-	states     map[*esphome.Conn]struct{}
+	states     map[*esphome.Conn]*stateSubscription
 }
 
 // Options holds host integration, not separate user switches. Enabled is the
@@ -55,13 +55,12 @@ type Options struct {
 }
 
 func New(scanner ble.Scanner, options Options) *Proxy {
-	if scanner == nil {
-		return nil
-	}
+	// A control-only host still exposes the saved switch, but advertises no
+	// scanning capability. This is not an initialized or simulated radio.
 	sw := &esphome.Switch{Base: esphome.Base{ObjectID: "bluetooth_proxy"}}
 	b := &Proxy{scanner: scanner, wake: make(chan struct{}, 1), enabled: options.Enabled,
 		save: options.SaveEnabled, central: options.OpenCentral, pairing: options.Pairing,
-		modeSwitch: options.ModeSwitch, switchKey: sw.Key(), states: make(map[*esphome.Conn]struct{})}
+		modeSwitch: options.ModeSwitch, switchKey: sw.Key(), states: make(map[*esphome.Conn]*stateSubscription)}
 	b.links = newConnections(b)
 	return b
 }
@@ -71,18 +70,24 @@ func New(scanner ble.Scanner, options Options) *Proxy {
 // voice/RF contention or a privacy policy; this is NOT a microphone mute API.
 // Cancel Serve and wait for it before lending the controller to Improv/BlueZ.
 func (b *Proxy) SetPaused(paused bool) {
-	b.controlMu.Lock()
-	defer b.controlMu.Unlock()
+	if b.central != nil {
+		b.controlMu.Lock()
+		defer b.controlMu.Unlock()
+	}
 	b.mu.Lock()
 	if b.paused != paused {
 		b.paused = paused
 		b.changed()
 	}
 	b.mu.Unlock()
-	if paused {
-		b.links.stop()
+	// Scan-only hosts never touch GATT locks or network replies here. In
+	// particular, a lifecycle pause must not wait for persistence/publication.
+	if b.central != nil {
+		if paused {
+			b.links.stop()
+		}
+		b.links.refresh()
 	}
-	b.links.refresh()
 }
 
 func (b *Proxy) Dropped() uint64 { return b.dropped.Load() }
@@ -91,8 +96,11 @@ func (b *Proxy) Dropped() uint64 { return b.dropped.Load() }
 // proxy is currently enabled. Keeping it stable lets HA discover the one switch
 // while OFF, without reconnect races or a second active-connection toggle.
 func (b *Proxy) Features() esphome.BluetoothFeature {
-	f := esphome.BluetoothPassiveScan | esphome.BluetoothRawAdvertisements
-	if b.modeSwitch {
+	var f esphome.BluetoothFeature
+	if b.scanner != nil {
+		f |= esphome.BluetoothPassiveScan | esphome.BluetoothRawAdvertisements
+	}
+	if b.scanner != nil && b.modeSwitch {
 		f |= esphome.BluetoothStateAndMode
 	}
 	if b.central != nil {
@@ -130,6 +138,9 @@ func (b *Proxy) Handle(_ context.Context, c *esphome.Conn, msg proto.Message) er
 func (b *Proxy) handle(c *esphome.Conn, msg proto.Message) (bool, error) {
 	switch m := msg.(type) {
 	case *api.SubscribeBluetoothLEAdvertisementsRequest:
+		if b.scanner == nil {
+			return true, c.Send(scannerState(esphome.ScannerFailed, false))
+		}
 		if m.Flags&1 == 0 {
 			return true, errors.New("assist: raw BLE advertisements must be negotiated")
 		}
@@ -171,9 +182,7 @@ func (b *Proxy) handle(c *esphome.Conn, msg proto.Message) (bool, error) {
 }
 
 func (b *Proxy) ConnClosed(c *esphome.Conn) {
-	b.mu.Lock()
-	delete(b.states, c)
-	b.mu.Unlock()
+	b.closeStates(c)
 	b.closed(c)
 	b.links.closed(c)
 }
@@ -199,6 +208,10 @@ func (b *Proxy) Run(ctx context.Context) {
 	linksDone := make(chan struct{})
 	go func() { defer close(linksDone); b.links.run(ctx) }()
 	defer func() { b.links.stop(); <-linksDone }()
+	if b.scanner == nil {
+		<-ctx.Done()
+		return
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -241,7 +254,9 @@ func (b *Proxy) Run(ctx context.Context) {
 		_ = b.scanner.Scan(scanCtx, active, func() error {
 			return c.Send(scannerState(esphome.ScannerRunning, active))
 		}, func(a ble.Advertisement) {
-			if scanCtx.Err() != nil || len(a.Data) > 62 || a.Address > 0xffffffffffff || a.AddressType > 1 {
+			knownType := a.AddressType <= 1
+			scanOnlyUnknown := b.central == nil && a.AddressType == ble.AddressTypeUnknown
+			if scanCtx.Err() != nil || len(a.Data) > 62 || a.Address > 0xffffffffffff || (!knownType && !scanOnlyUnknown) {
 				return
 			}
 			a.Data = append([]byte(nil), a.Data...)

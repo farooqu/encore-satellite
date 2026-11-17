@@ -92,7 +92,12 @@ pairing records persist. The screen stays awake while the Activity is visible.
   are disabled for the running Activity, including locally revealed pairing keys.
 - Only server-requested Incubator follow-ups exist. No Assist, runtime route
   switching, Assist-only follow-up toggle, enrollment/reference stream, claimed
-  AEC, BLE proxy or ESPHome `media_player` is included.
+  AEC or ESPHome `media_player` is included.
+- The optional [Android Bluetooth proxy](../../docs/bluetooth-android.md) is
+  independently default-OFF and scan-only on API 26+ with a detected BLE adapter.
+  Settings explains consent and version-specific grants. Scans pause outside a
+  visible Encore activity; GATT, remote caching and pairing are not implemented.
+  Tab A7 Lite / LineageOS 21 GSI and Portal 2 still need physical qualification.
 - Dashboard JavaScript has no native command bridge, file/content access,
   camera/mic grants or external-intent launch path. TLS errors are not bypassed.
   Navigation stays within the origin derived from the current ESPHome URL;

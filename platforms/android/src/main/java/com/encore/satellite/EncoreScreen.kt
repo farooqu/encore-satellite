@@ -39,6 +39,7 @@ fun EncoreScreen(state: EncoreState, onStart: () -> Unit, onTalk: () -> Unit, on
     onMuted: (Boolean) -> Unit, noiseKey: () -> String,
     musicToken: () -> String, onMusicConnect: (String) -> Unit, onMusicDisconnect: () -> Unit,
     onMusicCommand: (String) -> Unit, onDismiss: () -> Unit, onUpdate: () -> Unit = {},
+    onBluetooth: () -> Unit = {},
     dashboardContent: @Composable () -> Unit = { Dashboard(state) }) {
     var settings by remember { mutableStateOf(false) }
     MaterialTheme(colorScheme = darkColorScheme(primary = Mint, background = Ink, surface = Color(0xff152330))) {
@@ -47,13 +48,16 @@ fun EncoreScreen(state: EncoreState, onStart: () -> Unit, onTalk: () -> Unit, on
                 Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
                         Text("encore", fontSize = 22.sp, letterSpacing = 3.sp, color = Color.White)
-                        Text(if (state.muted) "MICROPHONE OFF" else if (state.connected) "INCUBATOR · ${state.models} LOCAL MODELS" else "INCUBATOR · NOT CONNECTED",
-                            color = if (state.muted) Color(0xffffc88b) else Muted, fontSize = 10.sp, letterSpacing = 1.sp)
+                        Text(if (state.muted || !state.microphoneReady) "MICROPHONE OFF" else if (state.connected) "INCUBATOR · ${state.models} LOCAL MODELS" else "INCUBATOR · NOT CONNECTED",
+                            color = if (state.muted || !state.microphoneReady) Color(0xffffc88b) else Muted, fontSize = 10.sp, letterSpacing = 1.sp)
                     }
                     if (!state.running) TextButton(onClick = onStart) { Text("Start satellite") }
-                    else TextButton(onClick = onTalk, enabled = state.connected && !state.muted && !state.voiceActive) { Text("Talk") }
-                    TextButton(onClick = { onMuted(!state.muted) }, modifier = Modifier.testTag("privacy")) {
-                        Text(if (state.muted) "Unmute mic" else "Mute mic")
+                    else if (!state.microphoneReady && !state.muted) TextButton(onClick = onStart) { Text("Start microphone") }
+                    else TextButton(onClick = onTalk, enabled = state.microphoneReady && state.connected && !state.muted && !state.voiceActive) { Text("Talk") }
+                    if (state.microphoneReady || state.muted) {
+                        TextButton(onClick = { onMuted(!state.muted) }, modifier = Modifier.testTag("privacy")) {
+                            Text(if (state.muted) "Unmute mic" else "Mute mic")
+                        }
                     }
                     TextButton(onClick = { settings = true }, enabled = !state.voiceActive) { Text("Settings") }
                 }
@@ -93,7 +97,7 @@ fun EncoreScreen(state: EncoreState, onStart: () -> Unit, onTalk: () -> Unit, on
                 }
             }
         }
-        if (settings) SettingsDialog(state, noiseKey, musicToken, onMusicConnect, onMusicDisconnect, onUpdate) { settings = false }
+        if (settings) SettingsDialog(state, noiseKey, musicToken, onMusicConnect, onMusicDisconnect, onUpdate, onBluetooth) { settings = false }
     }
 }
 
@@ -182,14 +186,15 @@ internal fun trustedNavigation(origin: String, value: String): Boolean {
 }
 
 @Composable private fun SettingsDialog(state: EncoreState, noiseKey: () -> String,
-    musicToken: () -> String, onMusicConnect: (String) -> Unit, onMusicDisconnect: () -> Unit, onUpdate: () -> Unit, close: () -> Unit) {
+    musicToken: () -> String, onMusicConnect: (String) -> Unit, onMusicDisconnect: () -> Unit, onUpdate: () -> Unit, onBluetooth: () -> Unit, close: () -> Unit) {
     var sendspin by remember { mutableStateOf("") }
     var secret by remember { mutableStateOf("") }
     AlertDialog(onDismissRequest = close, title = { Text("Satellite settings") }, confirmButton = { TextButton(onClick = close) { Text("Done") } },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text("${state.name} · Incubator only", color = Mint)
-                Text("Incubator voice uses trusted-LAN TCP 6055. ESPHome dashboard controls use encrypted TCP 6053. No Assist or BLE proxy in this build.", fontSize = 12.sp)
+                Text("Incubator voice uses trusted-LAN TCP 6055. ESPHome controls use encrypted TCP 6053. Bluetooth capabilities depend on the running Android APIs; no Assist backend.", fontSize = 12.sp)
+                TextButton(onClick = onBluetooth) { Text("Bluetooth proxy setup") }
                 Text("Set one full Dashboard URL through ESPHome, such as https://home.example/lovelace/home. It supplies both the HA address and dashboard path; no local origin setup is needed. Sign in to HA in the dashboard itself. Navigation stays within the configured origin.", fontSize = 12.sp)
                 TextButton(onClick = { secret = noiseKey() }) { Text("Reveal ESPHome encryption key") }
                 Text("Choose stable/dev, check, and request updates through ESPHome. Installing a downloaded APK needs approval on this device.", fontSize = 12.sp)

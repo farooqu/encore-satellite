@@ -18,6 +18,8 @@ import com.encore.engine.mobile.Runtime
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /** Dashboard Activity lifetime/reloads never own the microphone or network sockets. */
 class EncoreService : Service() {
@@ -28,6 +30,10 @@ class EncoreService : Service() {
     val state = mutable.asStateFlow()
     private lateinit var audio: AudioIo
     private var runtime: Runtime? = null
+    lateinit var bluetooth: BluetoothHost
+        private set
+    private var bluetoothRefresh = 0L
+    private val bluetoothSetting = Mutex()
     private val advertisements = mutableListOf<NsdManager.RegistrationListener>()
     private var musicHost: MusicHost? = null
     private var music: MusicPlayer? = null
@@ -46,11 +52,14 @@ class EncoreService : Service() {
     override fun onCreate() {
         super.onCreate()
         audio = AudioIo(this)
+        bluetooth = BluetoothHost(this)
         runCatching { Mobile.open(filesDir.resolve("engine").absolutePath, audio) }
-            .onSuccess { runtime = it; mutable.value = mutable.value.copy(name = it.name()); ApkUpdates(this, it, scope) }
+            .onSuccess { runtime = it; bluetooth.attach(it); mutable.value = mutable.value.copy(name = it.name()); ApkUpdates(this, it, scope) }
             .onFailure { problem("Engine could not start: ${it.message}") }
         scope.launch {
             while (isActive) {
+                val now = android.os.SystemClock.elapsedRealtime()
+                if (now - bluetoothRefresh >= 500) { bluetooth.refresh(); bluetoothRefresh = now }
                 runtime?.let { engine ->
                     runCatching { EncoreState.parse(engine.snapshot(), mutable.value) }
                         .onSuccess { snapshot ->
@@ -70,6 +79,11 @@ class EncoreService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == "stop") { shutdown(); stopSelf(); return START_NOT_STICKY }
+        val bluetoothStart = intent?.action == "bluetooth"
+        if (bluetoothStart && mutable.value.running) {
+            runCatching { setBluetoothEnabled(true) }.onFailure { problem("Could not save Bluetooth setting") }
+            return START_NOT_STICKY
+        }
         val channel = NotificationChannel("encore", "Encore satellite", NotificationManager.IMPORTANCE_LOW)
         getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
         val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
@@ -78,17 +92,20 @@ class EncoreService : Service() {
             .setContentTitle("Encore Incubator").setContentText("Satellite running; voice and music controls are available in the app")
             .setContentIntent(open).setOngoing(true).addAction(Notification.Action.Builder(null, "Stop satellite", stop).build()).build()
         try {
-            val enableMicrophone = intent?.action != "music" && checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+            val enableMicrophone = intent?.action != "music" && !bluetoothStart && checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
             microphoneForeground = microphoneForeground || enableMicrophone
+            val bluetoothReady = bluetooth.state.value.supported && bluetooth.state.value.permitted
+            check(!bluetoothStart || bluetoothReady) { "Bluetooth permission or implementation unavailable" }
             if (Build.VERSION.SDK_INT >= 30) startForeground(1, notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK or
-                    if (microphoneForeground) ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE else 0)
+                (if (bluetoothStart) ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE else ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK) or
+                    (if (microphoneForeground) ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE else 0))
             else startForeground(1, notification)
             val engine = checkNotNull(runtime) { "Engine unavailable" }
             if (!mutable.value.running) {
-                if (!microphoneForeground) engine.setMuted(true)
+                if (!microphoneForeground && !bluetoothStart) engine.setMuted(true)
                 engine.start()
                 mutable.value = mutable.value.copy(running = true)
+                bluetooth.running(true)
                 advertise(engine.name(), "_voice-incubator._tcp.", 6055, mapOf("mac" to engine.mac(), "protocol" to "2"))
                 advertise(engine.name(), "_esphomelib._tcp.", 6053,
                     mapOf("mac" to engine.mac().replace(":", ""), "version" to "0.1.0", "api_encryption" to "Noise_NNpsk0_25519_ChaChaPoly_SHA256"))
@@ -96,32 +113,68 @@ class EncoreService : Service() {
             if (enableMicrophone && intent?.getBooleanExtra("unmute", false) == true) engine.setMuted(false)
             if (microphoneForeground && !EncoreState.parse(engine.snapshot(), mutable.value).muted) startMicrophone()
             if (intent?.action == "music") connectMusic(intent.getStringExtra("address").orEmpty())
+            if (bluetoothStart) setBluetoothEnabled(true)
         } catch (error: Exception) {
+            if (bluetoothStart) {
+                problem("Bluetooth could not start: ${error.message}")
+                if (!mutable.value.running) { stopForeground(STOP_FOREGROUND_REMOVE); stopSelf(startId) }
+                return START_NOT_STICKY
+            }
             runtime?.let { runCatching { it.setMuted(true) } }
-            audio.stopCapture()
+            stopMicrophone()
             problem("Could not start satellite: ${error.message}")
             shutdown()
         }
         return START_NOT_STICKY
     }
 
-    private fun startMicrophone() = audio.startCapture({ runtime?.capture(it) }, {
-        scope.launch { setMuted(true); problem("Microphone unavailable. Check permission and privacy controls before unmuting.") }
-    })
+    private fun startMicrophone() {
+        check(microphoneForeground) { "Start the microphone from the app first" }
+        audio.startCapture({ runtime?.capture(it) }, {
+            scope.launch { setMuted(true); problem("Microphone unavailable. Check permission and privacy controls before unmuting.") }
+        })
+        mutable.value = mutable.value.copy(microphoneReady = true)
+    }
+
+    private fun stopMicrophone() {
+        mutable.value = mutable.value.copy(microphoneReady = false, level = 0f, waveform = emptyList())
+        audio.stopCapture()
+    }
 
     fun setMuted(value: Boolean) {
         runCatching {
             runtime?.setMuted(value)
-            if (value) audio.stopCapture() else if (mutable.value.running) startMicrophone()
+            if (value) stopMicrophone() else if (mutable.value.running) startMicrophone()
         }.onFailure {
             runtime?.let { engine -> runCatching { engine.setMuted(true) } }
-            audio.stopCapture()
+            stopMicrophone()
             problem("Microphone remains off: ${it.message}")
         }
     }
 
-    fun talk() { runCatching { runtime?.talk() }.onFailure { problem("Voice is not ready: ${it.message}") } }
+    fun talk() {
+        runCatching {
+            check(mutable.value.microphoneReady && !mutable.value.muted) { "Start the microphone from the app first" }
+            runtime?.talk()
+        }.onFailure { problem("Voice is not ready: ${it.message}") }
+    }
     fun stopTurn() { runtime?.stop() }
+    fun setBluetoothEnabled(enabled: Boolean) {
+        scope.launch {
+            // Preserve tap order without doing filesystem I/O on the UI thread.
+            bluetoothSetting.withLock {
+                try {
+                    val engine = checkNotNull(runtime) { "Engine unavailable" }
+                    withContext(Dispatchers.IO) { engine.setBluetoothEnabled(enabled) }
+                    bluetooth.refresh()
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    problem("Could not save Bluetooth setting")
+                }
+            }
+        }
+    }
     fun noiseKey(): String = runtime?.noiseKey().orEmpty()
     fun musicToken(): String = runCatching { host().pairingToken() }.getOrElse { problem("Sendspin secure storage unavailable"); "" }
     private fun host(): MusicHost = musicHost ?: MusicHost(this).also { musicHost = it }
@@ -167,9 +220,11 @@ class EncoreService : Service() {
     }
 
     private fun shutdown() {
-        // Gate transport/pre-roll before waiting for the native recorder thread.
-        runtime?.let { runCatching { it.setMuted(true) }; it.close() }
-        audio.stopCapture()
+        // Gate capture before BLE cleanup or any network subscriber can wait.
+        runtime?.let { runCatching { it.setMuted(true) } }
+        stopMicrophone()
+        bluetooth.running(false)
+        runtime?.close()
         disconnectMusic()
         val manager = getSystemService(NsdManager::class.java)
         advertisements.forEach { runCatching { manager.unregisterService(it) } }

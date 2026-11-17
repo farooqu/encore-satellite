@@ -4,6 +4,10 @@ package ble
 
 import "context"
 
+// AddressTypeUnknown is explicit missing metadata, not a public/random guess.
+// It is usable only by non-connectable consumers; never use it for GATT.
+const AddressTypeUnknown uint8 = 0xff
+
 // Advertisement preserves the controller's raw AD structures. Address is the
 // printed MAC as an integer (12:34:56:78:9A:BC is 0x123456789abc), not HCI order.
 type Advertisement struct {
@@ -13,8 +17,9 @@ type Advertisement struct {
 	Data        []byte
 }
 
-// Scanner must already have successfully opened and initialized a BLE-capable
-// controller before being offered to a protocol backend. Scan blocks until an
+// Scanner requires a positively identified BLE-capable controller and an
+// initialized host bridge before being offered to a protocol backend. The host
+// may gate temporary permission/radio availability separately. Scan blocks until an
 // error or cancellation, disables scanning before returning, and never calls
 // found after returning. Only one Scan may run at once. A nil return from ready
 // means the peer was notified; a non-nil return must stop the scan.

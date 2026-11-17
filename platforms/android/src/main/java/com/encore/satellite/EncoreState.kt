@@ -14,6 +14,7 @@ data class MusicState(
 
 data class EncoreState(
     val running: Boolean = false,
+    val microphoneReady: Boolean = false,
     val name: String = "Encore Incubator",
     val phase: String = "disconnected",
     val connected: Boolean = false,
@@ -31,7 +32,7 @@ data class EncoreState(
 ) {
     val origin: String get() = if (dashboard.isEmpty()) "" else Uri.parse(dashboard).let { "${it.scheme}://${it.encodedAuthority}" }
     val voiceActive: Boolean get() = alert || phase in setOf("tentative", "listening", "working", "speaking", "stopping")
-    val microphoneVisible: Boolean get() = running && !muted && phase in setOf("tentative", "listening")
+    val microphoneVisible: Boolean get() = running && microphoneReady && !muted && phase in setOf("tentative", "listening")
 
     companion object {
         fun parse(value: String, previous: EncoreState): EncoreState {
