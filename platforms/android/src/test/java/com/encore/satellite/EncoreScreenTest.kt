@@ -35,7 +35,7 @@ class EncoreScreenTest {
         var privacy = false
         val state = mutableStateOf(EncoreState(running = true, microphoneReady = true, connected = true, models = 2))
         compose.setContent {
-            EncoreScreen(state.value, {}, {}, { stops++; state.value = state.value.copy(phase = "idle") },
+            EncoreScreen(state.value, {}, {}, { stops++; state.value = state.value.copy(phase = "idle", voiceActive = false) },
                 { privacy = it }, { "" }, { "" }, {}, {}, {}, {}, dashboardContent = {
                     Box(Modifier.fillMaxSize().padding(48.dp)) {
                         Button(onClick = { dashboardTaps++ }, modifier = Modifier.testTag("dashboard-tile")) { Text("Dashboard action") }
@@ -44,7 +44,7 @@ class EncoreScreenTest {
         }
         compose.onNodeWithTag("dashboard-tile").performTouchInput { click() }
         assertEquals(1, dashboardTaps)
-        compose.runOnIdle { state.value = state.value.copy(phase = "listening", heard = "Test transcript: switch on the lights") }
+        compose.runOnIdle { state.value = state.value.copy(phase = "listening", voiceActive = true, heard = "Test transcript: switch on the lights") }
         compose.onNodeWithText("Test transcript: switch on the lights").assertIsDisplayed()
         compose.onNodeWithTag("dashboard-shield").assertExists()
         compose.onNodeWithTag("dashboard-tile").performTouchInput { click() }
@@ -72,7 +72,7 @@ class EncoreScreenTest {
         capture("android-settings")
         compose.onNodeWithText("Done").performClick()
         compose.runOnIdle {
-            state.value = EncoreState(running = true, microphoneReady = true, connected = true, models = 2, phase = "listening",
+            state.value = EncoreState(running = true, microphoneReady = true, connected = true, models = 2, phase = "listening", voiceActive = true,
                 heard = "Test transcript: turn on the kitchen lights", level = .6f,
                 waveform = List(64) { (sin(it * .6) * .7 * sin(it * .11)).toFloat() },
                 music = MusicState(true, "Connected", "Test audio · sample track", "UI test fixture", true, listOf("pause")))
@@ -86,14 +86,14 @@ class EncoreScreenTest {
         compose.onNodeWithContentDescription("Microphone waveform inactive").assertExists()
         compose.onNodeWithText("Test reply: the kitchen lights are on.").assertIsDisplayed()
         capture("android-responding")
-        compose.runOnIdle { state.value = state.value.copy(phase = "muted", muted = true, connected = false, models = 0, heard = "", reply = "") }
+        compose.runOnIdle { state.value = state.value.copy(phase = "muted", voiceActive = false, muted = true, connected = false, models = 0, heard = "", reply = "") }
         compose.onNodeWithTag("dashboard-shield").assertDoesNotExist()
         compose.onNodeWithText("Unmute mic").assertIsDisplayed()
         capture("android-muted")
     }
 
     @Test @Config(sdk = [34]) fun bluetoothFirstKeepsVoiceUnavailableUntilMicrophoneStarts() {
-        val state = mutableStateOf(EncoreState(running = true, connected = true, models = 2))
+        val state = mutableStateOf(EncoreState(running = true, connected = true, models = 2, talkAllowed = true))
         var starts = 0
         var talks = 0
         var muteChoice: Boolean? = null
@@ -124,6 +124,64 @@ class EncoreScreenTest {
         compose.onNodeWithText("Unmute mic").performClick()
         assertEquals(false, muteChoice)
         capture("android-bluetooth-saved-muted")
+    }
+
+    @Test fun announcementOwnsControlsThroughDrainAndHonorsTalkPermission() {
+        var stops = 0
+        var taps = 0
+        val state = mutableStateOf(EncoreState.parse(EncoreStateTest.snapshot(), EncoreState(running = true, microphoneReady = true,
+            music = MusicState(enabled = true, status = "Connected", title = "Test audio · continuous stream", playing = true, commands = listOf("pause")))))
+        compose.setContent {
+            EncoreScreen(state.value, {}, {}, { stops++ }, {}, { "" }, { "" }, {}, {}, {}, {}, dashboardContent = {
+                Box(Modifier.fillMaxSize().padding(48.dp)) {
+                    Button(onClick = { taps++ }, modifier = Modifier.testTag("dashboard-tile")) { Text("Dashboard action") }
+                }
+            })
+        }
+        compose.onNodeWithText("Announcement").assertIsDisplayed()
+        compose.onNodeWithTag("dashboard-shield").assertExists()
+        compose.onNodeWithText("Talk").assertIsNotEnabled()
+        compose.onNodeWithText("Settings").assertIsNotEnabled()
+        compose.onNodeWithText("Quiet for voice").assertIsDisplayed()
+        compose.onNodeWithTag("dashboard-tile").performTouchInput { click() }
+        assertEquals(0, taps)
+        compose.onNodeWithTag("privacy").assertIsEnabled()
+        compose.onNodeWithTag("stop").performClick()
+        assertEquals(1, stops)
+        capture("android-announcement")
+
+        compose.runOnIdle { state.value = EncoreState.parse(EncoreStateTest.snapshot(announcing = false, output = "draining"), state.value) }
+        compose.onNodeWithText("Announcement").assertIsDisplayed()
+        compose.onNodeWithTag("dashboard-shield").assertExists()
+        compose.onNodeWithText("Talk").assertIsNotEnabled()
+        capture("android-announcement-draining")
+
+        compose.runOnIdle { state.value = EncoreState.parse(EncoreStateTest.snapshot(active = false, announcing = false, output = "", owner = ""), state.value) }
+        compose.onNodeWithTag("dashboard-shield").assertDoesNotExist()
+        compose.onNodeWithText("Talk").assertIsNotEnabled()
+        compose.onNodeWithText("Settings").assertIsEnabled()
+        compose.runOnIdle { state.value = EncoreState.parse(EncoreStateTest.snapshot(active = false, announcing = false, output = "", owner = "", talkAllowed = true), state.value) }
+        compose.onNodeWithText("Talk").assertIsEnabled()
+        compose.onNodeWithTag("dashboard-tile").performTouchInput { click() }
+        assertEquals(1, taps)
+    }
+
+    @Test fun interruptedPlayingMusicCanResumeWithoutServerPlayCapability() {
+        val state = mutableStateOf(EncoreState(running = true, microphoneReady = true, connected = true, talkAllowed = true, audioInterrupted = true,
+            music = MusicState(enabled = true, status = "Connected", title = "Test audio · continuous stream", playing = true, commands = listOf("pause"))))
+        var command = ""
+        compose.setContent {
+            EncoreScreen(state.value, {}, {}, {}, {}, { "" }, { "" }, {}, {}, { command = it }, {})
+        }
+        compose.onNodeWithText("Pause").assertIsEnabled()
+        compose.onNodeWithText("Resume audio").assertIsEnabled()
+        capture("android-focus-lost")
+        compose.onNodeWithText("Resume audio").performClick()
+        assertEquals("resume", command)
+        compose.runOnIdle { state.value = state.value.copy(audioInterrupted = false) }
+        compose.onNodeWithText("Resume audio").assertDoesNotExist()
+        compose.onNodeWithText("Pause").assertIsDisplayed()
+        capture("android-focus-resumed")
     }
 
     @Test fun dashboardNavigationUsesOnlyTheConfiguredURL() {

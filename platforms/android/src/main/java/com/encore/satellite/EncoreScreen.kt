@@ -53,7 +53,7 @@ fun EncoreScreen(state: EncoreState, onStart: () -> Unit, onTalk: () -> Unit, on
                     }
                     if (!state.running) TextButton(onClick = onStart) { Text("Start satellite") }
                     else if (!state.microphoneReady && !state.muted) TextButton(onClick = onStart) { Text("Start microphone") }
-                    else TextButton(onClick = onTalk, enabled = state.microphoneReady && state.connected && !state.muted && !state.voiceActive) { Text("Talk") }
+                    else TextButton(onClick = onTalk, enabled = state.microphoneReady && state.connected && !state.muted && state.talkAllowed) { Text("Talk") }
                     if (state.microphoneReady || state.muted) {
                         TextButton(onClick = { onMuted(!state.muted) }, modifier = Modifier.testTag("privacy")) {
                             Text(if (state.muted) "Unmute mic" else "Mute mic")
@@ -69,14 +69,14 @@ fun EncoreScreen(state: EncoreState, onStart: () -> Unit, onTalk: () -> Unit, on
                             .pointerInput(Unit) { awaitPointerEventScope { while (true) { awaitPointerEvent().changes.forEach { it.consume() } } } })
                     }
                 }
-                if (state.music.enabled) MusicControls(state.music, onMusicCommand, state.voiceActive)
+                if (state.music.enabled) MusicControls(state.music, onMusicCommand, state.voiceActive, state.audioInterrupted)
                 else Spacer(Modifier.height(12.dp))
             }
             if (state.voiceActive) Surface(Modifier.align(Alignment.BottomCenter).padding(bottom = if (state.music.enabled) 98.dp else 44.dp)
                 .padding(horizontal = 20.dp).widthIn(max = 620.dp).fillMaxWidth(), shape = RoundedCornerShape(28.dp), color = Color(0xff152330)) {
                 Column(Modifier.padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        Text(when { state.alert -> "Alert"; state.phase == "listening" -> "Listening"; state.phase == "speaking" -> "Responding"; state.phase == "stopping" -> "Stopping"; else -> "Working" },
+                        Text(when { state.alert -> "Alert"; state.announcing || state.outputOwner == "announcement" -> "Announcement"; state.phase == "listening" -> "Listening"; state.phase == "speaking" -> "Responding"; state.phase == "stopping" -> "Stopping"; else -> "Working" },
                             Modifier.weight(1f), fontSize = 21.sp, color = Color.White)
                         IconButton(onClick = onStop, modifier = Modifier.testTag("stop").semantics { contentDescription = "Stop voice turn" }) {
                             Canvas(Modifier.size(18.dp)) { drawRoundRect(Mint, cornerRadius = androidx.compose.ui.geometry.CornerRadius(3f, 3f)) }
@@ -128,13 +128,14 @@ fun HorizonBraid(samples: List<Float>, modifier: Modifier = Modifier) {
     }
 }
 
-@Composable private fun MusicControls(music: MusicState, command: (String) -> Unit, ducked: Boolean) {
+@Composable private fun MusicControls(music: MusicState, command: (String) -> Unit, ducked: Boolean, interrupted: Boolean) {
     Surface(Modifier.padding(12.dp).fillMaxWidth(), shape = RoundedCornerShape(16.dp)) {
         Row(Modifier.padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text(music.title.ifEmpty { "Sendspin · ${music.status}" }, maxLines = 1, color = Color.White)
                 Text(listOf(music.artist, if (ducked) "Quiet for voice" else "").filter { it.isNotEmpty() }.joinToString(" · "), color = Muted, maxLines = 1, fontSize = 12.sp)
             }
+            if (music.playing && interrupted) TextButton(onClick = { command("resume") }) { Text("Resume audio") }
             val action = if (music.playing) "pause" else "play"
             TextButton(onClick = { command(action) }, enabled = action in music.commands) { Text(if (music.playing) "Pause" else "Play") }
             TextButton(onClick = { command("next") }, enabled = "next" in music.commands) { Text("Next") }

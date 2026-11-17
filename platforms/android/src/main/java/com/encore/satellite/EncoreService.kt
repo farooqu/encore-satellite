@@ -39,16 +39,13 @@ class EncoreService : Service() {
     private var musicHost: MusicHost? = null
     private var music: MusicPlayer? = null
     private var microphoneForeground = false
-    private var focused = false
-    private var focusWanted = false
-    private val audioManager by lazy { getSystemService(AudioManager::class.java) }
-    private val focus by lazy { AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
-        .setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA).build())
-        .setOnAudioFocusChangeListener { value ->
-            focused = value == AudioManager.AUDIOFOCUS_GAIN
+    private val focus by lazy {
+        SatelliteAudioFocus(getSystemService(AudioManager::class.java)) { focused ->
+            mutable.value = mutable.value.copy(audioInterrupted = !focused)
             music?.interrupted(!focused)
             if (!focused) runtime?.stop()
-        }.build() }
+        }
+    }
 
     override fun onCreate() {
         super.onCreate()
@@ -66,8 +63,9 @@ class EncoreService : Service() {
                         .onSuccess { snapshot ->
                             val next = snapshot.copy(level = if (snapshot.microphoneVisible) audio.level else 0f,
                                 waveform = if (snapshot.microphoneVisible) audio.waveform else emptyList())
+                            val newVoiceActivity = next.voiceActive && !mutable.value.voiceActive
                             mutable.value = next
-                            updateFocus(next.voiceActive || next.music.playing)
+                            focus.update(next.voiceActive || next.music.playing, resume = newVoiceActivity)
                             music?.duck(next.voiceActive)
                         }.onFailure { problem("Engine status unavailable") }
                 }
@@ -155,9 +153,11 @@ class EncoreService : Service() {
     }
 
     fun talk() {
+        if (!mutable.value.running || !mutable.value.talkAllowed) return
         runCatching {
             check(mutable.value.microphoneReady && !mutable.value.muted) { "Start the microphone from the app first" }
-            runtime?.talk()
+            focus.update(true, resume = true)
+            if (focus.focused) runtime?.talk()
         }.onFailure { problem("Voice is not ready: ${it.message}") }
     }
     fun stopTurn() { runtime?.stop() }
@@ -185,26 +185,21 @@ class EncoreService : Service() {
         disconnectMusic()
         runCatching {
             MusicPlayer(mutable.value.name, host()) { next -> mutable.value = mutable.value.copy(music = next) }
-                .also { music = it; it.interrupted(!focused); it.duck(mutable.value.voiceActive); it.connect(address) }
+                .also { music = it; focus.update(mutable.value.voiceActive || mutable.value.music.playing, resume = true)
+                    it.interrupted(!focus.focused); it.duck(mutable.value.voiceActive); it.connect(address) }
         }.onFailure { disconnectMusic(); problem("Sendspin: ${it.message}") }
     }
     fun disconnectMusic() { music?.close(); music = null; mutable.value = mutable.value.copy(music = MusicState()) }
-    fun musicCommand(command: String) { music?.command(command) }
+    fun musicCommand(command: String) {
+        if (command == "resume") {
+            if (mutable.value.running && mutable.value.music.playing) focus.update(true, resume = true)
+            return
+        }
+        if (command == "play" && command in mutable.value.music.commands) focus.update(true, resume = true)
+        music?.command(command)
+    }
     fun dismissProblem() { runtime?.dismissProblem(); mutable.value = mutable.value.copy(problem = "") }
     private fun problem(message: String) { mutable.value = mutable.value.copy(problem = message) }
-
-    private fun updateFocus(wanted: Boolean) {
-        if (wanted == focusWanted) return
-        focusWanted = wanted
-        if (wanted) {
-            focused = audioManager.requestAudioFocus(focus) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
-            music?.interrupted(!focused)
-            if (!focused) runtime?.stop()
-        } else {
-            audioManager.abandonAudioFocusRequest(focus)
-            focused = false
-        }
-    }
 
     private fun advertise(name: String, type: String, port: Int, attributes: Map<String, String>) {
         val manager = getSystemService(NsdManager::class.java)
@@ -232,11 +227,41 @@ class EncoreService : Service() {
         val manager = getSystemService(NsdManager::class.java)
         advertisements.forEach { runCatching { manager.unregisterService(it) } }
         advertisements.clear()
-        updateFocus(false)
+        focus.update(false)
         mutable.value = mutable.value.copy(running = false, level = 0f)
         microphoneForeground = false
         stopForeground(STOP_FOREGROUND_REMOVE)
     }
 
     override fun onDestroy() { shutdown(); scope.cancel(); audio.release(); super.onDestroy() }
+}
+
+/** Desired playback is not a focus grant. Only a new intent retries a lost/denied grant. */
+internal class SatelliteAudioFocus(private val manager: AudioManager, private val changed: (Boolean) -> Unit) {
+    var focused = false
+        private set
+    private var wanted = false
+    private val request: AudioFocusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+        .setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA).build())
+        .setOnAudioFocusChangeListener(::onFocusChanged).build()
+
+    private fun onFocusChanged(value: Int) {
+        focused = wanted && value == AudioManager.AUDIOFOCUS_GAIN
+        // Permanent loss has no promised gain callback. Do not keep a stale registration,
+        // or let unchanged server "playing" snapshots steal focus back on the next poll.
+        if (value == AudioManager.AUDIOFOCUS_LOSS) manager.abandonAudioFocusRequest(request)
+        changed(focused)
+    }
+
+    fun update(next: Boolean, resume: Boolean = false) {
+        if (next == wanted && !(resume && next && !focused)) return
+        wanted = next
+        if (next) {
+            focused = manager.requestAudioFocus(request) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+            changed(focused)
+        } else {
+            manager.abandonAudioFocusRequest(request)
+            focused = false
+        }
+    }
 }
