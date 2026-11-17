@@ -24,10 +24,12 @@ type Playback struct {
 func NewPlayback(s Speaker) *Playback { return &Playback{speaker: s} }
 
 func (p *Playback) Write(ctx context.Context, samples []int16) error {
+	// Bind the epoch before checking cancellation so a concurrent cancel+Flush
+	// cannot admit old work with the new epoch at the native equality fence.
+	epoch := p.epoch.Load()
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	epoch := p.epoch.Load()
 	pcm := make([]byte, len(samples)*2)
 	for i, v := range samples {
 		binary.LittleEndian.PutUint16(pcm[2*i:], uint16(v))
@@ -39,10 +41,12 @@ func (p *Playback) Write(ctx context.Context, samples []int16) error {
 }
 
 func (p *Playback) Drain(ctx context.Context) error {
+	// Use the same epoch-before-cancellation admission order as Write.
+	epoch := p.epoch.Load()
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if !p.speaker.DrainVoice(p.epoch.Load()) {
+	if !p.speaker.DrainVoice(epoch) {
 		return errors.New("android: voice drain stopped")
 	}
 	return ctx.Err()
