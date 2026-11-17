@@ -53,8 +53,9 @@ two Gradle workers and a 3 GB Gradle heap.
    **unencrypted/unauthenticated**; do not expose it to untrusted networks.
    Incubator sends mixednet models, which execute locally through the compatible
    microWakeWord frontend. No wake model is bundled or downloaded independently.
-   The app shows connected state and installed model count. **Talk** is a manual
-   fallback, not a replacement for local wake detection.
+   Readiness combines usable ordinary wake models with current native capture
+   health; a stop-only model does not mean hands-free wake is ready. **Talk** is a
+   manual fallback, not a replacement for local wake detection.
 3. Add the device's separate ESPHome integration on TCP 6053 using the encryption
    key revealed in local **Settings**. Set its single **Dashboard URL** text entity
    to a full URL, for example `https://home.example/lovelace/home`. This supplies
@@ -84,10 +85,68 @@ pairing records persist. The screen stays awake while the Activity is visible.
 
 ## Display and privacy behavior
 
-- One dashboard fills the main display. During the entire voice turn it is dimmed,
+- One dashboard fills the display edge-to-edge, with no header, permanent toolbar,
+  margins or dashboard card. Android system bars are hidden but can be revealed by
+  a system swipe. Swipe inward from the leftmost 20 dp to open satellite controls:
+  Talk/start, privacy, settings and independent music controls. Other dashboard
+  swipes are not drawer gestures. No visible menu button is drawn. Screen readers
+  can use either voice button's “Open satellite controls” accessibility action.
+  Two circular 56 dp buttons float at the bottom center: microphone/Talk (or
+  explicit satellite start before startup) and mic mute. After BLE-only startup,
+  the primary button explicitly starts the microphone without changing saved mute
+  intent. Talk remains unavailable until fresh capture and shared permission are
+  ready; mute is disabled without a recorder unless it is already saved-muted,
+  when explicit permission-aware unmute remains available. During voice, Talk becomes
+  Stop in the same circular button. Mute has a crossed-mic symbol, a checked toggle
+  state and a red background when muted; unmuting remains an explicit action.
+  During the entire voice turn the dashboard is frosted,
   touch-shielded and hidden from accessibility interaction; stop and privacy remain
-  usable. The horizontal Horizon braid draws real microphone PCM, not a timed
-  speaking animation. It is static when microphone visualization is inactive.
+  usable, including host playback drain after HANGUP. Healthy idle has no trace.
+  Voice takes over the dashboard edge-to-edge without a visible card. On Android
+  12+ the background is softly blurred with a light neutral frost; older Android keeps the tint
+  and input shield without blur. This is visual treatment, not security redaction.
+  The waveform uses the compact 48 dp row on every display, anchored independently
+  of transcript length. Text fills the space below only as needed, then scrolls
+  under a true alpha fade, above the reserved bottom controls. No large
+  empty panel is drawn for short exchanges. Heard text uses a subdued version of
+  the input braid color (including reported speaker RGB); replies use response
+  lilac, darkened for contrast on the light frost, with no added prefixes. Privacy
+  and Stop remain directly reachable during voice; both are also available in the
+  drawer. Notices stay visible without reserving dashboard space. The dashboard keeps
+  its existing viewport size while hidden; entering voice does not reflow it.
+- Native Canvas draws two independent Horizon braids: mint input from fresh
+  microphone PCM and lilac response audio from accepted PCM at the AudioTrack
+  playback head. They can move simultaneously; silence in either settles only
+  that layer flat. Queued/missing audio never invents output energy. A valid
+  current-turn Incubator speaker RGB replaces the input base color after it is
+  reported, including during response playback; it never recolors output. The
+  microphone can hear device echo: these layers do not establish user/device
+  acoustic separation, authentication or sound direction. Audio focus, capture,
+  routing and ducking keep their existing policies.
+- Each braid is a level-reactive visualization, not a raw PCM oscilloscope.
+  RMS drives three smooth ribbons, with display-frame attack/release easing
+  (22/95 ms initial tuning), bounded quiet-level lift, broad taper and
+  tangent-continuous curves. Silent input/output settles flat; missing samples
+  clear immediately. Reduced motion and night mode freeze ribbon drift while
+  retaining smaller bounded live-level response. Smoothing resets at
+  turn/connection/lifecycle boundaries. Kiosk Satellite's
+  frame-ticked level response informed this approach; no code, assets, strand
+  tables, glow layers or idle animation were copied from its CC BY-NC-ND source.
+- Processing/waiting uses three small neutral dots above the trace, only for
+  actual processing or queued state, never merely because audio is silent.
+  Amber alert rails remain distinct. No visible listening/processing/speaking
+  captions or speaker metadata are displayed; accessibility retains state and
+  server-attributed input-speaker descriptions. The drawer shows availability and
+  privacy status; notices, actual transcripts and Stop/privacy controls remain
+  visible when applicable. Announcements retain the shared active/owner facts,
+  including during drain, even when capture is unavailable. A focus interruption
+  still requires explicit Resume audio for an unchanged playing music stream.
+- Stop/privacy/disconnect/unknown state removes the braids without a tail.
+  Capture history cannot cross input turns/connections, and readings older than
+  250 ms fail unavailable. These are initial visual timings, not on-device latency
+  promises. Android's disabled-animations setting freezes decoration; backend
+  night on/unknown additionally dims the trace and limits displacement.
+  Decorative clocks stop below the visible lifecycle and resume from current facts.
 - Actual upstream recognition/reply text is shown by default, with no synthetic
   transcript. Muting clears the shared session/pre-roll, cancels active voice and
   releases the microphone; idle connections can stay attached while muted.
@@ -116,20 +175,26 @@ python3 docs/device-packages/validate.py
 
 Go tests exercise model transfer/digest/capacity/privacy plus existing voice and
 drain contracts. JVM Robolectric/Roborazzi tests render the actual Compose controls and
-exercise touch shielding, stop/privacy access, transcripts, waveform state,
-capability-gated music controls and same-origin navigation. Native-rendered test
+exercise touch shielding through drain, stop/privacy access at enlarged text and
+short/narrow sizes, transcripts, queued/output distinction, simultaneous independent
+input/output, silence, reduced motion, between-snapshot ribbon movement,
+missing-sample clearing, speaker fallback, capability-gated music and same-origin navigation.
+An AudioRecord PCM fixture checks stale history, input epochs, capture health and
+permission loss without a real microphone. An AudioTrack fixture checks accepted
+PCM envelope bins against a controlled playback head, including silence,
+exhaustion, flush and stale epochs. Native-rendered test
 captures are written to `app/build/reports/screenshots/`; their audio, transcript
 and music states are explicitly test fixtures, not on-device evidence.
 
-The one-URL development build passed APK assembly, all three native UI tests and
-lint (zero errors, 15 warnings, including deliberately unsupported x86/ChromeOS
-and newer-version suggestions). The APK's v2 development signature and ARM-only
-native library contents were independently checked. These checks do not establish
+The animation development build passed matching-AAR APK assembly, all thirteen native
+JVM tests and lint (zero errors, 23 warnings, including deliberately unsupported
+x86/ChromeOS, newer-version and existing KTX/storage suggestions). The APK's v2
+development signature and ARM-only native library contents were independently checked. These checks do not establish
 installation, microphone quality, real Sendspin playback or physical audio timing.
 The full-URL configuration, origin changes, invalid-input rejection, persistence
 and voice-independent controls were also exercised through a real encrypted
-`aioesphomeapi` client. The rebuilt APK retains the previous development signing
-certificate and uses a higher versionCode; on-device updating remains untested.
+`aioesphomeapi` client in the earlier one-URL build. Animation work does not change
+the package ID, signing configuration or versionCode; on-device updating remains untested.
 
 The remaining practical check is installation and a real Incubator turn on the
 Tab A7 Lite: model push/local wake, capture/reply audio, playback-head drain,

@@ -6,9 +6,10 @@ import android.view.View
 import android.webkit.*
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
@@ -16,84 +17,136 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.BlendMode
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.CompositingStrategy
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.*
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
-import kotlin.math.PI
-import kotlin.math.sin
+import kotlinx.coroutines.launch
 
 private val Ink = Color(0xff0c141d)
 private val Mint = Color(0xff97e6d4)
 private val Muted = Color(0xffa0afbd)
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun EncoreScreen(state: EncoreState, onStart: () -> Unit, onTalk: () -> Unit, onStop: () -> Unit,
     onMuted: (Boolean) -> Unit, noiseKey: () -> String,
     musicToken: () -> String, onMusicConnect: (String) -> Unit, onMusicDisconnect: () -> Unit,
     onMusicCommand: (String) -> Unit, onDismiss: () -> Unit, onUpdate: () -> Unit = {},
     onBluetooth: () -> Unit = {},
+    reducedMotion: Boolean = systemReducedMotion(),
     dashboardContent: @Composable () -> Unit = { Dashboard(state) }) {
     var settings by remember { mutableStateOf(false) }
+    val drawer = rememberDrawerState(DrawerValue.Closed)
+    val scope = rememberCoroutineScope()
     MaterialTheme(colorScheme = darkColorScheme(primary = Mint, background = Ink, surface = Color(0xff152330))) {
-        Box(Modifier.fillMaxSize().background(Ink).systemBarsPadding()) {
-            Column(Modifier.fillMaxSize()) {
-                Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) {
-                        Text("encore", fontSize = 22.sp, letterSpacing = 3.sp, color = Color.White)
-                        Text(if (state.muted || !state.microphoneReady) "MICROPHONE OFF" else if (state.connected) "INCUBATOR · ${state.models} LOCAL MODELS" else "INCUBATOR · NOT CONNECTED",
-                            color = if (state.muted || !state.microphoneReady) Color(0xffffc88b) else Muted, fontSize = 10.sp, letterSpacing = 1.sp)
-                    }
-                    if (!state.running) TextButton(onClick = onStart) { Text("Start satellite") }
-                    else if (!state.microphoneReady && !state.muted) TextButton(onClick = onStart) { Text("Start microphone") }
-                    else TextButton(onClick = onTalk, enabled = state.microphoneReady && state.connected && !state.muted && state.talkAllowed) { Text("Talk") }
-                    if (state.microphoneReady || state.muted) {
-                        TextButton(onClick = { onMuted(!state.muted) }, modifier = Modifier.testTag("privacy")) {
-                            Text(if (state.muted) "Unmute mic" else "Mute mic")
-                        }
-                    }
-                    TextButton(onClick = { settings = true }, enabled = !state.voiceActive) { Text("Settings") }
-                }
-                Box(Modifier.weight(1f).fillMaxWidth().padding(horizontal = 12.dp).clip(RoundedCornerShape(18.dp))) {
-                    Box(Modifier.fillMaxSize().semantics { if (state.voiceActive) hideFromAccessibility() }) { dashboardContent() }
-                    if (state.voiceActive) {
-                        // A full input shield, not just a translucent view: dashboard taps/gestures never reach WebView.
-                        Box(Modifier.fillMaxSize().background(Ink.copy(alpha = .78f)).testTag("dashboard-shield")
-                            .pointerInput(Unit) { awaitPointerEventScope { while (true) { awaitPointerEvent().changes.forEach { it.consume() } } } })
-                    }
-                }
-                if (state.music.enabled) MusicControls(state.music, onMusicCommand, state.voiceActive, state.audioInterrupted)
-                else Spacer(Modifier.height(12.dp))
-            }
-            if (state.voiceActive) Surface(Modifier.align(Alignment.BottomCenter).padding(bottom = if (state.music.enabled) 98.dp else 44.dp)
-                .padding(horizontal = 20.dp).widthIn(max = 620.dp).fillMaxWidth(), shape = RoundedCornerShape(28.dp), color = Color(0xff152330)) {
-                Column(Modifier.padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        Text(when { state.alert -> "Alert"; state.announcing || state.outputOwner == "announcement" -> "Announcement"; state.phase == "listening" -> "Listening"; state.phase == "speaking" -> "Responding"; state.phase == "stopping" -> "Stopping"; else -> "Working" },
-                            Modifier.weight(1f), fontSize = 21.sp, color = Color.White)
-                        IconButton(onClick = onStop, modifier = Modifier.testTag("stop").semantics { contentDescription = "Stop voice turn" }) {
-                            Canvas(Modifier.size(18.dp)) { drawRoundRect(Mint, cornerRadius = androidx.compose.ui.geometry.CornerRadius(3f, 3f)) }
-                        }
-                    }
-                    HorizonBraid(if (state.microphoneVisible) state.waveform else emptyList(), Modifier.fillMaxWidth().height(94.dp))
-                    Column(Modifier.heightIn(max = 180.dp).verticalScroll(rememberScrollState()).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        if (state.heard.isNotEmpty()) Text(state.heard, color = Color.White, fontSize = 19.sp)
-                        if (state.reply.isNotEmpty()) Text(state.reply, color = Mint, fontSize = 18.sp)
-                    }
-                    if (!state.microphoneVisible) Text("Microphone visualization paused", color = Muted, fontSize = 11.sp)
+        ModalNavigationDrawer(drawerState = drawer, gesturesEnabled = drawer.isOpen, drawerContent = {
+            ModalDrawerSheet(Modifier.width(340.dp)) {
+                if (drawer.isOpen || drawer.targetValue == DrawerValue.Open) Column(Modifier.fillMaxHeight().verticalScroll(rememberScrollState()).padding(20.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text("Satellite controls", style = MaterialTheme.typography.titleLarge)
+                    Text(state.status, Modifier.semantics { liveRegion = LiveRegionMode.Polite }, color = Muted)
+                    if (!state.running) TextButton(onClick = { onStart(); scope.launch { drawer.close() } }) { Text("Start satellite") }
+                    else if (!state.microphoneReady && !state.muted) TextButton(onClick = { onStart(); scope.launch { drawer.close() } }) { Text("Start microphone") }
+                    else TextButton(onClick = { onTalk(); scope.launch { drawer.close() } },
+                        enabled = state.voiceKnown && state.connected && state.microphoneReady && state.captureReady && !state.muted &&
+                            !state.inhibited && state.talkAllowed && state.talkReady && !state.interactionVisible) { Text("Talk") }
+                    if (state.interactionVisible) TextButton(onClick = { onStop(); scope.launch { drawer.close() } }) { Text("Stop voice turn") }
+                    TextButton(onClick = { onMuted(!state.muted) }, enabled = state.microphoneReady || state.muted) { Text(if (state.muted) "Unmute mic" else "Mute mic") }
+                    TextButton(onClick = { settings = true; scope.launch { drawer.close() } },
+                        enabled = !state.interactionVisible) { Text("Settings") }
+                    if (state.music.enabled) MusicControls(state.music, onMusicCommand, state.voiceActive, state.audioInterrupted)
+                    TextButton(onClick = { scope.launch { drawer.close() } }) { Text("Close controls") }
                 }
             }
-            if (state.problem.isNotEmpty()) Surface(Modifier.align(Alignment.TopCenter).padding(top = 82.dp, start = 24.dp, end = 24.dp), shape = RoundedCornerShape(12.dp)) {
-                Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text(state.problem, Modifier.weight(1f), color = Color(0xffffd0a4))
-                    IconButton(onClick = onDismiss, Modifier.semantics { contentDescription = "Dismiss notice" }) { Text("×", fontSize = 24.sp) }
+        }) {
+            BoxWithConstraints(Modifier.fillMaxSize().background(Ink)) {
+                Box(Modifier.fillMaxSize().blur(if (state.interactionVisible) 24.dp else 0.dp)
+                    .semantics { if (state.interactionVisible) hideFromAccessibility() }) { dashboardContent() }
+                if (state.interactionVisible) {
+                    // The light frost is also the gesture shield; it never forwards taps to WebView.
+                    Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(
+                        Color(0xffedf3f6).copy(alpha = .88f), Color(0xffedf3f6).copy(alpha = .82f),
+                        Color(0xffedf3f6).copy(alpha = .94f)))).testTag("dashboard-shield")
+                        .pointerInput(Unit) { awaitPointerEventScope { while (true) { awaitPointerEvent().changes.forEach { it.consume() } } } })
+                    val top = maxHeight * if (maxHeight < 320.dp) .07f else .22f
+                    VoiceOverlay(state, reducedMotion,
+                        Modifier.align(Alignment.TopCenter).padding(top = top, start = 8.dp, end = 8.dp).widthIn(max = 880.dp)
+                            .fillMaxWidth(.96f).height((maxHeight - top - 96.dp).coerceAtLeast(72.dp)))
+                }
+                if (state.problem.isNotEmpty()) Surface(Modifier.align(Alignment.TopCenter).statusBarsPadding()
+                    .padding(horizontal = 20.dp, vertical = 4.dp), shape = RoundedCornerShape(12.dp)) {
+                    Row(Modifier.padding(horizontal = 12.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text(state.problem, Modifier.weight(1f), color = Color(0xffffd0a4), maxLines = 2,
+                            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+                        IconButton(onClick = onDismiss, Modifier.semantics { contentDescription = "Dismiss notice" }) { Text("×", fontSize = 24.sp) }
+                    }
+                }
+                // Restrict the closed-drawer gesture to the edge, preserving dashboard swipes elsewhere.
+                Box(Modifier.align(Alignment.CenterStart).width(20.dp).fillMaxHeight().testTag("controls-edge")
+                    .pointerInput(Unit) {
+                        var distance = 0f
+                        detectHorizontalDragGestures(onDragStart = { distance = 0f }, onDragEnd = {
+                            if (distance > 48.dp.toPx()) scope.launch { drawer.open() }
+                        }) { change, drag -> change.consume(); distance += drag }
+                    })
+                Row(Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                    FilledIconButton(onClick = {
+                        if (state.interactionVisible) onStop() else if (!state.running || (!state.microphoneReady && !state.muted)) onStart() else onTalk()
+                    }, enabled = state.interactionVisible || !state.running || (!state.microphoneReady && !state.muted) ||
+                        (state.voiceKnown && state.connected && state.microphoneReady && state.captureReady &&
+                            !state.muted && !state.inhibited && state.talkAllowed && state.talkReady),
+                        colors = IconButtonDefaults.filledIconButtonColors(containerColor = Ink, contentColor = Mint,
+                            disabledContainerColor = Color(0xff38434d), disabledContentColor = Color(0xff9ca8b1)),
+                        modifier = Modifier.size(56.dp).clip(CircleShape)
+                            .testTag(if (state.interactionVisible) "stop" else "talk").semantics {
+                                contentDescription = when {
+                                    state.interactionVisible -> "Stop voice turn"
+                                    !state.running -> "Start satellite"
+                                    !state.microphoneReady && !state.muted -> "Start microphone"
+                                    else -> "Talk"
+                                }
+                                stateDescription = state.status
+                                customActions = listOf(CustomAccessibilityAction("Open satellite controls") {
+                                    scope.launch { drawer.open() }; true
+                                })
+                            }) {
+                        val color = LocalContentColor.current
+                        if (state.interactionVisible) Canvas(Modifier.size(18.dp)) {
+                            drawRoundRect(color, cornerRadius = CornerRadius(3.dp.toPx(), 3.dp.toPx()))
+                        } else MicrophoneGlyph(color, false)
+                    }
+                    FilledIconToggleButton(checked = state.muted, onCheckedChange = onMuted, enabled = state.microphoneReady || state.muted,
+                        colors = IconButtonDefaults.filledIconToggleButtonColors(containerColor = Ink, contentColor = Mint,
+                            checkedContainerColor = Color(0xffa23b45), checkedContentColor = Color.White),
+                        modifier = Modifier.size(56.dp).clip(CircleShape).testTag("privacy").semantics {
+                            contentDescription = if (state.muted) "Unmute mic" else "Mute mic"
+                            stateDescription = if (state.muted) "Microphone muted" else "Microphone unmuted"
+                            // Alternate drawer access without a visible menu button.
+                            customActions = listOf(CustomAccessibilityAction("Open satellite controls") {
+                                scope.launch { drawer.open() }; true
+                            })
+                        }) {
+                        MicrophoneGlyph(LocalContentColor.current, true)
+                    }
                 }
             }
         }
@@ -101,44 +154,58 @@ fun EncoreScreen(state: EncoreState, onStart: () -> Unit, onTalk: () -> Unit, on
     }
 }
 
-@Composable
-fun HorizonBraid(samples: List<Float>, modifier: Modifier = Modifier) {
-    Canvas(modifier.semantics { contentDescription = if (samples.isEmpty()) "Microphone waveform inactive" else "Live microphone waveform" }) {
-        val colors = listOf(Mint, Color(0xff9eb9ff), Color(0xffd5b6e8))
-        for (line in 0..2) {
-            val path = Path()
-            for (i in 0..128) {
-                val x = i / 128f
-                val at = x * (samples.size - 1).coerceAtLeast(0)
-                val index = at.toInt()
-                val sample = if (samples.isEmpty()) 0f else {
-                    // Smooth actual PCM points. No elapsed-time oscillator or synthetic speech animation.
-                    val a = samples[(index - 1).coerceAtLeast(0)]
-                    val b = samples[index]
-                    val c = samples[(index + 1).coerceAtMost(samples.lastIndex)]
-                    (a + 2 * b + c) / 4
+@Composable private fun MicrophoneGlyph(color: Color, crossedOut: Boolean) {
+    Canvas(Modifier.size(26.dp)) {
+        val unit = size.width / 24
+        val stroke = 1.8f * unit
+        drawRoundRect(color, Offset(9 * unit, 3 * unit), Size(6 * unit, 11 * unit),
+            CornerRadius(3 * unit), style = Stroke(stroke))
+        drawArc(color, 0f, 180f, false, Offset(6 * unit, 6 * unit), Size(12 * unit, 12 * unit),
+            style = Stroke(stroke, cap = StrokeCap.Round))
+        drawLine(color, Offset(12 * unit, 18 * unit), Offset(12 * unit, 21 * unit), stroke, StrokeCap.Round)
+        drawLine(color, Offset(9 * unit, 21 * unit), Offset(15 * unit, 21 * unit), stroke, StrokeCap.Round)
+        if (crossedOut) drawLine(color, Offset(3 * unit, 3 * unit), Offset(21 * unit, 21 * unit), stroke, StrokeCap.Round)
+    }
+}
+
+@Composable private fun VoiceOverlay(state: EncoreState, reducedMotion: Boolean, modifier: Modifier) {
+    Column(modifier.testTag("voice-overlay").padding(12.dp)) {
+        VoiceVisualization(state, reducedMotion,
+            Modifier.fillMaxWidth().height(48.dp).testTag("voice-visual"), lightSurface = true)
+        if (state.heard.isNotEmpty() || state.reply.isNotEmpty()) key(state.generation, state.turn) {
+            Box(Modifier.weight(1f).fillMaxWidth().testTag("voice-transcripts")
+                .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
+                .drawWithContent {
+                    drawContent()
+                    // Fade actual text alpha; never paint an opaque strip over the frost.
+                    drawRect(Brush.verticalGradient(listOf(Color.Transparent, Color.Black), endY = 20.dp.toPx()),
+                        blendMode = BlendMode.DstIn)
+                }) {
+                Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(vertical = 16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    if (state.heard.isNotEmpty()) Text(state.heard, Modifier.fillMaxWidth(),
+                        color = lerp(state.inputBraidColor, Ink, .64f).copy(alpha = .88f),
+                        fontSize = 19.sp, lineHeight = 27.sp, textAlign = TextAlign.Center)
+                    if (state.reply.isNotEmpty()) Text(state.reply, Modifier.fillMaxWidth(), color = lerp(OutputLilac, Ink, .58f),
+                        fontSize = 21.sp, lineHeight = 29.sp, textAlign = TextAlign.Center)
                 }
-                val envelope = sin(x * PI).toFloat()
-                val braid = sin(x * PI * 4 + line * 2).toFloat()
-                val y = size.height / 2 + sample * envelope * size.height * .32f * (1 - line * .17f) + braid * 3.dp.toPx()
-                if (i == 0) path.moveTo(0f, y) else path.lineTo(x * size.width, y)
             }
-            drawPath(path, colors[line].copy(alpha = .85f), style = Stroke(width = (1.7f - line * .3f).dp.toPx()))
         }
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable private fun MusicControls(music: MusicState, command: (String) -> Unit, ducked: Boolean, interrupted: Boolean) {
     Surface(Modifier.padding(12.dp).fillMaxWidth(), shape = RoundedCornerShape(16.dp)) {
-        Row(Modifier.padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text(music.title.ifEmpty { "Sendspin · ${music.status}" }, maxLines = 1, color = Color.White)
-                Text(listOf(music.artist, if (ducked) "Quiet for voice" else "").filter { it.isNotEmpty() }.joinToString(" · "), color = Muted, maxLines = 1, fontSize = 12.sp)
+        Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+            Text(music.title.ifEmpty { "Sendspin · ${music.status}" }, maxLines = 1, color = Color.White)
+            Text(listOf(music.artist, if (ducked) "Quiet for voice" else "").filter { it.isNotEmpty() }.joinToString(" · "), color = Muted, maxLines = 1, fontSize = 12.sp)
+            FlowRow {
+                if (music.playing && interrupted) TextButton(onClick = { command("resume") }) { Text("Resume audio") }
+                val action = if (music.playing) "pause" else "play"
+                TextButton(onClick = { command(action) }, enabled = action in music.commands) { Text(if (music.playing) "Pause" else "Play") }
+                TextButton(onClick = { command("next") }, enabled = "next" in music.commands) { Text("Next") }
             }
-            if (music.playing && interrupted) TextButton(onClick = { command("resume") }) { Text("Resume audio") }
-            val action = if (music.playing) "pause" else "play"
-            TextButton(onClick = { command(action) }, enabled = action in music.commands) { Text(if (music.playing) "Pause" else "Play") }
-            TextButton(onClick = { command("next") }, enabled = "next" in music.commands) { Text("Next") }
         }
     }
 }
@@ -175,11 +242,11 @@ internal fun trustedNavigation(origin: String, value: String): Boolean {
             }
             // No addJavascriptInterface, downloads, external intents or microphone/camera WebChromeClient grants.
         } }, update = { view ->
-            view.importantForAccessibility = if (state.voiceActive) View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS else View.IMPORTANT_FOR_ACCESSIBILITY_AUTO
+            view.importantForAccessibility = if (state.interactionVisible) View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS else View.IMPORTANT_FOR_ACCESSIBILITY_AUTO
             // Also release keyboard focus: the touch shield alone cannot stop a focused dashboard input.
-            if (state.voiceActive) view.clearFocus()
-            view.isFocusable = !state.voiceActive
-            view.isFocusableInTouchMode = !state.voiceActive
+            if (state.interactionVisible) view.clearFocus()
+            view.isFocusable = !state.interactionVisible
+            view.isFocusableInTouchMode = !state.interactionVisible
             val desired = "${state.reload}:${state.dashboard}"
             if (view.tag != desired) { view.tag = desired; view.loadUrl(state.dashboard) }
         }, modifier = Modifier.fillMaxSize().testTag("dashboard"))

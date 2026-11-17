@@ -222,11 +222,13 @@ func dashboardURL(value string) (string, error) {
 	return u.String(), nil
 }
 
-func (r *Runtime) Snapshot() string {
+// Snapshot combines engine facts with current native permission/capture health.
+// The host must pass false for unknown, stopped, silenced or stale capture.
+func (r *Runtime) Snapshot(captureReady bool) string {
 	r.mu.Lock()
 	c, rev, problem := r.config, r.reload, r.problem
 	r.mu.Unlock()
-	b, _ := json.Marshal(map[string]any{"voice": r.engine.Snapshot(), "models": r.voice.ModelCount(), "dashboard": c.Dashboard, "reload": rev, "problem": problem})
+	b, _ := json.Marshal(map[string]any{"voice": r.voice.Snapshot(captureReady), "models": r.voice.ModelCount(), "dashboard": c.Dashboard, "reload": rev, "problem": problem})
 	return string(b)
 }
 

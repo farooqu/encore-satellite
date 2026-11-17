@@ -46,7 +46,7 @@ func TestLocalIdentityAndPrivacySurviveReopen(t *testing.T) {
 			Muted bool `json:"muted"`
 		} `json:"voice"`
 	}
-	if err := json.Unmarshal([]byte(next.Snapshot()), &snapshot); err != nil {
+	if err := json.Unmarshal([]byte(next.Snapshot(false)), &snapshot); err != nil {
 		t.Fatal(err)
 	}
 	if snapshot.Dashboard != "" || !snapshot.Voice.Muted {
@@ -73,7 +73,7 @@ func TestFailedMuteSurvivesUnrelatedSaveAndReopen(t *testing.T) {
 						Muted bool `json:"muted"`
 					} `json:"voice"`
 				}
-				if err := json.Unmarshal([]byte(r.Snapshot()), &snapshot); err != nil {
+				if err := json.Unmarshal([]byte(r.Snapshot(false)), &snapshot); err != nil {
 					t.Fatal(err)
 				}
 				if snapshot.Voice.Muted != want {

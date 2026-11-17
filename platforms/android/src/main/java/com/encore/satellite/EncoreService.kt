@@ -43,7 +43,7 @@ class EncoreService : Service() {
         SatelliteAudioFocus(getSystemService(AudioManager::class.java)) { focused ->
             mutable.value = mutable.value.copy(audioInterrupted = !focused)
             music?.interrupted(!focused)
-            if (!focused) runtime?.stop()
+            if (!focused) stopTurn()
         }
     }
 
@@ -59,15 +59,23 @@ class EncoreService : Service() {
                 val now = android.os.SystemClock.elapsedRealtime()
                 if (now - bluetoothRefresh >= 500) { bluetooth.refresh(); bluetoothRefresh = now }
                 runtime?.let { engine ->
-                    runCatching { EncoreState.parse(engine.snapshot(), mutable.value) }
+                    val microphoneProblem = audio.captureProblem
+                    runCatching { EncoreState.parse(engine.snapshot(microphoneProblem.isEmpty()), mutable.value) }
                         .onSuccess { snapshot ->
-                            val next = snapshot.copy(level = if (snapshot.microphoneVisible) audio.level else 0f,
-                                waveform = if (snapshot.microphoneVisible) audio.waveform else emptyList())
+                            val frame = audio.microphoneFrame(snapshot.generation, snapshot.turn, snapshot.microphoneVisible)
+                            val next = snapshot.copy(level = frame.level, waveform = frame.waveform,
+                                playbackLevel = if (snapshot.visual != "none" && snapshot.outputState in setOf("playing", "draining")) audio.playbackLevel() else null,
+                                captureProblem = microphoneProblem.ifEmpty { "Microphone unavailable" })
                             val newVoiceActivity = next.voiceActive && !mutable.value.voiceActive
                             mutable.value = next
                             focus.update(next.voiceActive || next.music.playing, resume = newVoiceActivity)
                             music?.duck(next.voiceActive)
-                        }.onFailure { problem("Engine status unavailable") }
+                        }.onFailure {
+                            audio.clearVisualization()
+                            mutable.value = mutable.value.copy(voiceKnown = false, level = 0f, waveform = emptyList(), playbackLevel = null,
+                                heard = "", reply = "", speakerName = "", speakerRGB = emptyList())
+                            problem("Engine status unavailable")
+                        }
                 }
                 delay(40)
             }
@@ -111,7 +119,7 @@ class EncoreService : Service() {
                     mapOf("mac" to engine.mac().replace(":", ""), "version" to "0.1.0", "api_encryption" to "Noise_NNpsk0_25519_ChaChaPoly_SHA256"))
             }
             if (enableMicrophone && intent?.getBooleanExtra("unmute", false) == true) engine.setMuted(false)
-            if (microphoneForeground && !EncoreState.parse(engine.snapshot(), mutable.value).muted) startMicrophone()
+            if (microphoneForeground && !EncoreState.parse(engine.snapshot(audio.captureReady), mutable.value).muted) startMicrophone()
             if (intent?.action == "music") connectMusic(intent.getStringExtra("address").orEmpty())
             if (bluetoothStart) setBluetoothEnabled(true)
         } catch (error: Exception) {
@@ -137,11 +145,12 @@ class EncoreService : Service() {
     }
 
     private fun stopMicrophone() {
-        mutable.value = mutable.value.copy(microphoneReady = false, level = 0f, waveform = emptyList())
+        mutable.value = mutable.value.copy(microphoneReady = false, captureReady = false, level = 0f, waveform = emptyList())
         audio.stopCapture()
     }
 
     fun setMuted(value: Boolean) {
+        if (value) inhibitPresentation("muted", true)
         runCatching {
             runtime?.setMuted(value)
             if (value) stopMicrophone() else if (mutable.value.running) startMicrophone()
@@ -155,12 +164,18 @@ class EncoreService : Service() {
     fun talk() {
         if (!mutable.value.running || !mutable.value.talkAllowed) return
         runCatching {
-            check(mutable.value.microphoneReady && !mutable.value.muted) { "Start the microphone from the app first" }
+            check(mutable.value.microphoneReady && mutable.value.captureReady && !mutable.value.muted) { "Start the microphone from the app first" }
             focus.update(true, resume = true)
             if (focus.focused) runtime?.talk()
         }.onFailure { problem("Voice is not ready: ${it.message}") }
     }
-    fun stopTurn() { runtime?.stop() }
+    fun stopTurn() { inhibitPresentation("stopping"); runtime?.stop() }
+    private fun inhibitPresentation(phase: String, muted: Boolean = mutable.value.muted) {
+        audio.clearVisualization()
+        mutable.value = mutable.value.copy(phase = phase, muted = muted, inhibited = true, voiceActive = false, announcing = false,
+            input = "", inputOpen = false, outputState = "", outputOwner = "", heard = "", reply = "", speakerName = "", speakerRGB = emptyList(),
+            level = 0f, waveform = emptyList(), playbackLevel = null, talkAllowed = false, talkReady = false, wakeReady = false)
+    }
     fun setBluetoothEnabled(enabled: Boolean) {
         scope.launch {
             // Preserve tap order without doing filesystem I/O on the UI thread.
@@ -219,6 +234,7 @@ class EncoreService : Service() {
     private fun shutdown() {
         updates?.stop()
         // Gate capture before BLE cleanup or any network subscriber can wait.
+        inhibitPresentation("muted", true)
         runtime?.let { runCatching { it.setMuted(true) } }
         stopMicrophone()
         bluetooth.running(false)
