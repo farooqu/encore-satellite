@@ -73,7 +73,20 @@ jobs:
       - name: Build the virtual lab (not a device package)
         run: go build -o "$RUNNER_TEMP/encore-lab" ./cmd/encore-lab
       - name: Install Dot boot and builder test tools
-        run: sudo apt-get update && sudo apt-get install -y busybox cmake ninja-build g++ dropbear-bin openssh-client iptables iproute2 iputils-ping
+        run: sudo apt-get update && sudo apt-get install -y busybox cmake ninja-build g++ openssh-client iptables iproute2 iputils-ping
+      - name: Build the target Dropbear version for SSH security tests
+        run: |
+          # Ubuntu's 2022.83 lacks the isolated authorization directory option.
+          # Match Alpine 3.22's 2025.88; checksum also recorded by its APKBUILD.
+          mkdir -p "$RUNNER_TEMP/dropbear"
+          cd "$RUNNER_TEMP/dropbear"
+          curl -fsSLO https://matt.ucc.asn.au/dropbear/releases/dropbear-2025.88.tar.bz2
+          echo '71194f4792287b9e56e07cfa9a3e97d23b7fda82c858e0219d0d54aee48e77892997330ad1af5654a738b970965a92a79468bbf5c8ba0358b046fd053dfc87ed  dropbear-2025.88.tar.bz2' | sha512sum -c -
+          tar -xjf dropbear-2025.88.tar.bz2
+          cd dropbear-2025.88
+          ./configure --disable-zlib
+          make -j2 PROGRAMS='dropbear dropbearkey'
+          echo "$PWD" >> "$GITHUB_PATH"
       - name: Check and cross-build the experimental Dot package
         run: make dot-check dot-build
       # Deliberately not make lab-test: it needs pinned HA, onboarding and

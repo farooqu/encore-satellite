@@ -34,7 +34,7 @@ jobs:
         run: |
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            ca-certificates git make gcc libc6-dev bc patch curl xz-utils bzip2 \
+            ca-certificates git make gcc libc6-dev libssl-dev bc patch curl xz-utils bzip2 \
             perl python3 flex bison util-linux
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:

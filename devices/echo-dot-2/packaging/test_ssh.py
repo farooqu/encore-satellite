@@ -20,7 +20,7 @@ import install
 import package
 import test_package
 
-DROPBEAR = shutil.which("dropbear", path=os.defpath + ":/usr/sbin")
+DROPBEAR = shutil.which("dropbear") or shutil.which("dropbear", path=os.defpath + ":/usr/sbin")
 
 
 def string(value):
@@ -734,6 +734,9 @@ class HandshakeTests(unittest.TestCase):
                 self.assertNotEqual(
                     ssh(
                         options=[
+                            # No remote command may exit before the asynchronous
+                            # forwarding denial reaches the client.
+                            "-N",
                             "-o",
                             "ExitOnForwardFailure=yes",
                             "-R",
