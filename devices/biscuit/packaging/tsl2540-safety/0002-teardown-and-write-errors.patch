@@ -1,0 +1,174 @@
+Subject: [PATCH 2/2] tsl2540: drain callbacks and propagate configuration write errors
+
+Apply after the frozen measurement ABI candidate. No recipe integration.
+
+--- a/drivers/misc/ams_tsl2540.c
++++ b/drivers/misc/ams_tsl2540.c
+@@ -621,7 +621,7 @@
+ 	int i, ret;
+ 	u8 id, rev, auxid;
+ 	struct device *dev = &client->dev;
+-	static struct tsl2540_chip *chip;
++	struct tsl2540_chip *chip;
+ 	struct tsl2540_i2c_platform_data *pdata = dev->platform_data;
+ 	bool powered = 0;
+ 
+@@ -629,7 +629,7 @@
+ 
+ #ifdef CONFIG_OF
+ 	if (!pdata) {
+-		pdata = kzalloc(sizeof(struct tsl2540_i2c_platform_data),
++		pdata = devm_kzalloc(dev, sizeof(*pdata),
+ 				GFP_KERNEL);
+ 		if (!pdata)
+ 			return -ENOMEM;
+@@ -788,6 +788,7 @@
+ 	ret = input_register_device(chip->d_idev);
+ 	if (ret) {
+ 		input_free_device(chip->d_idev);
++		chip->d_idev = NULL;
+ 		dev_err(dev, "%s: cant register input '%s'\n",
+ 				__func__, tsl2540_names[chip->device_index]);
+ 		goto input_d_alloc_failed;
+@@ -835,21 +836,20 @@
+ 	 * This must be unwound in the correct order, reverse
+ 	 * from initialization above
+ 	 */
+-#ifdef ABI_SET_GET_REGISTERS
+-base_sysfs_failed:
+-	sysfs_remove_group(&chip->client->dev.kobj, &tsl2540_attr_group);
+-#endif /* ABI_SET_GET_REGISTERS */
+-
++#ifdef TSL2540_ENABLE_INTERRUPT
+ irq_register_fail:
+ 	sysfs_remove_group(&chip->client->dev.kobj, &tsl2540_als_attr_group);
++#endif
+ 
+ #ifdef ABI_SET_GET_REGISTERS
++base_sysfs_failed:
++	sysfs_remove_group(&chip->client->dev.kobj, &tsl2540_attr_group);
++
++input_d_alloc_failed:
+ #ifdef TSL2540_ENABLE_INPUT
+ 	if (chip->d_idev)
+ 		input_unregister_device(chip->d_idev);
+ #endif /* TSL2540_ENABLE_INPUT */
+-
+-input_d_alloc_failed:
+ #endif /* ABI_SET_GET_REGISTERS */
+ 
+ #ifdef TSL2540_ENABLE_INPUT
+@@ -941,17 +941,28 @@
+ 	struct tsl2540_chip *chip = i2c_get_clientdata(client);
+ 
+ 	pr_info("\nTSL2540: REMOVE()\n");
++	/* Deactivate new sysfs calls and drain existing callbacks before freeing
++	 * their state. Never hold chip->lock while waiting for those callbacks.
++	 */
++	sysfs_remove_group(&client->dev.kobj, &tsl2540_als_attr_group);
++#ifdef ABI_SET_GET_REGISTERS
++	sysfs_remove_group(&client->dev.kobj, &tsl2540_attr_group);
++#endif
+ #ifdef TSL2540_ENABLE_INTERRUPT
+ 	free_irq(client->irq, chip);
+ #endif /* TSL2540_ENABLE_INTERRUPT */
++	if (chip->a_idev)
++		input_unregister_device(chip->a_idev);
++#ifdef ABI_SET_GET_REGISTERS
++	if (chip->d_idev)
++		input_unregister_device(chip->d_idev);
++#endif
+ 	if (chip->p_idev)
+ 		input_unregister_device(chip->p_idev);
+ 	if (chip->pdata->platform_teardown)
+ 		chip->pdata->platform_teardown(&client->dev);
+ 	i2c_set_clientdata(client, NULL);
+-#ifdef CONFIG_OF
+-	kfree(chip->pdata);
+-#endif
++	/* DT data is device-managed; caller-supplied platform data is borrowed. */
+ 	kfree(chip);
+ 	return 0;
+ }
+--- a/drivers/misc/ams_tsl2540_als.c
++++ b/drivers/misc/ams_tsl2540_als.c
+@@ -67,6 +67,10 @@
+ 		rc = ams_i2c_write(chip->client, chip->shadow, reg,
+ 				chip->shadow[reg]);
+ 		if (rc) {
++			/* A partial flush cannot establish a usable configuration.
++			 * Only a later successful explicit enable can recover it.
++			 */
++			chip->als_enabled = false;
+ 			dev_err(&chip->client->dev, "%s: err on reg 0x%02x\n",
+ 				__func__, reg);
+ 			break;
+@@ -744,11 +748,12 @@
+ 	} else {
+ 		chip->als_gain_auto = true;
+ 	}
+-	tsl2540_flush_als_regs(chip);
++	if (!rc)
++		rc = tsl2540_flush_als_regs(chip);
+ 
+ 	AMS_MUTEX_UNLOCK(&chip->lock);
+ 
+-	return rc ? -EIO : size;
++	return rc ? rc : size;
+ }
+ 
+ static DEVICE_ATTR(als_gain, S_IWUSR | S_IRUGO, tsl2540_als_gain_show,
+@@ -790,10 +795,10 @@
+ 	chip->shadow[TSL2540_REG_PERS] &= ~TSL2540_MASK_APERS;
+ 	chip->shadow[TSL2540_REG_PERS] |= ((u8)persist & TSL2540_MASK_APERS);
+ 
+-	tsl2540_flush_als_regs(chip);
++	rc = tsl2540_flush_als_regs(chip);
+ 
+ 	AMS_MUTEX_UNLOCK(&chip->lock);
+-	return size;
++	return rc ? rc : size;
+ }
+ 
+ static DEVICE_ATTR(als_persist, S_IWUSR | S_IRUGO, tsl2540_als_persist_show,
+@@ -829,11 +834,11 @@
+ 	chip->shadow[TSL2540_REG_ATIME] = (u8) itime;
+ 	chip->params.als_time = chip->shadow[TSL2540_REG_ATIME];
+ 	tsl2540_calc_cpl(chip);
+-	tsl2540_flush_als_regs(chip);
++	rc = tsl2540_flush_als_regs(chip);
+ 
+ 	AMS_MUTEX_UNLOCK(&chip->lock);
+ 
+-	return size;
++	return rc ? rc : size;
+ }
+ 
+ static DEVICE_ATTR(als_itime, S_IWUSR | S_IRUGO, tsl2540_als_itime_show,
+@@ -891,10 +896,10 @@
+ 	else
+ 		chip->shadow[TSL2540_REG_CFG0] &= ~TSL2540_MASK_WLONG;
+ 
+-	tsl2540_flush_als_regs(chip);
++	rc = tsl2540_flush_als_regs(chip);
+ 
+ 	AMS_MUTEX_UNLOCK(&chip->lock);
+-	return size;
++	return rc ? rc : size;
+ }
+ 
+ static DEVICE_ATTR(als_wtime, S_IWUSR | S_IRUGO, tsl2540_als_wtime_show,
+@@ -983,11 +988,11 @@
+ 
+ 	chip->shadow[TSL2540_REG_AZ_CONFIG] = (u8) iterations;
+ 	chip->params.az_iterations = chip->shadow[TSL2540_REG_AZ_CONFIG];
+-	tsl2540_flush_als_regs(chip);
++	rc = tsl2540_flush_als_regs(chip);
+ 
+ 	AMS_MUTEX_UNLOCK(&chip->lock);
+ 
+-	return size;
++	return rc ? rc : size;
+ }
+ 
+ static DEVICE_ATTR(als_az_iterations, S_IWUSR | S_IRUGO,

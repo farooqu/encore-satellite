@@ -1,0 +1,645 @@
+diff --git a/drivers/misc/ams_tsl2540.c b/drivers/misc/ams_tsl2540.c
+index f31e76a..8f93913 100644
+--- a/drivers/misc/ams_tsl2540.c
++++ b/drivers/misc/ams_tsl2540.c
+@@ -77,6 +77,8 @@ static int tsl2540_irq_handler(struct tsl2540_chip *chip)
+ 
+ 	ret = ams_i2c_read(chip->client, TSL2540_REG_STATUS,
+ 			&chip->shadow[TSL2540_REG_STATUS]);
++	if (ret != 1)
++		return 0;
+ 	status = chip->shadow[TSL2540_REG_STATUS];
+ 
+ 	if (status == 0)
+@@ -91,8 +93,8 @@ static int tsl2540_irq_handler(struct tsl2540_chip *chip)
+ 		 * ALS
+ 		 */
+ 		if (status & TSL2540_ST_ALS_IRQ) {
+-			tsl2540_read_als(chip);
+-			tsl2540_report_als(chip);
++			if (!tsl2540_read_als(chip))
++				tsl2540_report_als(chip);
+ 		}
+ 
+ 		/*
+@@ -112,6 +114,8 @@ static int tsl2540_irq_handler(struct tsl2540_chip *chip)
+ 
+ 		ret = ams_i2c_read(chip->client, TSL2540_REG_STATUS,
+ 				&chip->shadow[TSL2540_REG_STATUS]);
++		if (ret != 1)
++			break;
+ 		status = chip->shadow[TSL2540_REG_STATUS];
+ 	} while (status != 0);
+ 
+@@ -124,6 +128,7 @@ static irqreturn_t tsl2540_irq(int irq, void *handle)
+ 	struct device *dev = &chip->client->dev;
+ 	int ret;
+ 
++	AMS_MUTEX_LOCK(&chip->lock);
+ 	if (chip->in_suspend) {
+ 		dev_info(dev, "%s: in suspend\n", __func__);
+ 		chip->irq_pending = 1;
+@@ -133,6 +138,7 @@ static irqreturn_t tsl2540_irq(int irq, void *handle)
+ 	ret = tsl2540_irq_handler(chip);
+ 
+ bypass:
++	AMS_MUTEX_UNLOCK(&chip->lock);
+ 	return ret ? IRQ_HANDLED : IRQ_NONE;
+ }
+ #endif /* TSL2540_ENABLE_INTERRUPT */
+@@ -143,6 +149,7 @@ static int tsl2540_flush_regs(struct tsl2540_chip *chip)
+ 	int rc;
+ 	u8 reg;
+ 
++	chip->measurement_ready_ns = 0;
+ 	for (i = 0; i < ARRAY_SIZE(restorable_regs); i++) {
+ 		reg = restorable_regs[i];
+ 		rc = ams_i2c_write(chip->client, chip->shadow, reg,
+@@ -159,6 +166,7 @@ static int tsl2540_flush_regs(struct tsl2540_chip *chip)
+ 
+ static int tsl2540_update_enable_reg(struct tsl2540_chip *chip)
+ {
++	chip->measurement_ready_ns = 0;
+ 	return ams_i2c_write(chip->client, chip->shadow, TSL2540_REG_ENABLE,
+ 			chip->shadow[TSL2540_REG_ENABLE]);
+ }
+@@ -167,6 +175,7 @@ static int tsl2540_pltf_power_on(struct tsl2540_chip *chip)
+ {
+ 	int rc = 0;
+ 
++	chip->measurement_ready_ns = 0;
+ 	if (chip->pdata->platform_power) {
+ 		rc = chip->pdata->platform_power(&chip->client->dev,
+ 			POWER_ON);
+@@ -182,6 +191,7 @@ static int tsl2540_pltf_power_off(struct tsl2540_chip *chip)
+ {
+ 	int rc = 0;
+ 
++	chip->measurement_ready_ns = 0;
+ 	if (chip->pdata->platform_power) {
+ 		rc = chip->pdata->platform_power(&chip->client->dev,
+ 			POWER_OFF);
+@@ -362,6 +372,7 @@ static ssize_t tsl2540_reg_set(struct device *dev,
+ 		return -EINVAL;
+ 
+ 	AMS_MUTEX_LOCK(&chip->lock);
++	chip->measurement_ready_ns = 0;
+ 
+ 	if (pmask == -1) {
+ 		rc = ams_i2c_write(chip->client, chip->shadow, preg, pval);
+@@ -807,11 +818,14 @@ bypass_als_idev:
+ #endif /* TSL2540_ENABLE_INTERRUPT */
+ 
+ 	/* Power up device */
++	AMS_MUTEX_LOCK(&chip->lock);
+ 	ams_i2c_write(chip->client, chip->shadow, TSL2540_REG_ENABLE, 0x01);
+ 
+ 	tsl2540_update_enable_reg(chip);
+ 
+ 	tsl2540_setup(chip);
++	chip->measurement_initialized = true;
++	AMS_MUTEX_UNLOCK(&chip->lock);
+ 
+ 	dev_info(dev, "Probe ok.\n");
+ 	return 0;
+@@ -874,6 +888,7 @@ static int tsl2540_suspend(struct device *dev)
+ 	dev_info(dev, "%s\n", __func__);
+ 	AMS_MUTEX_LOCK(&chip->lock);
+ 	chip->in_suspend = 1;
++	chip->measurement_ready_ns = 0;
+ 
+ 	if (chip->wake_irq) {
+ 		irq_set_irq_wake(chip->client->irq, 1);
+diff --git a/drivers/misc/ams_tsl2540_als.c b/drivers/misc/ams_tsl2540_als.c
+index 00bfa0e..63ff4bf 100644
+--- a/drivers/misc/ams_tsl2540_als.c
++++ b/drivers/misc/ams_tsl2540_als.c
+@@ -25,6 +25,8 @@
+ #include <linux/input.h>
+ #include <linux/i2c.h>
+ #include <linux/slab.h>
++#include <linux/math64.h>
++#include <linux/ktime.h>
+ 
+ #include <linux/i2c/ams_tsl2540.h>
+ #include "ams_i2c.h"
+@@ -59,6 +61,7 @@ static int tsl2540_flush_als_regs(struct tsl2540_chip *chip)
+ 	int rc;
+ 	u8 reg;
+ 
++	chip->measurement_ready_ns = 0;
+ 	for (i = 0; i < ARRAY_SIZE(restorable_als_regs); i++) {
+ 		reg = restorable_als_regs[i];
+ 		rc = ams_i2c_write(chip->client, chip->shadow, reg,
+@@ -76,19 +79,19 @@ static int tsl2540_flush_als_regs(struct tsl2540_chip *chip)
+ int tsl2540_read_als(struct tsl2540_chip *chip)
+ {
+ 	int ret;
++	u8 data[4];
+ 
+ 	ret = ams_i2c_blk_read(chip->client, TSL2540_REG_CH0DATA,
+-			&chip->shadow[TSL2540_REG_CH0DATA], 4 * sizeof(u8));
+-
+-	if (ret >= 0) {
+-		chip->als_inf.als_ch0 = le16_to_cpu(
+-			*((const __le16 *) &chip->shadow[TSL2540_REG_CH0DATA]));
+-		chip->als_inf.als_ch1 = le16_to_cpu(
+-			*((const __le16 *) &chip->shadow[TSL2540_REG_CH1DATA]));
+-		ret = 0;
+-	}
+-
+-	return ret;
++			data, sizeof(data));
++	if (ret < 0)
++		return ret;
++	if (ret != sizeof(data))
++		return -EIO;
++
++	memcpy(&chip->shadow[TSL2540_REG_CH0DATA], data, sizeof(data));
++	chip->als_inf.als_ch0 = data[0] | ((u16)data[1] << 8);
++	chip->als_inf.als_ch1 = data[2] | ((u16)data[3] << 8);
++	return 0;
+ }
+ 
+ static void tsl2540_calc_lux_coef(struct tsl2540_chip *chip)
+@@ -103,7 +106,7 @@ static void tsl2540_calc_lux_coef(struct tsl2540_chip *chip)
+ 
+ static void tsl2540_calc_cpl(struct tsl2540_chip *chip)
+ {
+-	u32 cpl;
++	u64 cpl;
+ 	u32 sat;
+ 	u8 atime;
+ 
+@@ -119,12 +122,15 @@ static void tsl2540_calc_cpl(struct tsl2540_chip *chip)
+ 		cpl = cpl >> 1;
+ 
+ 	if (chip->params.d_factor > 0)
+-		cpl /= chip->params.d_factor;
++		cpl = div_u64(cpl, chip->params.d_factor);
++	else
++		cpl = 0;
+ 
+ 	sat = min_t(u32, TSL2540_MAX_ALS_VALUE, (u32) atime << 10);
+ 	sat = sat * 8 / 10;
+ 
+-	chip->als_inf.cpl = cpl * 1000;
++	cpl *= 1000;
++	chip->als_inf.cpl = cpl > (u32)~0U ? 0 : (u32)cpl;
+ 	chip->als_inf.saturation = sat;
+ }
+ 
+@@ -132,7 +138,11 @@ int tsl2540_configure_als_mode(struct tsl2540_chip *chip, u8 state)
+ {
+ 	struct i2c_client *client = chip->client;
+ 	u8 *sh = chip->shadow;
++	int rc;
+ 
++	/* Caller holds chip->lock (including probe). */
++	chip->measurement_ready_ns = 0;
++	chip->als_enabled = false;
+ 	 /* Turning on ALS */
+ 	if (state) {
+ 		tsl2540_calc_lux_coef(chip);
+@@ -144,30 +154,39 @@ int tsl2540_configure_als_mode(struct tsl2540_chip *chip, u8 state)
+ 		chip->shadow[TSL2540_REG_PERS] &= (~TSL2540_MASK_APERS);
+ 		chip->shadow[TSL2540_REG_PERS] |= 0x02;
+ 
+-		tsl2540_flush_als_regs(chip);
++		rc = tsl2540_flush_als_regs(chip);
++		if (rc)
++			return rc;
+ 
+ #ifdef TSL2540_ENABLE_INTERRUPT
+-		ams_i2c_modify(client, sh, TSL2540_REG_INTENAB,
+-				TSL2540_AIEN, TSL2540_AIEN);
++		rc = ams_i2c_write(client, sh, TSL2540_REG_INTENAB,
++			sh[TSL2540_REG_INTENAB] | TSL2540_AIEN);
++		if (rc)
++			return rc;
+ #endif /* TSL2540_ENABLE_INTERRUPT */
+-		ams_i2c_modify(client, sh, TSL2540_REG_ENABLE,
+-				TSL2540_WEN | TSL2540_AEN | TSL2540_PON,
+-				TSL2540_WEN | TSL2540_AEN | TSL2540_PON);
++		rc = ams_i2c_write(client, sh, TSL2540_REG_ENABLE,
++			sh[TSL2540_REG_ENABLE] | TSL2540_WEN |
++			TSL2540_AEN | TSL2540_PON);
++		if (rc)
++			return rc;
+ 		chip->als_enabled = true;
+ 	} else {
+ 		/* Disable ALS, Wait and ALS Interrupt */
+ #ifdef TSL2540_ENABLE_INTERRUPT
+-		ams_i2c_modify(client, sh, TSL2540_REG_INTENAB,
+-				TSL2540_AIEN, 0);
++		rc = ams_i2c_write(client, sh, TSL2540_REG_INTENAB,
++			sh[TSL2540_REG_INTENAB] & ~TSL2540_AIEN);
++		if (rc)
++			return rc;
+ #endif /* TSL2540_ENABLE_INTERRUPT */
+-		ams_i2c_modify(client, sh, TSL2540_REG_ENABLE,
+-				TSL2540_WEN | TSL2540_AEN, 0);
+-		chip->als_enabled = false;
++		rc = ams_i2c_write(client, sh, TSL2540_REG_ENABLE,
++			sh[TSL2540_REG_ENABLE] & ~(TSL2540_WEN | TSL2540_AEN));
++		if (rc)
++			return rc;
+ 
+ 		/* If nothing else is enabled set PON = 0; */
+ 		if (!(sh[TSL2540_REG_ENABLE] & TSL2540_EN_ALL))
+-			ams_i2c_modify(client, sh, TSL2540_REG_ENABLE,
+-			TSL2540_PON, 0);
++			return ams_i2c_write(client, sh, TSL2540_REG_ENABLE,
++				sh[TSL2540_REG_ENABLE] & ~TSL2540_PON);
+ 	}
+ 
+ 	return 0;
+@@ -176,6 +195,7 @@ int tsl2540_configure_als_mode(struct tsl2540_chip *chip, u8 state)
+ static int tsl2540_set_als_gain(struct tsl2540_chip *chip, int gain)
+ {
+ 	int rc;
++	int restore_rc;
+ 	u8 ctrl_reg;
+ 	u8 saved_enable;
+ 
+@@ -203,12 +223,21 @@ static int tsl2540_set_als_gain(struct tsl2540_chip *chip, int gain)
+ 	 * effect at start of new integration cycle.
+ 	 * New ALS gain value will then be used in next lux calculation.
+ 	 */
+-	ams_i2c_read(chip->client, TSL2540_REG_ENABLE, &saved_enable);
+-	ams_i2c_write(chip->client, chip->shadow, TSL2540_REG_ENABLE, 0);
+-	rc = ams_i2c_modify(chip->client, chip->shadow, TSL2540_REG_CFG1,
+-			TSL2540_MASK_AGAIN, ctrl_reg);
+-	ams_i2c_write(chip->client, chip->shadow, TSL2540_REG_ENABLE,
++	chip->measurement_ready_ns = 0;
++	rc = ams_i2c_read(chip->client, TSL2540_REG_ENABLE, &saved_enable);
++	if (rc != 1)
++		return rc < 0 ? rc : -EIO;
++	rc = ams_i2c_write(chip->client, chip->shadow, TSL2540_REG_ENABLE, 0);
++	if (rc)
++		goto failed;
++	rc = ams_i2c_write(chip->client, chip->shadow, TSL2540_REG_CFG1,
++		(chip->shadow[TSL2540_REG_CFG1] & ~TSL2540_MASK_AGAIN) | ctrl_reg);
++	restore_rc = ams_i2c_write(chip->client, chip->shadow, TSL2540_REG_ENABLE,
+ 			saved_enable);
++	if (!rc)
++		rc = restore_rc;
++	if (rc)
++		goto failed;
+ 
+ 	if (rc >= 0) {
+ 		chip->params.als_gain = chip->shadow[TSL2540_REG_CFG1];
+@@ -216,6 +245,9 @@ static int tsl2540_set_als_gain(struct tsl2540_chip *chip, int gain)
+ 				__func__, ctrl_reg);
+ 	}
+ 
++	return rc;
++failed:
++	chip->als_enabled = false;
+ 	return rc;
+ }
+ 
+@@ -269,20 +301,23 @@ static int tsl2540_max_als_value(struct tsl2540_chip *chip)
+ 	return val;
+ }
+ 
+-int tsl2540_get_lux(struct tsl2540_chip *chip)
++static int tsl2540_calculate_lux(struct tsl2540_chip *chip)
+ {
+-	long ch0;
+-	long ch1;
+-	long coef_b;
+-	long coef_c;
+-	long coef_d;
+-	int lux1;
+-	int lux2;
+-	int lux;
++	s64 ch0;
++	s64 ch1;
++	s64 coef_b;
++	s64 coef_c;
++	s64 coef_d;
++	s64 lux1;
++	s64 lux2;
++	s64 lux;
+ #ifdef CONFIG_AMS_ADJUST_WITH_BASELINE
+ 	struct tsl2540_i2c_platform_data *pdata = chip->pdata;
+ #endif
+ 
++	if (!chip->als_inf.cpl)
++		return -ERANGE;
++
+ 	ch0 = chip->als_inf.als_ch0;
+ 	ch1 = chip->als_inf.als_ch1;
+ 	coef_b = chip->params.lux_segment[0].ch1_coef;
+@@ -290,6 +325,8 @@ int tsl2540_get_lux(struct tsl2540_chip *chip)
+ 	coef_d = chip->params.lux_segment[1].ch1_coef;
+ 
+ #ifdef CONFIG_AMS_ADJUST_WITH_BASELINE
++	if (pdata->lux0_ch0 < 0 || pdata->lux0_ch1 < 0)
++		return -ERANGE;
+ 	ch0 -= pdata->lux0_ch0;
+ 	if (ch0 < 0)
+ 		ch0 = 0;
+@@ -309,12 +346,12 @@ int tsl2540_get_lux(struct tsl2540_chip *chip)
+ 	 *    coef_d = .27
+ 	 */
+ 
+-	lux1 = 1000 * ((1000 * ch0 - (coef_b * ch1))) /
+-		(long)chip->als_inf.cpl;
+-	lux2 = 1000 * ((coef_c * ch0 - (coef_d * ch1))) /
+-		(long)chip->als_inf.cpl;
++	lux1 = div64_s64(1000 * (1000 * ch0 - coef_b * ch1),
++		chip->als_inf.cpl);
++	lux2 = div64_s64(1000 * (coef_c * ch0 - coef_d * ch1),
++		chip->als_inf.cpl);
+ 	lux = max(lux1, lux2);
+-	lux = min(TSL2540_MAX_LUX, max(0, lux));
++	lux = min_t(s64, TSL2540_MAX_LUX, max_t(s64, 0, lux));
+ 
+ #ifdef LUX_DBG
+ 	dev_info(&chip->client->dev,
+@@ -332,13 +369,18 @@ int tsl2540_get_lux(struct tsl2540_chip *chip)
+ 			INTEGRATION_CYCLE, chip->als_inf.saturation);
+ #endif /* #ifdef LUX_DBG */
+ 
+-	if (lux < 0) {
+-		dev_info(&chip->client->dev,
+-				"%s: lux < 0 use prev.\n", __func__);
+-		return chip->als_inf.lux; /* use previous value */
+-	}
+-
+ 	chip->als_inf.lux = lux;
++	return 0;
++}
++
++/* Legacy interrupt reporting may adjust gain; measurement reads never do. */
++int tsl2540_get_lux(struct tsl2540_chip *chip)
++{
++	int ch0 = chip->als_inf.als_ch0;
++	int rc = tsl2540_calculate_lux(chip);
++
++	if (rc)
++		return rc;
+ 
+ 	if (!chip->als_gain_auto) {
+ 		if (ch0 <= TSL2540_MIN_ALS_VALUE) {
+@@ -430,23 +472,120 @@ void tsl2540_report_als(struct tsl2540_chip *chip)
+  * ABI Functions
+  */
+ 
++/* Caller holds lock. This is a bus acquisition, not an ADC-ready indication. */
++static int tsl2540_acquire_measurement(struct tsl2540_chip *chip,
++	u64 *start_ns, u64 *end_ns)
++{
++	static const u8 config_regs[] = {
++		TSL2540_REG_ENABLE, TSL2540_REG_ATIME, TSL2540_REG_WTIME,
++		TSL2540_REG_CFG0, TSL2540_REG_CFG1, TSL2540_REG_CFG2,
++		TSL2540_REG_AZ_CONFIG,
++	};
++	u64 settle_us;
++	u8 value;
++	int rc;
++	unsigned int i;
++
++	if (!chip->measurement_initialized || chip->in_suspend ||
++		chip->unpowered || !chip->als_enabled)
++		return -EAGAIN;
++	/* Do not race an integration using the previous automatic gain. */
++	if (chip->als_gain_auto)
++		return -EBUSY;
++
++	for (i = 0; i < ARRAY_SIZE(config_regs); i++) {
++		rc = ams_i2c_read(chip->client, config_regs[i], &value);
++		if (rc != 1) {
++			chip->measurement_ready_ns = 0;
++			return rc < 0 ? rc : -EIO;
++		}
++		if (value != chip->shadow[config_regs[i]]) {
++			chip->measurement_ready_ns = 0;
++			return -EIO;
++		}
++	}
++	if ((chip->shadow[TSL2540_REG_ENABLE] & (TSL2540_PON | TSL2540_AEN))
++		!= (TSL2540_PON | TSL2540_AEN))
++		return -EAGAIN;
++	/* SAI can leave the ADC asleep with PON still reading as one. */
++	rc = ams_i2c_read(chip->client, TSL2540_REG_CFG3, &value);
++	if (rc != 1)
++		return rc < 0 ? rc : -EIO;
++	if (value & 0x10)
++		return -EOPNOTSUPP;
++
++	tsl2540_calc_cpl(chip);
++	if (!chip->als_inf.cpl)
++		return -ERANGE;
++
++	/*
++	 * Discard the first observation after any configuration write. Allow two
++	 * nominal cycles at the datasheet's maximum 2.90ms integration step.
++	 * This minimum holdoff is NOT proof of ADC progress or an autozero bound.
++	 */
++	if (!chip->measurement_ready_ns) {
++		settle_us = (chip->shadow[TSL2540_REG_ATIME] + 1) * 2900ULL;
++		if (chip->shadow[TSL2540_REG_ENABLE] & TSL2540_WEN)
++			settle_us += (chip->shadow[TSL2540_REG_WTIME] + 1) *
++				2900ULL * ((chip->shadow[TSL2540_REG_CFG0] &
++				TSL2540_MASK_WLONG) ? 12 : 1);
++		chip->measurement_ready_ns = ktime_get_ns() + settle_us * 2000;
++		return -EAGAIN;
++	}
++	if (ktime_get_ns() < chip->measurement_ready_ns)
++		return -EAGAIN;
++
++	*start_ns = ktime_get_ns();
++	rc = tsl2540_read_als(chip);
++	if (rc)
++		return rc;
++	rc = tsl2540_calculate_lux(chip);
++	if (rc)
++		return rc;
++	*end_ns = ktime_get_ns();
++	chip->measurement_sequence++;
++	return 0;
++}
++
+ static ssize_t tsl2540_device_als_lux(struct device *dev,
+ 	struct device_attribute *attr, char *buf)
+ {
+ 	struct tsl2540_chip *chip = dev_get_drvdata(dev);
++	u64 start_ns, end_ns;
++	int rc;
+ 
+ 	AMS_MUTEX_LOCK(&chip->lock);
+-
+-	tsl2540_read_als(chip);
+-	tsl2540_get_lux(chip);
+-
++	rc = tsl2540_acquire_measurement(chip, &start_ns, &end_ns);
++	if (!rc)
++		rc = snprintf(buf, PAGE_SIZE, "%u\n", chip->als_inf.lux);
+ 	AMS_MUTEX_UNLOCK(&chip->lock);
+ 
+-	return snprintf(buf, PAGE_SIZE, "%d\n", chip->als_inf.lux);
++	return rc;
+ }
+ 
+ static DEVICE_ATTR(als_lux, S_IRUGO, tsl2540_device_als_lux, NULL);
+ 
++static ssize_t tsl2540_measurement_show(struct device *dev,
++	struct device_attribute *attr, char *buf)
++{
++	struct tsl2540_chip *chip = dev_get_drvdata(dev);
++	u64 start_ns, end_ns;
++	int rc;
++
++	AMS_MUTEX_LOCK(&chip->lock);
++	rc = tsl2540_acquire_measurement(chip, &start_ns, &end_ns);
++	if (!rc)
++		rc = snprintf(buf, PAGE_SIZE, "1 %llu %llu %llu %u %u %u\n",
++			(unsigned long long)chip->measurement_sequence,
++			(unsigned long long)start_ns, (unsigned long long)end_ns,
++			chip->als_inf.lux, chip->als_inf.als_ch0,
++			chip->als_inf.als_ch1);
++	AMS_MUTEX_UNLOCK(&chip->lock);
++	return rc;
++}
++
++static DEVICE_ATTR(als_measurement, S_IRUGO, tsl2540_measurement_show, NULL);
++
+ static ssize_t tsl2540_lux_table_show(struct device *dev,
+ 	struct device_attribute *attr, char *buf)
+ {
+@@ -508,16 +647,16 @@ static ssize_t tsl2540_als_enable_store(struct device *dev,
+ {
+ 	struct tsl2540_chip *chip = dev_get_drvdata(dev);
+ 	bool value;
++	int rc;
+ 
+ 	if (strtobool(buf, &value))
+ 		return -EINVAL;
+ 
+-	if (value)
+-		tsl2540_configure_als_mode(chip, 1);
+-	else
+-		tsl2540_configure_als_mode(chip, 0);
++	AMS_MUTEX_LOCK(&chip->lock);
++	rc = tsl2540_configure_als_mode(chip, value);
++	AMS_MUTEX_UNLOCK(&chip->lock);
+ 
+-	return size;
++	return rc ? rc : size;
+ }
+ 
+ static DEVICE_ATTR(als_power_state, S_IWUSR | S_IRUGO, tsl2540_als_enable_show,
+@@ -542,10 +681,13 @@ static ssize_t tsl2540_auto_gain_enable_store(struct device *dev,
+ 	if (strtobool(buf, &value))
+ 		return -EINVAL;
+ 
++	AMS_MUTEX_LOCK(&chip->lock);
++	chip->measurement_ready_ns = 0;
+ 	if (value)
+ 		chip->als_gain_auto = true;
+ 	else
+ 		chip->als_gain_auto = false;
++	AMS_MUTEX_UNLOCK(&chip->lock);
+ 
+ 	return size;
+ }
+@@ -791,10 +933,12 @@ static ssize_t tsl2540_als_ch0_show(struct device *dev,
+ 	struct device_attribute *attr, char *buf)
+ {
+ 	struct tsl2540_chip *chip = dev_get_drvdata(dev);
++	int rc;
+ 
+-	tsl2540_get_lux(chip);
+-
+-	return snprintf(buf, PAGE_SIZE, "%d\n", chip->als_inf.als_ch0);
++	AMS_MUTEX_LOCK(&chip->lock);
++	rc = snprintf(buf, PAGE_SIZE, "%u\n", chip->als_inf.als_ch0);
++	AMS_MUTEX_UNLOCK(&chip->lock);
++	return rc;
+ }
+ 
+ static DEVICE_ATTR(als_ch0, S_IRUGO, tsl2540_als_ch0_show, NULL);
+@@ -803,10 +947,12 @@ static ssize_t tsl2540_als_ch1_show(struct device *dev,
+ 	struct device_attribute *attr, char *buf)
+ {
+ 	struct tsl2540_chip *chip = dev_get_drvdata(dev);
++	int rc;
+ 
+-	tsl2540_get_lux(chip);
+-
+-	return snprintf(buf, PAGE_SIZE, "%d\n", chip->als_inf.als_ch1);
++	AMS_MUTEX_LOCK(&chip->lock);
++	rc = snprintf(buf, PAGE_SIZE, "%u\n", chip->als_inf.als_ch1);
++	AMS_MUTEX_UNLOCK(&chip->lock);
++	return rc;
+ }
+ 
+ static DEVICE_ATTR(als_ch1, S_IRUGO, tsl2540_als_ch1_show, NULL);
+@@ -892,27 +1038,31 @@ static ssize_t als_calibrated_lux_show(struct device *dev,
+ {
+ 	struct tsl2540_chip *chip = dev_get_drvdata(dev);
+ 	struct tsl2540_i2c_platform_data *pdata = chip->pdata;
+-	int coeff = pdata->lux400_lux;
+-	int lux = 0;
++	u64 start_ns, end_ns;
++	int rc;
+ 	int calibrated_lux = 0;
+ 
+ 	AMS_MUTEX_LOCK(&chip->lock);
+ 
+-	tsl2540_read_als(chip);
+-	tsl2540_get_lux(chip);
+-
+-	AMS_MUTEX_UNLOCK(&chip->lock);
+-
+-	lux = chip->als_inf.lux;
++	if (pdata->lux400_lux <= 0) {
++		rc = -ERANGE;
++		goto out;
++	}
++	rc = tsl2540_acquire_measurement(chip, &start_ns, &end_ns);
++	if (rc)
++		goto out;
+ 
+-	calibrated_lux = ALS_MAX_LUX * lux / coeff;
++	calibrated_lux = ALS_MAX_LUX * chip->als_inf.lux / pdata->lux400_lux;
+ 
+ 	if (calibrated_lux > ALS_MAX_LUX)
+ 		calibrated_lux = ALS_MAX_LUX;
+ 
+ 	if (calibrated_lux < ALS_MIN_LUX)
+ 		calibrated_lux = ALS_MIN_LUX;
+-	return snprintf(buf, PAGE_SIZE, "%d\n", calibrated_lux);
++	rc = snprintf(buf, PAGE_SIZE, "%d\n", calibrated_lux);
++out:
++	AMS_MUTEX_UNLOCK(&chip->lock);
++	return rc;
+ }
+ 
+ static DEVICE_ATTR(als_calibrated_lux, S_IRUGO, als_calibrated_lux_show, NULL);
+@@ -922,6 +1072,7 @@ static struct attribute *tsl2540_als_attributes[] = {
+ 	&dev_attr_als_itime.attr,
+ 	&dev_attr_als_wtime.attr,
+ 	&dev_attr_als_lux.attr,
++	&dev_attr_als_measurement.attr,
+ 	&dev_attr_als_gain.attr,
+ 	&dev_attr_als_az_iterations.attr,
+ 	&dev_attr_als_cpl.attr,
+diff --git a/include/linux/i2c/ams_tsl2540.h b/include/linux/i2c/ams_tsl2540.h
+index 5562573..d63a06d 100644
+--- a/include/linux/i2c/ams_tsl2540.h
++++ b/include/linux/i2c/ams_tsl2540.h
+@@ -234,6 +234,10 @@ struct tsl2540_chip {
+ 	bool unpowered;
+ 	bool als_enabled;
+ 	bool als_gain_auto;
++	/* Protected by lock; readiness is invalidated before configuration writes. */
++	bool measurement_initialized;
++	u64 measurement_ready_ns;
++	u64 measurement_sequence;
+ 	bool prx_enabled;
+ 	bool amscalcomplete;
+ 	bool amsindoormode;
