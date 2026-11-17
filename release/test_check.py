@@ -16,8 +16,9 @@ class InventoryTests(unittest.TestCase):
     def setUp(self):
         self.registry = json.loads((check.ROOT / "release/targets.json").read_text())
 
-    def test_actual_foundation(self):
+    def test_actual_inventory(self):
         check.validate(self.registry)
+        check.validate_ledger(json.loads((check.ROOT / "release/ledger.json").read_text()), self.registry)
         self.assertEqual({t["id"] for t in self.registry["targets"]},
                          {"biscuit", "android-generic", "lab-linux-amd64"})
 
@@ -34,7 +35,7 @@ class InventoryTests(unittest.TestCase):
 
     def test_rejects_premature_releases_and_incomplete_dependencies(self):
         for field, value in (("release_supported", True), ("release_supported", 0),
-                             ("package_revision", 1), ("package_revision", False),
+                             ("package_revision", 0), ("package_revision", False),
                              ("status", "supported"), ("build", "make fake-package"),
                              ("depends_on", []), ("depends_on", ["devices/biscuit/"]),
                              ("depends_on", ["platforms/linux/", "../escape/"])):
@@ -53,6 +54,53 @@ class InventoryTests(unittest.TestCase):
             mutate(registry)
             with self.assertRaises(ValueError):
                 check.validate(registry)
+
+
+class LedgerTests(unittest.TestCase):
+    def setUp(self):
+        self.registry = json.loads((check.ROOT / "release/targets.json").read_text())
+        self.ledger = json.loads((check.ROOT / "release/ledger.json").read_text())
+
+    def test_append_reserves_each_target_independently(self):
+        previous = copy.deepcopy(self.ledger)
+        record = copy.deepcopy(self.ledger["reservations"][-1])
+        record.update(id="next-biscuit-package", revisions={"biscuit": 19})
+        self.ledger["reservations"].append(record)
+        self.registry["targets"][1]["package_revision"] = 19
+        check.validate_ledger(self.ledger, self.registry, previous)
+        for revision in (18, 17, 0, True):
+            with self.subTest(revision=revision):
+                record["revisions"]["biscuit"] = revision
+                self.registry["targets"][1]["package_revision"] = revision
+                with self.assertRaises(ValueError):
+                    check.validate_ledger(self.ledger, self.registry, previous)
+
+    def test_reservation_scope_and_inventory_must_agree(self):
+        for field, value in (("channel", "stable"), ("channel", "beta"),
+                             ("backend", "assist"), ("core_version", "0.1.0-dev.0"),
+                             ("revisions", {"biscuit": 16}),
+                             ("revisions", {"android-generic": 2100000001, "biscuit": 16}),
+                             ("revisions", {"unknown": 1})):
+            with self.subTest(field=field, value=value):
+                ledger = copy.deepcopy(self.ledger)
+                ledger["reservations"][0][field] = value
+                with self.assertRaises(ValueError):
+                    check.validate_ledger(ledger, self.registry)
+        # A non-prerelease can be reserved for stable; no feed is published.
+        self.registry["core_version"] = "0.1.1"
+        self.ledger["reservations"][0].update(core_version="0.1.1", channel="stable")
+        self.ledger["reservations"][-1]["core_version"] = "0.1.1"
+        check.validate_ledger(self.ledger, self.registry)
+
+    def test_existing_reservations_and_floors_cannot_be_rewritten(self):
+        previous = copy.deepcopy(self.ledger)
+        self.ledger["reservations"][0]["id"] = "renamed-old-reservation"
+        with self.assertRaisesRegex(ValueError, "immutable"):
+            check.validate_ledger(self.ledger, self.registry, previous)
+        self.ledger = copy.deepcopy(previous)
+        self.ledger["retired_revisions"]["biscuit"] = 14
+        with self.assertRaisesRegex(ValueError, "immutable"):
+            check.validate_ledger(self.ledger, self.registry, previous)
 
 
 class ImpactTests(unittest.TestCase):
@@ -111,7 +159,7 @@ class GitCLITests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=backup) as directory:
             root = Path(directory)
             (root / "release").mkdir()
-            for name in ("check.py", "targets.json"):
+            for name in ("check.py", "targets.json", "ledger.json"):
                 shutil.copy(check.ROOT / "release" / name, root / "release" / name)
 
             def git(*args):
@@ -152,6 +200,14 @@ class GitCLITests(unittest.TestCase):
                                  ["android-generic", "biscuit", "lab-linux-amd64"])
                 self.assertTrue(result["lab_check"])
                 self.assertEqual(result["unknown_paths"], ["<unavailable diff>"])
+            ledger_path = root / "release/ledger.json"
+            ledger = json.loads(ledger_path.read_text())
+            ledger["reservations"][0]["id"] = "rewritten-history"
+            ledger_path.write_text(json.dumps(ledger))
+            rejected = subprocess.run([sys.executable, str(root / "release/check.py"),
+                                       "--base", base], capture_output=True, text=True)
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("immutable", rejected.stderr)
 
 
 if __name__ == "__main__":

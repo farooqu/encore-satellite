@@ -111,8 +111,8 @@ My planned home setup includes multiple units and variations of:
 
 These are the devices I intend to use, not a tested compatibility list.
 
-The [device profiles](docs/device-packages/README.md) remain planned release
-metadata, not compatibility claims. The Dot's development builder is separate
+The [device profiles](docs/device-packages/README.md) record experimental release
+preparation, not compatibility claims. The Dot's development builder is separate
 from supported releases; Android has a development APK, with the Tab A7 Lite as
 its intended first validation tablet.
 

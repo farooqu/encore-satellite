@@ -1,0 +1,62 @@
+Encore Biscuit audio FPGA provenance and redistribution decision
+Decision date: 2026-11-17
+Approved by: project owner Umer (@umerfarooq)
+
+Component: i2s_to_spi_v34.bin
+Purpose: configure the microphone audio FPGA used by the Linux SPI capture driver.
+Size: 30964 bytes
+SHA-256: 77a558bacdaaf9e343f02f2d74f27a5f2bb2dc8b6d66cc2499b60ed14ef62fe6
+Git blob SHA-1: a6eafb423215f1317df7af97822cc20858a8ae46
+License: NOASSERTION
+Decision: documented good-faith redistribution exception for this exact binary.
+Scope: Encore Biscuit development and production distributions, including their
+kernel/images and matching source kits. This is not limited to the dev channel.
+
+Origin
+------
+Amazon Echo Dot (2nd Generation) source archive:
+https://fireos-audio-src.s3.amazonaws.com/dMUQiRDxI3hFuRDaF0WTumrp71/Echo_Dot_src-6.5.7.1-20251024.tar.bz2
+Archive SHA-256:
+2f6b7eed8c09cecf7633f01909c6a4085bef691c29ed0d106c75e7b48c7b4721
+Member: platform.tar :: kernel/mediatek/mt8163/3.18_hl/firmware/i2s_to_spi_v34.bin
+The kernel embeds it through CONFIG_EXTRA_FIRMWARE; the source kit includes it.
+
+Known evidence and uncertainty
+------------------------------
+No firmware-specific license grant or preferred source for modifying this FPGA
+program was established in the inspected original archive/notices. The archive's
+Linux GPL notices do not unambiguously identify the separately loaded FPGA
+program as covered. NOASSERTION records that uncertainty; it does not mean MIT,
+GPL, public domain, a newly granted permission, or a finding of infringement.
+If source-disclosure obligations apply, this decision does not waive them.
+
+Techo5 Dot v1.0.71, LibreEcho Biscuit v0.14.6 and Kiosk Satellite Biscuit
+LineageOS 2026.11.4 were downloaded and their decompressed kernels checked:
+each contains the exact binary identified above. LibreEcho explicitly records
+its own good-faith decision and unresolved license rather than asserting GPL:
+https://github.com/aslater3/LibreEcho/blob/9e5b7165a5f137a91d353abdec8af4eaac0dc5f2/release/FPGA-PROVENANCE.md
+https://github.com/HuskerMinion/techo5-dot/releases/tag/dot-v1.0.71
+https://github.com/aslater3/LibreEcho/releases/tag/radar-puffin-v0.14.6
+https://github.com/jxlarrea/lineageos-echo-kiosk-satellite/releases/tag/biscuit-2026.11.4
+Community practice is evidence of precedent, not an independent license grant.
+
+Owner decision and limits
+-------------------------
+The project owner accepts the unresolved redistribution/source-compliance risk
+for the unchanged hash-pinned binary, following this documented precedent, for
+both dev and production releases. This is a project release-policy exception,
+not legal clearance and not a claim of rights beyond any applicable license.
+Decision record: https://ampcode.com/threads/T-01a1e785-14fb-7097-bd5e-409d3e48ae0f
+
+Preserve this record and all existing notices with distributed kernel/images
+and corresponding source. A retained immutable source kit predating the decision
+must not be rewritten or relabeled; provide this record alongside it instead.
+Re-review the exception if the firmware bytes, provenance, use or licensing
+evidence change. Retain immutable release records and a withdrawal/replacement
+path if authoritative rights information requires action.
+
+This exception does not cover other proprietary firmware, vendor images,
+Amazon wake-word engines/models, or a replacement FPGA program. It does not
+waive any other notice/source/signing requirements, authorize publication or
+automatic CI artifact uploads, establish stable support/hardware qualification,
+or authorize installation, flashing or device changes.

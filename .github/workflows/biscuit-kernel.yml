@@ -50,7 +50,8 @@ jobs:
           # Checkout's container action and this shell can use different HOME paths.
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           make biscuit-kernel
-      # Do not upload the kernel or source kit while the embedded audio FPGA
-      # firmware's redistribution terms remain unresolved; see KERNEL-SOURCE.md.
+      # The exact FPGA has an owner-approved dev/production policy exception,
+      # not legal clearance or publication approval; see FPGA-PROVENANCE.txt.
+      # Keep kernel/source-kit uploads disabled pending concrete approval.
       # Building and verifying these inputs is separate from distributing them.
       # No release publication, signing, flashing or hardware qualification.

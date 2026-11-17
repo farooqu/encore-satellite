@@ -1,4 +1,4 @@
-"""Validate the foundation inventory and select conservative CI impact (stdlib only).
+"""Validate release reservations and select conservative CI impact (stdlib only).
 
 No build commands, updates, signatures or publication are executed here.
 """
@@ -34,7 +34,7 @@ def path_is_safe(value):
 
 
 def validate(registry):
-    """This intentionally validates only the unreleased foundation contract."""
+    """Experimental reservations do not enable automatic release builders."""
     if type(registry.get("schema")) is not int or registry["schema"] != 1:
         raise ValueError("expected inventory schema 1")
     if not isinstance(registry.get("core_version"), str) or not SEMVER.fullmatch(registry["core_version"]):
@@ -53,21 +53,23 @@ def validate(registry):
         platform = target.get("platform")
         if not isinstance(platform, str) or not ID.fullmatch(platform):
             raise ValueError(f"{name}: invalid platform")
-        if target.get("status") not in {"planned", "test-fixture"}:
-            raise ValueError(f"{name}: only planned targets and test fixtures exist")
+        if target.get("status") not in {"planned", "test-fixture", "experimental"}:
+            raise ValueError(f"{name}: invalid target status")
         if target.get("release_supported") is not False:
-            raise ValueError(f"{name}: no release builders, signing trust or updater exist")
-        if type(target.get("package_revision")) is not int or target["package_revision"] != 0:
-            raise ValueError(f"{name}: unreleased foundation requires revision zero")
+            raise ValueError(f"{name}: automatic release builds remain disabled")
+        revision = target.get("package_revision")
+        if (type(revision) is not int or revision < 0
+                or (target["status"] == "experimental") != (revision > 0)):
+            raise ValueError(f"{name}: only experimental targets reserve positive revisions")
         dependencies = target.get("depends_on")
         if (not isinstance(dependencies, list) or not dependencies
                 or any(not path_is_safe(p) or not p.endswith("/") for p in dependencies)
                 or len(set(dependencies)) != len(dependencies)
                 or f"platforms/{platform}/" not in dependencies):
             raise ValueError(f"{name}: explicit safe directory dependencies including platform required")
-        if target["status"] == "planned":
+        if target["status"] != "test-fixture":
             if f"devices/{name}/" not in dependencies or "build" in target:
-                raise ValueError(f"{name}: planned device needs its own path and no invented build")
+                raise ValueError(f"{name}: device needs its own path and no invented build")
         elif (name != "lab-linux-amd64" or target.get("build") != "go build ./cmd/encore-lab"
               or target.get("goos") != "linux" or target.get("goarch") != "amd64"):
             raise ValueError("only lab-linux-amd64 has a runnable fixture build")
@@ -75,6 +77,58 @@ def validate(registry):
         raise ValueError("the non-release lab fixture is required")
     # Overlap is valid: multiple targets may depend on the same platform.
     return registry
+
+
+def validate_ledger(ledger, registry, previous=None):
+    """Reservations are append-only and consume revisions, not publish artifacts."""
+    if type(ledger.get("schema")) is not int or ledger["schema"] != 1:
+        raise ValueError("expected ledger schema 1")
+    targets = {t["id"]: t for t in registry["targets"]}
+    floors = ledger.get("retired_revisions")
+    if (not isinstance(floors, dict)
+            or any(name not in targets or targets[name]["status"] == "test-fixture"
+                   or type(revision) is not int or revision < 0
+                   for name, revision in floors.items())):
+        raise ValueError("invalid retired revision floors")
+    records = ledger.get("reservations")
+    if not isinstance(records, list):
+        raise ValueError("reservations must be a list")
+    if previous is not None:
+        old = previous["reservations"]
+        if (ledger["schema"] != previous["schema"]
+                or floors != previous["retired_revisions"] or records[:len(old)] != old):
+            raise ValueError("existing reservations and retired floors are immutable")
+    highest = dict(floors)
+    ids = set()
+    latest_core = {}
+    for record in records:
+        name = record.get("id")
+        core = record.get("core_version")
+        if not isinstance(name, str) or not ID.fullmatch(name) or name in ids:
+            raise ValueError("reservation IDs must be unique slugs")
+        ids.add(name)
+        if not isinstance(core, str) or not SEMVER.fullmatch(core):
+            raise ValueError(f"{name}: invalid core SemVer")
+        if (record.get("backend") != "incubator" or record.get("channel") not in {"dev", "stable"}
+                or (record["channel"] == "stable" and "-" in core.split("+", 1)[0])):
+            raise ValueError(f"{name}: invalid backend/channel or stable prerelease")
+        revisions = record.get("revisions")
+        if not isinstance(revisions, dict) or not revisions:
+            raise ValueError(f"{name}: explicit target revisions required")
+        for target, revision in revisions.items():
+            if (target not in targets or targets[target]["status"] != "experimental"
+                    or type(revision) is not int or revision <= highest.get(target, 0)
+                    or (targets[target]["platform"] == "android" and revision > 2100000000)):
+                raise ValueError(f"{name}: revision must increase for each experimental target")
+            highest[target] = revision
+            latest_core[target] = core
+    for target in registry["targets"]:
+        if target["status"] == "experimental" and (
+                target["id"] not in latest_core
+                or highest[target["id"]] != target["package_revision"]
+                or latest_core[target["id"]] != registry["core_version"]):
+            raise ValueError(f"{target['id']}: inventory must match its latest reservation")
+    return ledger
 
 
 def select(paths, registry):
@@ -135,6 +189,15 @@ def main():
     args = parser.parse_args()
     registry = validate(json.loads((ROOT / "release/targets.json").read_text()))
     paths = changed_paths(args.base, args.head)
+    previous = None
+    if paths is not None:
+        base = subprocess.check_output(["git", "merge-base", args.base, args.head],
+                                       cwd=ROOT, text=True).strip()
+        old = subprocess.run(["git", "show", f"{base}:release/ledger.json"], cwd=ROOT,
+                             capture_output=True, text=True)
+        if old.returncode == 0:
+            previous = json.loads(old.stdout)
+    validate_ledger(json.loads((ROOT / "release/ledger.json").read_text()), registry, previous)
     result = select(paths if paths is not None else ["<unavailable diff>"], registry)
     print(json.dumps(result, indent=2))
     if args.github_output:

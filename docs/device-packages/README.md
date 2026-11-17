@@ -1,10 +1,11 @@
-# Planned device package contract (schema 1)
+# Device identity profile contract (schema 1)
 
 These are **planning profiles, not runtime configuration or release manifests**.
 There is no profile loader. Android now has a local development APK build and
 host described in its target notes; neither target has a supported release.
-Both profiles remain planned/revision-zero release metadata. Passing validation
-below establishes metadata consistency only, not the APK or hardware behavior.
+Both profiles are experimental, matching the central release reservations.
+Passing validation establishes metadata consistency only, not a built release,
+the APK or hardware behavior.
 [Dot development package](../../devices/biscuit/README.md) separately implements
 a full Linux environment builder, hardware runtime and USB/recovery tooling,
 without qualified support.
@@ -23,7 +24,7 @@ closed at this planning stage; every field is required and unknown fields fail.
 | --- | --- |
 | `schema` | Integer `1`; identifies this planning-data contract, not an IPC version. |
 | `target` | Exact directory/central target ID: `biscuit` or `android-generic`; prevents cross-target profile substitution. |
-| `status` | `planned`; no supported release. Development build evidence belongs in the target notes, not this metadata. |
+| `status` | `planned` or `experimental`, matching the central inventory; neither claims a supported release. Build evidence belongs in the target notes, not this metadata. |
 
 Profiles contain only identity and planning status. They do not configure audio
 or advertise runtime capabilities. Audio, control and display requirements remain
@@ -38,8 +39,11 @@ python3 -m unittest discover -s docs/device-packages -p 'test_*.py'
 ```
 
 The validator rejects malformed/duplicate-key JSON, extra or missing fields,
-runtime settings or capability fields, wrong target identity, and registry drift
-from planned/revision-zero/non-release-supported. Tests exercise the command's
+runtime settings or capability fields, wrong target identity, and registry drift.
+Planned targets require revision zero; experimental targets require a positive
+reservation. Automatic release support remains false. The central release checker
+also validates exact ledger correspondence and append-only history when available.
+Tests exercise the command's
 observable exit status with valid and deliberately invalid package metadata.
 Neither command builds a device or validates hardware, an APK or an update.
 
@@ -115,7 +119,7 @@ must not require a second voice backend. The Dot uses a separate encrypted
 ESPHome common-control endpoint without advertising an Assist voice satellite.
 
 These requirements do not add runtime fields to `profile.json` or enable release
-support. Schema 1 remains identity and planned status only until an implemented
+support. Schema 1 remains identity and planning/experimental status only until an implemented
 consumer needs a richer contract.
 
 ## Audio and release boundaries

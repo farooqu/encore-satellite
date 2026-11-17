@@ -1,10 +1,12 @@
-# CI and release policy — unreleased foundation
+# CI and release policy — experimental preparation
 
 `targets.json` is the centrally reviewed inventory, not a download manifest.
-The shared core is `0.1.0-dev.0`. Every target has `release_supported=false`
-and package revision **0**, meaning never released. `lab-linux-amd64` is a
-runnable virtual test fixture. Echo Dot 2 and generic Android (intended first
-tablet: Samsung Galaxy Tab A7 Lite) are **planned**, not supported packages.
+The shared core for the first reserved dev cohort is `0.1.1-dev.1`, strictly newer
+than the private `0.1.0-dev.0` baseline. Biscuit and generic Android are
+**experimental**, not stable or hardware-qualified. Their reserved revisions are
+18 and 5 respectively. `lab-linux-amd64` remains a revision-zero test fixture.
+Every target keeps `release_supported=false`: automatic release package selection
+remains disabled. Reserving versions does not build, sign, publish or qualify them.
 
 Android now has a development APK and a gated signing/update foundation; see
 [Android signing and updates](android-updates.md). No production trust roots,
@@ -15,8 +17,9 @@ its local revisions do not change this release inventory or qualify hardware.
 Its bundle is the Dot Linux environment, including a project-built kernel,
 recovery initramfs and radio/userspace services, not an app for preinstalled Linux.
 The dedicated `biscuit-kernel.yml` workflow builds and verifies pinned kernel inputs.
-Kernel/source-kit uploads are withheld while the embedded audio FPGA firmware's
-redistribution terms remain unresolved; see the
+Kernel/source-kit automatic uploads remain withheld pending concrete publication
+approval. The exact audio FPGA binary has an owner-approved good-faith exception
+for dev and production releases, not a resolved license; see the
 [kernel source obligations](../devices/biscuit/packaging/KERNEL-SOURCE.md).
 Durable corresponding-source retention and signing remain release gates.
 This directory does not establish a release channel.
@@ -26,6 +29,89 @@ Encore-owned code and documentation use the [MIT License](../LICENSE); keep
 `ACKNOWLEDGEMENTS.md` and third-party licenses/notices intact. A distribution
 license/dependency/model/asset and corresponding-source audit remains a
 prerequisite to eventual releases.
+
+## First dev reservation and revision ledger
+
+[`ledger.json`](ledger.json) records append-only reservations. The public intent
+is core `0.1.1-dev.1`, backend `incubator`, channel `dev`.
+
+| Target | Reserved package revision | State |
+| --- | --- | --- |
+| `biscuit` | 18 | Reserved; no final public binary/source selected |
+| `android-generic` | 5 (APK versionCode) | Reserved; production-signed APK pending |
+
+The initial retired floors conservatively burn Biscuit revisions 1–15, including
+pre-rename/private development, and Android 1–4, including debug/disposable-key
+validation. This does not claim every number produced an artifact or any was
+publicly released. The retained Android inspection records an actual debug APK
+at revision 4; synthetic feed-test revisions are not production reservations.
+The private bring-up owner confirmed no Biscuit revision above 15 was consumed
+when 16 was proposed. A subsequent owner-authorized private build now reserves
+17 (`speaker-office-private-17`, baseline core `0.1.0-dev.0`). The earlier public
+16 remains burned/unbuilt; a new public reservation 18 supersedes it without
+rewriting history. Android keeps its original reservation 5. Existing revision-15
+bytes/provenance remain immutable. These are reservations, not build receipts.
+
+Append a new reservation before building different candidate bytes; never reuse
+a consumed/reserved number after a failed, abandoned or withdrawn candidate.
+Revisions increase independently per target across all channels, not per SemVer.
+Keep current inventory revisions/core aligned with the latest reservations.
+Once this ledger is landed, serialize reservations through main and refresh main
+before allocating; local drafts alone cannot prevent another checkout allocating
+the same number. Stable promotion reuses eligible already-recorded artifact
+bytes/revision, not a second reservation or rebuild. This prerelease has no stable
+entry; both channel choices remain implemented without inventing an empty feed.
+
+The validator rejects reused/nonincreasing revisions, stable prereleases, inventory
+mismatches and non-Incubator entries. With available `--base` history it also
+rejects deletion/reordering/rewriting of existing reservations or retired floors.
+Without usable base history it validates current content only; CI's complete
+checkout/base comparison and central review are required for historical integrity.
+Neither the ledger nor these checks constitute a signed publication authorization.
+
+Before publication, retain a separate immutable receipt binding each reserved
+target/revision to the exact clean source commit, toolchain, artifact size/hash,
+compatibility/base or APK certificate/ABI, matching sources/notices and completed
+review evidence. Those values are intentionally not fabricated in a reservation.
+Feed signatures and final asset/source verification remain separate gates.
+
+Public 18 is above private 17; a unit running 17 cannot ordinarily update to the
+abandoned public 16. Any subsequent private allocation above 18 must likewise be
+accounted for before public selection; never weaken anti-rollback or relabel an
+old reservation. Ordinary OTA also requires a strictly newer core SemVer, not
+merely a higher package revision, and an exact compatible Linux base. The private
+revision-15 boot stops before Improv; the separately owned correction/private17
+build does not qualify the eventual public image or authorize device actions.
+
+## Redistribution preparation
+
+Experimental dev releases do not require stable hardware qualification, but they
+still require distribution rights and matching notices/source. The original
+Amazon archive audit did not establish a grant for the embedded audio FPGA
+program. On 2026-11-17 Umer accepted a narrowly scoped documented-good-faith
+exception for that exact binary in both dev and production distributions,
+following the verified community precedent. Its license stays `NOASSERTION`;
+this is acceptance of unresolved risk, not legal clearance or publication
+approval. Preserve the [decision record](../devices/biscuit/packaging/FPGA-PROVENANCE.txt)
+with the binary/source distribution; all other compliance, signing and safety
+gates remain. Linux 6.1 is a separate project, not a release gate.
+
+The base builder excludes the unused external BusyBox `ssl_client` helper while
+its GPL-only/OpenSSL linkage grant remains unresolved. Encore's downloads use
+Go TLS; no Encore service invokes that helper. A real build removed only
+`usr/bin/ssl_client`, leaving the other 41 package versions/recipe commits
+unchanged. A fresh base has a new identity; it is not an app-slot OTA migration
+and must not silently replace an already selected private bring-up input.
+
+The [dependency notice pack](../licenses/README.md) now includes Go and Android
+notices, the matching MPL Public Suffix List preferred source, and Alpine notices.
+Exact Alpine recipes/configurations/patches and all 271 checksum-listed inputs
+for the retained inventory's 28 source origins were collected and verified.
+This is source-input retention, not an independent clean rebuild or blanket
+license clearance. The release owner must durably deliver the matching source
+bundle with distributed binaries and recheck the final binary inventory,
+notices and source correspondence. Local retention and upstream links alone
+are not the public source-delivery step.
 
 ## Run the checks
 
@@ -39,10 +125,9 @@ python3 release/check.py --base origin/main --head HEAD
 
 The CLI validates the current inventory and prints deterministic JSON:
 
-- `affected_targets`: all declared targets affected, including planned devices.
-- `package_targets`: affected release-supported targets only; **always empty in
-  this increment**. The validator rejects enabling release support or assigning
-  nonzero revisions before the release contract/builders are implemented.
+- `affected_targets`: all declared targets affected, including experimental devices.
+- `package_targets`: affected release-supported targets only; **still empty**.
+  Positive experimental reservations do not enable automatic package builders.
 - `lab_check`: always true. No empty package matrix can replace actual checks.
 - `unknown_paths`: unclassified inputs, or `<unavailable diff>` when history is
   unavailable. These select every declared target, not a success-by-skipping.
@@ -51,8 +136,9 @@ Without a base revision, with an all-zero initial-push base, or when Git cannot
 resolve the diff, impact broadens to all targets. The diff is from merge base to
 head, with NUL-delimited paths and rename detection disabled: moving a file
 between devices affects both its old and new owners. Deleted paths count too.
-The command checks committed changes, **not uncommitted edits**. Invalid inventory
-fails the command rather than returning an empty successful plan.
+Impact selection checks committed changes, **not uncommitted edits**. Inventory
+and ledger validation read the current worktree. Invalid records fail the command
+rather than returning an empty successful plan.
 
 ### Dependency contract
 

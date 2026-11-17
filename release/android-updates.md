@@ -175,8 +175,10 @@ package revision cannot authorize an older/equal core through ordinary OTA.
 ## Gates before activating this for users
 
 The separate signed-app identity is decided; debug installations remain untouched.
-Umer must approve key custody/backup and protected credential setup, and choose
-the immutable HTTPS feed/artifact host. Keep feeds disabled until those inputs are provisioned,
+Umer selected dedicated key custody/backups and GitHub Releases plus Pages hosting.
+The protected signing environment still needs an actual signed-candidate validation;
+the source does not provision private inputs or activate hosting. Keep feeds disabled until
+those inputs are validated,
 central release/cohort/revision/withdrawal rules and the license audit are met,
 and a real device demonstrates higher-version replacement retaining state,
 user cancellation, denied install/notification permission, interrupted download,

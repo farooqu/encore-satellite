@@ -26,7 +26,8 @@ Debug builds keep application ID `com.encore.satellite.incubator.dev`, default
 versionCode 3 (`0.1.2-incubator-dev`), minimum API 26, target API 35. Signed release
 builds use `com.encore.satellite.incubator` for both dev and stable update channels.
 This is a separate app with separate data: existing debug installs remain untouched,
-with no automatic uninstall or migration. Release signing custody remains unprovisioned.
+with no automatic uninstall or migration. Release signing inputs are never
+provisioned by the source tree; protected signing still needs end-to-end validation.
 
 The separate [signing/update foundation](../../release/android-updates.md) adds
 APK CI checks, an explicitly gated signed-candidate workflow, authenticated
@@ -146,8 +147,9 @@ gates for the Incubator APK.
 Application updates are signed APK replacements, independent of Android OS/security
 updates. Preserve signature/version constraints through a centrally reviewed
 packaging policy; core SemVer and package revision alone are not an Android
-versionCode algorithm. Central release revision remains zero and support is false.
-Future package/update metadata must bind the backend variant and routine updates
+versionCode algorithm. The central ledger reserves experimental Android revision 5
+with core `0.1.1-dev.1`; this is not a built or published release. Automatic release
+support remains false. Final package/update metadata must bind the backend variant and routine updates
 must preserve it. A later, explicitly opt-in Assist package requires its own
 qualification, validated state migration/recovery and signing/version compatibility,
 not a runtime toggle or an OS reflash. The update foundation is not an activated

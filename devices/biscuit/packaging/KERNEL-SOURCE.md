@@ -9,7 +9,7 @@ It does not contain Wi-Fi/Bluetooth firmware or the compiled cross-toolchain.
 and actual kernel bytes. Build-input identity is not a promise of identical bytes
 on different build environments; retain the exact artifact you qualify.
 
-## Embedded audio FPGA firmware is a separate publication gate
+## Embedded audio FPGA firmware has an owner-approved release exception
 
 The retained config sets `CONFIG_EXTRA_FIRMWARE="i2s_to_spi_v34.bin"` and
 `CONFIG_EXTRA_FIRMWARE_DIR="firmware"`. The source kit contains that 30,964-byte
@@ -20,10 +20,31 @@ FPGA firmware, distinct from the owner's separately supplied radio firmware.
 
 No firmware-specific redistribution grant, preferred source or license has been
 established for this bitstream. Inclusion in the vendor archive and the kernel's
-GPL COPYING do not by themselves establish its terms. Resolve this before
-publishing the kernel, an image containing it, or the source kit. This is an
-unresolved classification, not a finding that redistribution is prohibited.
-Do not silently remove it or change the audio stack to bypass this gate.
+GPL COPYING do not by themselves establish its terms. Umer approved a documented
+good-faith redistribution exception for this exact binary for both development
+and production distributions on 2026-11-17. The firmware remains `NOASSERTION`;
+the exception accepts unresolved risk, not a license grant or legal clearance.
+See [the complete decision and limits](FPGA-PROVENANCE.txt). Preserve that record
+with distributed kernels/images and source kits. An older immutable source kit
+must remain unchanged; provide the current decision alongside it.
+
+The original Amazon `Echo_Dot_src-6.5.7.1-20251024.tar.bz2` was inspected, not
+just the prepared source kit. Its SHA-256 is
+`2f6b7eed8c09cecf7633f01909c6a4085bef691c29ed0d106c75e7b48c7b4721`.
+The nested `platform.tar` member
+`kernel/mediatek/mt8163/3.18_hl/firmware/i2s_to_spi_v34.bin` matches the bitstream
+above byte-for-byte. Inspected outer, parent, kernel-root and adjacent notices
+did not supply an applicable bitstream grant; the outer README supplies warranty
+disclaimers. Kernel GPL notices do not explicitly identify this separately loaded
+FPGA program. No HDL/preferred source was found in the inspected payloads.
+
+An authorized grant or authoritative confirmation of existing-license coverage
+would resolve the remaining uncertainty, subject to its compliance conditions.
+A suitable binary-only grant could suffice without HDL. Re-review any changed
+firmware, provenance, use or authoritative rights evidence. The exception does
+not waive applicable source obligations, approve a particular publication, or
+qualify the hardware for stable use. Other proprietary blobs remain outside it;
+do not infer permission to distribute the owner's radio firmware.
 
 ## Rebuild the archived prepared source
 

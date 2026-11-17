@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "core_version": "0.1.0-dev.0",
+  "core_version": "0.1.1-dev.1",
   "channels": ["dev", "stable"],
   "targets": [
     {
@@ -16,19 +16,19 @@
     },
     {
       "id": "biscuit",
-      "status": "planned",
+      "status": "experimental",
       "platform": "linux",
       "depends_on": ["platforms/linux/", "devices/biscuit/"],
-      "package_revision": 0,
+      "package_revision": 18,
       "release_supported": false
     },
     {
       "id": "android-generic",
-      "status": "planned",
+      "status": "experimental",
       "platform": "android",
       "depends_on": ["platforms/android/", "devices/android-generic/"],
       "intended_first_device": "Samsung Galaxy Tab A7 Lite",
-      "package_revision": 0,
+      "package_revision": 5,
       "release_supported": false
     }
   ]

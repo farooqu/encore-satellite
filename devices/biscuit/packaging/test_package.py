@@ -275,6 +275,12 @@ class BundleTests(unittest.TestCase):
                 self.assertEqual(archive.extractfile("usr/share/licenses/encore/LICENSE").read(),
                                  (package.ROOT / "LICENSE").read_bytes())
                 self.assertEqual(archive.extractfile("usr/share/licenses/encore/Linux-COPYING").read(), b"kernel license")
+                for name in ("Alpine-NOTICE.txt", "FPGA-PROVENANCE.txt", "Go-Dependencies-NOTICE.txt",
+                             "Android-Dependencies-NOTICE.txt", "MPL-2.0.txt",
+                             "okhttp-public-suffix-list.dat"):
+                    expected = package.HERE / name if name in ("Alpine-NOTICE.txt", "FPGA-PROVENANCE.txt") else package.ROOT / "licenses" / name
+                    self.assertEqual(archive.extractfile("usr/share/licenses/encore/" + name).read(),
+                                     expected.read_bytes())
                 self.assertEqual(archive.extractfile("usr/share/licenses/encore/linux-LICENSE.techo5").read(),
                                  (package.ROOT / "platforms/linux/LICENSE.techo5").read_bytes())
                 self.assertEqual(archive.extractfile("usr/share/licenses/encore/linux-NOTICE").read(),

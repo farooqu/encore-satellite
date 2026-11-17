@@ -31,9 +31,9 @@ class PackageContractTest(unittest.TestCase):
         (self.root / "release").mkdir()
         # Deliberately minimal registry fixture, independent of the validator.
         self.registry = {"targets": [
-            {"id": "biscuit", "status": "planned", "package_revision": 0,
+            {"id": "biscuit", "status": "experimental", "package_revision": 16,
              "release_supported": False},
-            {"id": "android-generic", "status": "planned", "package_revision": 0,
+            {"id": "android-generic", "status": "experimental", "package_revision": 5,
              "release_supported": False},
         ]}
         self.write_registry(self.registry)
@@ -46,12 +46,15 @@ class PackageContractTest(unittest.TestCase):
                                 capture_output=True, text=True)
         self.assertEqual(result.returncode, 0 if valid else 1, result.stderr)
         if valid:
-            self.assertIn("2 planned device profiles; no installable packages", result.stdout)
+            self.assertIn("2 device identity profiles; no build or hardware qualification", result.stdout)
         else:
             self.assertIn("Device package validation failed:", result.stderr)
 
-    def test_planned_profiles_and_registry_extensions(self):
+    def test_planned_and_experimental_profiles_and_registry_extensions(self):
         self.run_check(True)
+        self.registry["targets"][0].update(status="planned", package_revision=0)
+        profile = {**self.profiles["biscuit"], "status": "planned"}
+        (self.root / "devices/biscuit/profile.json").write_text(json.dumps(profile))
         # Central release metadata may grow without widening this planning contract.
         self.registry["channels"] = ["dev", "stable"]
         self.registry["targets"][0]["depends_on"] = ["platforms/linux/", "devices/biscuit/"]
@@ -95,8 +98,9 @@ class PackageContractTest(unittest.TestCase):
     def test_rejects_registry_support_or_identity_drift_on_either_target(self):
         for index in range(2):
             for patch in ({"status": "supported"}, {"release_supported": True},
-                          {"release_supported": 0}, {"package_revision": 1},
+                          {"release_supported": 0}, {"package_revision": 0},
                           {"package_revision": False}, {"package_revision": 0.0},
+                          {"status": "planned"},
                           {"id": "other-target"}):
                 with self.subTest(index=index, patch=patch):
                     registry = copy.deepcopy(self.registry)

@@ -397,8 +397,10 @@ and excludes Assist. The ZIP contains only the rootfs,
 recovery initramfs, project kernel, kernel provenance and manifest, with no
 credentials or separately supplied Wi-Fi/Bluetooth radio firmware. The kernel
 does embed `i2s_to_spi_v34.bin` audio FPGA firmware; its redistribution terms are
-unresolved, so do not publish the kernel/image or source kit as cleared for
-distribution. See [kernel source obligations](packaging/KERNEL-SOURCE.md).
+unresolved. The owner-approved [good-faith exception](packaging/FPGA-PROVENANCE.txt)
+covers this exact binary for dev and production distributions, not legal
+clearance or approval of a particular publication. Preserve the decision with
+the distribution and meet the remaining [source obligations](packaging/KERNEL-SOURCE.md).
 Its Linux-base identity binds the kernel bytes,
 kernel build inputs, Alpine base and recovery initramfs. The recovery image is
 assembled per unit using its saved header/load addresses and the bundled kernel.
@@ -450,8 +452,8 @@ artifact you qualify. `BISCUIT_KERNEL_ROOT` changes the artifact store location.
 [Echo Dot Linux kernel CI](../../.github/workflows/biscuit-kernel.yml) runs for kernel
 input changes or explicit workflow dispatch, using a digest-pinned Ubuntu image.
 It caches only checksum-verified source downloads. Kernel/source-kit uploads are
-withheld while the embedded audio FPGA firmware's redistribution terms remain
-unresolved. Build local artifacts under `build/biscuit/kernel/`; packaging verifies
+withheld pending concrete publication approval; adopting the FPGA exception does
+not enable automatic uploads. Build local artifacts under `build/biscuit/kernel/`; packaging verifies
 them against the current inputs and all recorded file hashes. CI verification
 does not clear binary or source-kit distribution. No workflow signs, publishes
 a release or flashes hardware.

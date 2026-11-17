@@ -1,0 +1,37 @@
+{
+  "schema": 1,
+  "retired_revisions": {
+    "biscuit": 15,
+    "android-generic": 4
+  },
+  "reservations": [
+    {
+      "id": "first-incubator-dev",
+      "core_version": "0.1.1-dev.1",
+      "backend": "incubator",
+      "channel": "dev",
+      "revisions": {
+        "biscuit": 16,
+        "android-generic": 5
+      }
+    },
+    {
+      "id": "speaker-office-private-17",
+      "core_version": "0.1.0-dev.0",
+      "backend": "incubator",
+      "channel": "dev",
+      "revisions": {
+        "biscuit": 17
+      }
+    },
+    {
+      "id": "first-incubator-dev-biscuit-18",
+      "core_version": "0.1.1-dev.1",
+      "backend": "incubator",
+      "channel": "dev",
+      "revisions": {
+        "biscuit": 18
+      }
+    }
+  ]
+}

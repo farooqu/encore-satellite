@@ -92,7 +92,10 @@ Encore assistant. No Kiosk Satellite application code or assets are included.
   `firmware/i2s_to_spi_v34.bin`; it is present in the retained source kit. Its
   firmware-specific license, preferred source and redistribution grant have not
   been established. The kernel's COPYING does not by itself settle those terms;
-  resolve this before publishing the kernel, image or source kit.
+  the owner approved a documented-good-faith exception for this exact binary in
+  dev and production distributions. Keep its license `NOASSERTION` and preserve
+  [the decision and limits](devices/biscuit/packaging/FPGA-PROVENANCE.txt). This is
+  acceptance of unresolved risk, not legal clearance or publication approval.
 - The local Dot base builder fetches signature-verified Alpine ARMv7 packages,
   including GPL BusyBox, musl and wpa_supplicant with their own licenses. The
   installer supplies Wi-Fi/Bluetooth radio firmware from the owner's unit or
