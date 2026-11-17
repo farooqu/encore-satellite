@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -22,28 +23,74 @@ const privacyState = "/sys/devices/soc/10010000.keypad/amz_privacy/privacy_state
 
 type speaker struct {
 	*linux.Mixer
-	volume atomic.Int32
+	volumeMu      sync.Mutex
+	volume        int32
+	outputMuted   bool
+	volumeChanged chan struct{}
+	volumeAt      time.Time
 }
 
 func newSpeaker(pcm linux.TimedPCM) *speaker {
-	s := &speaker{Mixer: linux.NewMixer(pcm)}
-	s.volume.Store(5)
-	s.SetVolume(5.0 / 120)
+	s := &speaker{Mixer: linux.NewMixer(pcm), volume: 30, volumeChanged: make(chan struct{}, 1)}
+	s.Mixer.SetVolume(30.0 / 120)
 	return s
 }
 
-// Untuned 0..30 physical software range: silence..quarter scale, initially 5/120.
+// Untuned 0..30 physical software range: silence..quarter scale, initially 25%.
+// State and real mixer gain change under one lock, never CAS followed by a
+// potentially reordered gain write. Network delivery stays off the key path.
 func (s *speaker) adjust(delta int32) {
-	for {
-		old := s.volume.Load()
-		next := min(30, max(0, old+delta))
-		if next == old {
-			return
-		}
-		if s.volume.CompareAndSwap(old, next) {
-			s.SetVolume(float64(next) / 120)
-			return
-		}
+	s.volumeMu.Lock()
+	defer s.volumeMu.Unlock()
+	s.volume = int32(min(30, max(0, int64(s.volume)+int64(delta))))
+	s.outputMuted = false
+	s.applyVolume()
+}
+
+func (s *speaker) outputState() (float32, bool) {
+	s.volumeMu.Lock()
+	defer s.volumeMu.Unlock()
+	return float32(s.volume) * 100 / 120, s.outputMuted
+}
+
+func (s *speaker) volumeFeedback() volumeFeedback {
+	s.volumeMu.Lock()
+	defer s.volumeMu.Unlock()
+	return volumeFeedback{steps: s.volume, muted: s.outputMuted, at: s.volumeAt}
+}
+
+func (s *speaker) setOutputVolume(percent float32) error {
+	if math.IsNaN(float64(percent)) || percent < 0 || percent > 25 {
+		return errors.New("dot: speaker volume must be from 0 to 25 percent")
+	}
+	s.volumeMu.Lock()
+	defer s.volumeMu.Unlock()
+	// Match the physical keys' 1/120 steps; report the applied value, not the
+	// unquantized request. Setting volume does not release output mute.
+	s.volume = int32(math.Round(float64(percent) * 120 / 100))
+	s.applyVolume()
+	return nil
+}
+
+func (s *speaker) setOutputMute(muted bool) {
+	s.volumeMu.Lock()
+	defer s.volumeMu.Unlock()
+	s.outputMuted = muted
+	s.applyVolume()
+}
+
+// Called with volumeMu held. Output mute is independent of mic privacy and
+// music Stop: neither applying gain nor unmuting releases either safety latch.
+func (s *speaker) applyVolume() {
+	gain := float64(s.volume) / 120
+	if s.outputMuted {
+		gain = 0
+	}
+	s.Mixer.SetVolume(gain)
+	s.volumeAt = time.Now()
+	select {
+	case s.volumeChanged <- struct{}{}:
+	default:
 	}
 }
 

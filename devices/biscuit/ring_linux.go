@@ -15,6 +15,36 @@ type RingOptions struct {
 	ReducedMotion bool `json:"reduced_motion"`
 }
 
+type volumeFeedback struct {
+	steps int32
+	muted bool
+	at    time.Time
+}
+
+func ringBrightness(s presentation.State, options RingOptions) int {
+	cap := max(1, 32*min(100, max(1, options.Brightness))/100)
+	if s.Night != "off" {
+		cap = min(cap, 8) // Unknown is never silently treated as day.
+	}
+	return cap
+}
+
+// The arc shows 0..100% of the allowed range, not uncapped hardware gain:
+// a full ring is 30/120 (25% actual gain). A dim track makes zero visible.
+func volumeRingFrame(s presentation.State, v volumeFeedback, options RingOptions) [36]byte {
+	var frame [36]byte
+	filled := float64(min(30, max(0, v.steps))) * 12 / 30
+	if v.muted {
+		filled = 0
+	}
+	cap := ringBrightness(s, options)
+	for i := range 12 {
+		level := byte(math.Round(float64(cap) / 2 * min(1, max(0, filled-float64(i)))))
+		frame[i*3], frame[i*3+1], frame[i*3+2] = level, level, max(1, level)
+	}
+	return frame
+}
+
 func ringMode(s presentation.State) string {
 	switch {
 	case s.Muted:
@@ -57,10 +87,7 @@ func RingFrame(s presentation.State, level float64, elapsed time.Duration, optio
 	if mode == "idle" {
 		return frame
 	}
-	cap := max(1, 32*min(100, max(1, options.Brightness))/100)
-	if s.Night != "off" {
-		cap = min(cap, 8) // Unknown is never silently treated as day.
-	}
+	cap := ringBrightness(s, options)
 	still := options.ReducedMotion || s.Night != "off"
 	if mode == "privacy" {
 		for i := range 12 {
@@ -132,6 +159,8 @@ func RingFrame(s presentation.State, level float64, elapsed time.Duration, optio
 // calls it. Runtime supplies monotonic time; unchanged payloads are coalesced.
 type ringRenderer struct {
 	write             func([]byte) error
+	volume            func() volumeFeedback
+	volumeDismissed   time.Time
 	last              [36]byte
 	written           bool
 	mode              string
@@ -158,6 +187,16 @@ func (r *ringRenderer) update(s presentation.State, mic captureReading, now time
 	}
 	r.previous = now
 	frame := RingFrame(s, r.level, now.Sub(r.entered), options)
+	if r.volume != nil {
+		v := r.volume()
+		if mode == "privacy" || mode == "unavailable" || mode == "alert" || s.Inhibited {
+			// Never replay feedback that was hidden by privacy, a fault, Stop
+			// or an alert after that higher-priority condition clears.
+			r.volumeDismissed = v.at
+		} else if v.at.After(r.volumeDismissed) && !now.Before(v.at) && now.Sub(v.at) < 1200*time.Millisecond {
+			frame = volumeRingFrame(s, v, options)
+		}
+	}
 	if r.written && frame == r.last {
 		return nil
 	}

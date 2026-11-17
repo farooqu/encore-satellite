@@ -3,6 +3,7 @@ package biscuit
 import (
 	"context"
 	"errors"
+	"math"
 	"strings"
 	"time"
 
@@ -12,6 +13,22 @@ import (
 )
 
 const ringPath = "/sys/bus/i2c/devices/0-003f/"
+
+// A 40 ms, 660 Hz cue with 5 ms linear attack/release, before the same capped
+// master gain as voice. It is best-effort: busy playback/privacy/Stop suppress it.
+var volumeCue = func() []int16 {
+	samples := make([]int16, 640)
+	for i := range samples {
+		ramp := min(1, float64(i)/80, float64(len(samples)-1-i)/80)
+		samples[i] = int16(math.Round(4000 * ramp * math.Sin(2*math.Pi*660*float64(i)/16000)))
+	}
+	return samples
+}()
+
+func (s *speaker) pressVolume(delta int32) {
+	s.adjust(delta)
+	s.TryCue(volumeCue)
+}
 
 func openButtons() ([]*input.Device, error) {
 	devices, err := input.List()
@@ -126,9 +143,9 @@ func buttons(ctx context.Context, d *input.Device, gate *linux.Privacy, engine *
 			player.SetMusicPrivacy(true)
 			engine.SetMuted(true)
 		case 114:
-			player.adjust(-1)
+			player.pressVolume(-1)
 		case 115:
-			player.adjust(1)
+			player.pressVolume(1)
 		case 138:
 			_, _ = gate.Check(func() {
 				s := engine.Snapshot()

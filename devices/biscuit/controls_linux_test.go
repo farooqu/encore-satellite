@@ -103,7 +103,7 @@ func buttonMusic(t *testing.T) (*speaker, func() int16) {
 		}
 		return int16(binary.LittleEndian.Uint16(p.written[len(p.written)-4:]))
 	}
-	buttonWait(t, "initial volume was not 5/120", func() bool { return sample() == 500 })
+	buttonWait(t, "initial volume was not 25%", func() bool { return sample() == 3000 })
 	return s, sample
 }
 
@@ -111,21 +111,21 @@ func TestButtonsVolumeTapHoldReleaseAndLimits(t *testing.T) {
 	s, sample := buttonMusic(t)
 	e := session.New(s)
 	key := buttonEvents(t, linux.NewPrivacy(func() (bool, error) { return false, nil }), e, s)
-	key(115, 1)
-	buttonWait(t, "plus did not raise speaker gain", func() bool { return sample() == 600 })
+	key(114, 1)
+	buttonWait(t, "minus did not lower speaker gain", func() bool { return sample() == 2900 })
 	// This keypad reports only down/up; software must repeat while held.
-	buttonWait(t, "held plus did not repeat", func() bool { return sample() >= 800 })
-	key(115, 0)
+	buttonWait(t, "held minus did not repeat", func() bool { return sample() <= 2700 })
+	key(114, 0)
 	time.Sleep(30 * time.Millisecond)
 	stopped := sample()
 	time.Sleep(250 * time.Millisecond)
 	if sample() != stopped {
-		t.Fatal("volume kept increasing after release")
+		t.Fatal("volume kept decreasing after release")
 	}
-	key(114, 1)
-	buttonWait(t, "minus did not lower speaker gain", func() bool { return sample() == stopped-100 })
-	buttonWait(t, "held minus did not repeat", func() bool { return sample() <= stopped-300 })
-	key(114, 0)
+	key(115, 1)
+	buttonWait(t, "plus did not raise speaker gain", func() bool { return sample() == stopped+100 })
+	buttonWait(t, "held plus did not repeat", func() bool { return sample() >= stopped+300 })
+	key(115, 0)
 	for i := 0; i < 40; i++ {
 		key(115, 1)
 		key(115, 0)
@@ -187,7 +187,7 @@ func TestButtonsActionStopsAlertBeforeStartingVoice(t *testing.T) {
 	if e.Snapshot().Phase != "listening" {
 		t.Fatal("held Action retriggered voice cancellation")
 	}
-	buttonWait(t, "Action voice did not duck music", func() bool { return sample() == 100 })
+	buttonWait(t, "Action voice did not duck music", func() bool { return sample() == 600 })
 	key(138, 0)
 	key(138, 1)
 	buttonWait(t, "second Action did not stop voice/music", func() bool { return e.Snapshot().Phase == "recovering" && sample() == 0 })
@@ -235,6 +235,154 @@ func TestButtonsMuteHonorsDriverLagAndBlocksAction(t *testing.T) {
 	case command := <-l.commands:
 		t.Fatalf("muted Action emitted %q", command)
 	default:
+	}
+}
+
+func TestVolumeCuePhysicalPressNotHeldRepeatOrHA(t *testing.T) {
+	pcm := &speakerPCM{}
+	s := newSpeaker(pcm)
+	t.Cleanup(func() { s.Close() })
+	if !s.volumeFeedback().at.IsZero() {
+		t.Fatal("startup flashed volume feedback")
+	}
+	e := session.New(s)
+	e.SetActivityHandler(s.SetVoiceActive)
+	key := buttonEvents(t, linux.NewPrivacy(func() (bool, error) { return false, nil }), e, s)
+	nonzero := func() int {
+		pcm.mu.Lock()
+		defer pcm.mu.Unlock()
+		count := 0
+		for i := 0; i < len(pcm.written); i += 2 {
+			v := int16(binary.LittleEndian.Uint16(pcm.written[i:]))
+			if v != 0 {
+				count++
+			}
+			if v < -1100 || v > 1100 {
+				t.Fatal("cue exceeded conservative capped level", v)
+			}
+		}
+		return count
+	}
+	// TryCue may legitimately lose admission to the pump mutex. A fresh tap
+	// retries the user action; no rejected cue may be deferred until a hold.
+	for attempts := 0; nonzero() == 0; attempts++ {
+		if attempts == 10 {
+			t.Fatal("physical presses never produced an idle cue")
+		}
+		key(114, 0)
+		key(114, 1)
+		time.Sleep(70 * time.Millisecond)
+	}
+	key(114, 2) // Kernel autorepeat is not a new press either.
+	key(114, 1) // A duplicate down is not a new press.
+	time.Sleep(100 * time.Millisecond)
+	audible := nonzero()
+	volume, _ := s.outputState()
+	time.Sleep(450 * time.Millisecond)
+	if now, _ := s.outputState(); now >= volume {
+		t.Fatal("held key did not keep adjusting volume")
+	}
+	if nonzero() != audible {
+		t.Fatal("held/repeated key replayed cue")
+	}
+	key(114, 0)
+	if err := s.setOutputVolume(20); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(70 * time.Millisecond)
+	if nonzero() != audible {
+		t.Fatal("HA-style absolute volume change produced a cue")
+	}
+	if feedback := s.volumeFeedback(); feedback.steps != 24 || feedback.at.IsZero() {
+		t.Fatal("HA-style volume change omitted ring feedback", feedback)
+	}
+	for attempts := 0; nonzero() == audible; attempts++ {
+		if attempts == 10 {
+			t.Fatal("release/new press did not permit another cue")
+		}
+		key(115, 0)
+		key(115, 1)
+		time.Sleep(70 * time.Millisecond)
+	}
+	key(115, 0)
+}
+
+func TestVolumeRingFeedbackRangeExpiryAndPriority(t *testing.T) {
+	now := time.Now()
+	ready := presentation.State{Connected: true, CaptureReady: true, WakeReady: true, Night: "off", Phase: "idle"}
+	options := RingOptions{Brightness: 100}
+	feedback := volumeFeedback{steps: 15, at: now}
+	var frame [36]byte
+	r := &ringRenderer{volume: func() volumeFeedback { return feedback }, write: func(b []byte) error {
+		_, err := hex.Decode(frame[:], b[:72])
+		return err
+	}}
+	draw := func(s presentation.State, at time.Time) {
+		t.Helper()
+		if err := r.update(s, captureReading{}, at, options); err != nil {
+			t.Fatal(err)
+		}
+	}
+	draw(ready, now)
+	for i := range 12 {
+		want := [3]byte{0, 0, 1}
+		if i < 6 {
+			want = [3]byte{16, 16, 16}
+		}
+		if got := [3]byte(frame[i*3 : i*3+3]); got != want {
+			t.Fatalf("half range segment %d got %v want %v", i, got, want)
+		}
+	}
+	draw(ready, now.Add(1199*time.Millisecond))
+	if frame == [36]byte{} {
+		t.Fatal("volume feedback expired early")
+	}
+	draw(ready, now.Add(1200*time.Millisecond))
+	if frame != [36]byte{} {
+		t.Fatal("volume feedback did not expire")
+	}
+	for _, block := range []func(*presentation.State){
+		func(s *presentation.State) { s.Muted = true },
+		func(s *presentation.State) { s.Connected = false },
+		func(s *presentation.State) { s.Alert = true },
+		func(s *presentation.State) { s.Inhibited = true },
+	} {
+		now = now.Add(2 * time.Second)
+		feedback.at = now
+		s := ready
+		block(&s)
+		draw(s, now)
+		if frame != RingFrame(s, 0, 0, options) {
+			t.Fatal("volume replaced priority status", s, frame)
+		}
+		draw(ready, now.Add(50*time.Millisecond))
+		if frame != [36]byte{} {
+			t.Fatal("hidden volume replayed after priority status")
+		}
+	}
+	for _, night := range []string{"off", "on", "unknown"} {
+		for _, brightness := range []int{1, 19, 100} {
+			for _, steps := range []int32{0, 1, 7, 15, 29, 30} {
+				for _, muted := range []bool{false, true} {
+					now = now.Add(2 * time.Second)
+					feedback = volumeFeedback{steps: steps, muted: muted, at: now}
+					ready.Night, options.Brightness = night, brightness
+					draw(ready, now)
+					for i := range 12 {
+						a, b, c := frame[i*3], frame[i*3+1], frame[i*3+2]
+						if a > 32 || b > 32 || c > 32 || int(a)+int(b)+int(c) > 48 || (night != "off" && max(a, b, c) > 8) {
+							t.Fatal("volume frame exceeded LED caps", frame)
+						}
+						if (steps == 0 || muted) && [3]byte{a, b, c} != [3]byte{0, 0, 1} {
+							t.Fatal("zero/mute did not show empty track")
+						}
+						if steps == 30 && !muted && brightness == 100 && a == 0 {
+							t.Fatal("maximum did not fill the whole ring")
+						}
+					}
+				}
+			}
+		}
 	}
 }
 

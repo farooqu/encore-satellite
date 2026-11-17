@@ -122,10 +122,48 @@ The Dot 2 mappings follow the pinned Techo5 wiring, not generic PC key guesses:
 | Action | 138 | Start manual Incubator voice when idle; stop a ringing timer or active voice and local music otherwise. |
 | Mute | 113 | Immediately inhibit capture/activation and silence voice/music, then follow the authoritative hardware privacy state. |
 
-The untuned master range remains 0..30, initially 5, with gain `step/120` applied
-to voice and music. It is deliberately conservative, not acoustic calibration.
+The untuned master range remains 0..30, initially 30 (25%), with gain `step/120`
+applied to voice and music. It is deliberately conservative, not acoustic calibration.
 Volume release stops repeating. Repeated/duplicate downs do not retrigger Action
 or mute. No multi-assistant long-press selection or factory-reset gesture is added.
+
+The existing encrypted ESPHome endpoint exposes **Speaker volume**
+(`speaker_volume`, Number) and **Speaker mute** (`speaker_mute`, Switch).
+Volume is actual master software-gain percent, 0..25%, not a rescaled 0..100%
+or a Sendspin-only setting. Requests round to the physical keys' 1/120 gain
+steps (about 0.8333 percentage points); nonfinite/out-of-range values are rejected.
+State subscriptions report the applied level and receive physical-key updates.
+This master gain applies to both voice and music; Sendspin's per-stream gain
+and voice ducking remain additional music-only factors.
+
+Speaker mute silences both sources while remembering the selected level.
+Changing the Number keeps that mute; either physical volume key adjusts the
+same level and releases speaker mute. Neither control changes microphone
+privacy or releases the music Stop/privacy latch. A level of zero is silence
+independently of the mute switch. Level/mute are session-only (no flash writes):
+restart selects 25% and speaker-unmuted, without bypassing microphone privacy.
+The 25% startup is selected for the next supervised trial, not an acoustic safety
+qualification. On-device HA discovery, key/state synchronization, privacy and
+audibility still need a separately approved hardware trial. This feature does
+not diagnose or fix playback underflows and claims no other board support.
+
+Volume changes from either physical keys (including held repeats) or HA show a
+steady white arc over a dim blue track for 1.2 seconds after the latest change.
+The arc represents **0..100% of the allowed range**: full ring means 30 steps,
+which is still only 25% actual master gain. Zero/output mute shows an empty dim
+track; startup does not flash a volume indication. Brightness/night limits still
+apply. Privacy, alerts, unavailable status and Stop take priority, and feedback
+hidden by those states is discarded rather than replayed afterward.
+
+Only a fresh physical volume-key press requests a short (40 ms, gently ramped)
+660 Hz cue at the newly selected master gain. Holds, kernel autorepeat,
+duplicate key-downs and HA commands never replay it. Admission is best-effort:
+voice activity/queued voice, any music stream, privacy, Stop, output failure or
+busy mixer locks skip the cue instead of interrupting playback or waiting on
+hardware. The reusable Linux mixer accepts bounded PCM cues only; the tone,
+press policy and ring behavior live in Biscuit. A newly arriving voice can
+follow an admitted cue; the queue does not promise preemption. These are host-
+tested software semantics, not verification of physical brightness or acoustics.
 
 The kernel owns the physical mute latch and button light. Encore never toggles
 it again on receiving the event; it allows 500 ms for the driver's delayed state

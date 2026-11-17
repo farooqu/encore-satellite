@@ -2,14 +2,207 @@ package biscuit
 
 import (
 	"context"
+	"math"
+	"net"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/farooqu/encore-satellite/backends/bluetooth"
+	"github.com/farooqu/encore-satellite/core/session"
+	"github.com/farooqu/encore-satellite/platforms/linux"
 	"github.com/farooqu/encore-satellite/platforms/linuxsendspin"
+	esphome "github.com/ygelfand/go-esphome-device"
+	"github.com/ygelfand/go-esphome-device/api"
 )
+
+func TestNativeVolumeEncryptedAPIAndPhysicalKeys(t *testing.T) {
+	p, sample := buttonMusic(t)
+	c := Config{Schema: 1, Name: "volume-test"}
+	d := &biscuitControls{Proxy: bluetooth.New(managementRadio{}, bluetooth.Options{}), music: newMusic(c, &settings{config: c}, p)}
+	key, err := esphome.GeneratePSK()
+	if err != nil {
+		t.Fatal(err)
+	}
+	l, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- d.Serve(ctx, l, esphome.Info{Name: c.Name}, key) }()
+	t.Cleanup(func() { cancel(); l.Close(); <-done })
+	peer := newManagementPeer(t, l.Addr().String(), key)
+	peer.send(&api.HelloRequest{ClientInfo: "volume-test", ApiVersionMajor: 1, ApiVersionMinor: 12})
+	peer.receive()
+	peer.send(&api.ListEntitiesRequest{})
+	var volume, mute uint32
+listing:
+	for {
+		switch v := peer.receive().(type) {
+		case *api.ListEntitiesNumberResponse:
+			if v.ObjectId == "speaker_volume" {
+				volume = v.Key
+				if v.MinValue != 0 || v.MaxValue != 25 || math.Abs(float64(v.Step)-100.0/120) > .00001 || v.UnitOfMeasurement != "%" {
+					t.Fatal("native volume range is not actual capped gain", v)
+				}
+			}
+		case *api.ListEntitiesSwitchResponse:
+			if v.ObjectId == "speaker_mute" {
+				mute = v.Key
+			}
+		case *api.ListEntitiesDoneResponse:
+			break listing
+		}
+	}
+	if volume == 0 || mute == 0 || mute == volume {
+		t.Fatal("missing native entities")
+	}
+	// Each volume snapshot precedes its mute state. Drain through a complete
+	// matching pair, including any coalesced earlier notifications.
+	state := func(want float32, muted bool) {
+		t.Helper()
+		matched := false
+		for {
+			switch v := peer.receive().(type) {
+			case *api.NumberStateResponse:
+				if v.Key == volume {
+					matched = math.Abs(float64(v.State-want)) < .00001 && !v.MissingState
+				}
+			case *api.SwitchStateResponse:
+				if v.Key == mute && matched && v.State == muted && !v.MissingState {
+					return
+				}
+			}
+		}
+	}
+	peer.send(&api.SubscribeStatesRequest{})
+	state(25, false)
+	peer.send(&api.NumberCommandRequest{Key: volume, State: 12.5})
+	state(12.5, false)
+	buttonWait(t, "API did not change native PCM with Sendspin disabled", func() bool { return sample() == 1500 })
+	peer.send(&api.SwitchCommandRequest{Key: mute, State: true})
+	state(12.5, true)
+	buttonWait(t, "output mute did not silence PCM", func() bool { return sample() == 0 })
+	peer.send(&api.NumberCommandRequest{Key: volume, State: 20})
+	state(20, true)
+	if sample() != 0 {
+		t.Fatal("volume change released output mute")
+	}
+	peer.send(&api.SwitchCommandRequest{Key: mute, State: false})
+	state(20, false)
+	buttonWait(t, "unmute did not restore selected gain", func() bool { return sample() == 2400 })
+	e := session.New(p)
+	keys := buttonEvents(t, linux.NewPrivacy(func() (bool, error) { return false, nil }), e, p)
+	keys(114, 1)
+	keys(114, 0)
+	state(100.0*23/120, false)
+	buttonWait(t, "physical minus diverged from API state", func() bool { return sample() == 2300 })
+	peer.send(&api.SwitchCommandRequest{Key: mute, State: true})
+	state(100.0*23/120, true)
+	keys(115, 1)
+	keys(115, 0)
+	state(20, false)
+	buttonWait(t, "physical plus did not unmute shared gain", func() bool { return sample() == 2400 })
+	if e.Snapshot().Muted {
+		t.Fatal("speaker mute altered microphone privacy")
+	}
+	// A fresh subscriber must observe the current state, not startup defaults.
+	other := newManagementPeer(t, l.Addr().String(), key)
+	other.send(&api.SubscribeStatesRequest{})
+	peer = other
+	state(20, false)
+	// Output controls cannot undo the real privacy key's immediate inhibition,
+	// nor the music Stop latch that survives release of microphone privacy.
+	keys(113, 1)
+	keys(113, 0)
+	buttonWait(t, "physical privacy did not inhibit music", func() bool { return e.Snapshot().Muted && sample() == 0 })
+	peer.send(&api.NumberCommandRequest{Key: volume, State: 25})
+	state(25, false)
+	peer.send(&api.SwitchCommandRequest{Key: mute, State: false})
+	state(25, false)
+	keys(115, 1)
+	keys(115, 0)
+	state(25, false)
+	if !e.Snapshot().Muted || sample() != 0 {
+		t.Fatal("output controls released microphone privacy")
+	}
+	p.SetMusicPrivacy(false)
+	time.Sleep(30 * time.Millisecond)
+	if sample() != 0 {
+		t.Fatal("output controls released privacy's music Stop latch")
+	}
+}
+
+func TestNativeVolumeRangeAndConcurrentGainState(t *testing.T) {
+	p, sample := buttonMusic(t)
+	for _, invalid := range []float32{-0.001, 25.001, float32(math.NaN()), float32(math.Inf(1)), float32(math.Inf(-1))} {
+		if err := p.setOutputVolume(invalid); err == nil {
+			t.Fatalf("accepted invalid volume %v", invalid)
+		}
+		if volume, muted := p.outputState(); volume != 25 || muted {
+			t.Fatal("rejected request changed state", volume, muted)
+		}
+	}
+	for _, tc := range []struct {
+		request, percent float32
+		sample           int16
+	}{{0, 0, 0}, {12.9, 12.5, 1500}, {12.95, 100.0 * 16 / 120, 1600}, {25, 25, 3000}} {
+		if err := p.setOutputVolume(tc.request); err != nil {
+			t.Fatal(err)
+		}
+		if got, muted := p.outputState(); math.Abs(float64(got-tc.percent)) > .00001 || muted {
+			t.Fatal("wrong applied/quantized state", got, muted)
+		}
+		buttonWait(t, "range/rounding did not match PCM", func() bool { return sample() == tc.sample })
+	}
+	// All intermediate values remain away from clamping. Lost adjustments must
+	// not disappear behind a final absolute write that makes the test pass.
+	for range 30 {
+		if err := p.setOutputVolume(12.5); err != nil {
+			t.Fatal(err)
+		}
+		var writers sync.WaitGroup
+		for i := range 10 {
+			writers.Go(func() { p.adjust(int32(1 - 2*(i%2))) })
+		}
+		writers.Wait()
+		if got, muted := p.outputState(); got != 12.5 || muted {
+			t.Fatal("concurrent keys lost an adjustment", got, muted)
+		}
+		buttonWait(t, "concurrent key state/gain diverged", func() bool { return sample() == 1500 })
+	}
+	// Race absolute API writes, keys, mute and readers. Once quiescent, the
+	// published pair must describe actual PCM, regardless of which writer won.
+	for range 30 {
+		var writers sync.WaitGroup
+		for i := range 8 {
+			writers.Go(func() {
+				switch i % 4 {
+				case 0:
+					if err := p.setOutputVolume(float32(5 + i)); err != nil {
+						t.Error(err)
+					}
+				case 1:
+					p.adjust(-1)
+				case 2:
+					p.setOutputMute(i == 2)
+				case 3:
+					p.outputState()
+				}
+			})
+		}
+		writers.Wait()
+		volume, muted := p.outputState()
+		want := int16(math.Round(float64(volume) * 120))
+		if muted {
+			want = 0
+		}
+		buttonWait(t, "concurrent API/key/mute state disagreed with PCM", func() bool { return sample() == want })
+	}
+}
 
 func TestMusicSwitchLifecycleAndIndependentPersistence(t *testing.T) {
 	c := Config{Schema: 1, Name: "test-dot"}

@@ -96,7 +96,7 @@ func Run(parent context.Context, c Config) error {
 	if err != nil {
 		return err
 	}
-	ring := &ringRenderer{write: func(frame []byte) error {
+	ring := &ringRenderer{volume: player.volumeFeedback, write: func(frame []byte) error {
 		return os.WriteFile(ringPath+"frame", frame, 0644)
 	}}
 	if err = ring.update(engine.Snapshot(), captureReading{}, time.Now(), ringPolicy.snapshot()); err != nil {

@@ -187,14 +187,17 @@ type biscuitControls struct {
 	updates     *linuxUpdates
 	ring        *ringSettings
 	mu          sync.Mutex
+	stateMu     sync.Mutex
 	subscribers map[*esphome.Conn]struct{}
 }
 
 var (
-	musicKey     = (&esphome.Switch{Base: esphome.Base{ObjectID: "sendspin"}}).Key()
-	musicURLKey  = (&esphome.Text{Base: esphome.Base{ObjectID: "sendspin_url"}}).Key()
-	musicPlayKey = (&esphome.Button{Base: esphome.Base{ObjectID: "sendspin_play"}}).Key()
-	musicStopKey = (&esphome.Button{Base: esphome.Base{ObjectID: "sendspin_stop"}}).Key()
+	speakerVolumeKey = (&esphome.Base{ObjectID: "speaker_volume"}).Key()
+	speakerMuteKey   = (&esphome.Base{ObjectID: "speaker_mute"}).Key()
+	musicKey         = (&esphome.Switch{Base: esphome.Base{ObjectID: "sendspin"}}).Key()
+	musicURLKey      = (&esphome.Text{Base: esphome.Base{ObjectID: "sendspin_url"}}).Key()
+	musicPlayKey     = (&esphome.Button{Base: esphome.Base{ObjectID: "sendspin_play"}}).Key()
+	musicStopKey     = (&esphome.Button{Base: esphome.Base{ObjectID: "sendspin_stop"}}).Key()
 )
 
 func (d *biscuitControls) Handle(ctx context.Context, c *esphome.Conn, msg proto.Message) error {
@@ -211,6 +214,8 @@ func (d *biscuitControls) Handle(ctx context.Context, c *esphome.Conn, msg proto
 			}
 		}
 		for _, ent := range []proto.Message{
+			&api.ListEntitiesNumberResponse{Key: speakerVolumeKey, ObjectId: "speaker_volume", Name: "Speaker volume", Icon: "mdi:volume-high", MinValue: 0, MaxValue: 25, Step: 1.0 / 120 * 100, UnitOfMeasurement: "%"},
+			&api.ListEntitiesSwitchResponse{Key: speakerMuteKey, ObjectId: "speaker_mute", Name: "Speaker mute", Icon: "mdi:volume-off"},
 			&api.ListEntitiesSwitchResponse{Key: musicKey, ObjectId: "sendspin", Name: "Sendspin music", Icon: "mdi:music", EntityCategory: esphome.CategoryConfig},
 			&api.ListEntitiesTextResponse{Key: musicURLKey, ObjectId: "sendspin_url", Name: "Sendspin server", Icon: "mdi:server", EntityCategory: esphome.CategoryConfig, MinLength: 0, MaxLength: 255},
 			&api.ListEntitiesButtonResponse{Key: musicPlayKey, ObjectId: "sendspin_play", Name: "Resume music", Icon: "mdi:play"},
@@ -256,6 +261,10 @@ func (d *biscuitControls) Handle(ctx context.Context, c *esphome.Conn, msg proto
 			return d.broadcast()
 		}
 	case *api.SwitchCommandRequest:
+		if v.Key == speakerMuteKey {
+			d.music.player.setOutputMute(v.State)
+			return d.broadcast()
+		}
 		if d.ring != nil && v.Key == ringMotionKey {
 			if err := d.ring.configure(nil, &v.State); err != nil {
 				return err
@@ -275,6 +284,12 @@ func (d *biscuitControls) Handle(ctx context.Context, c *esphome.Conn, msg proto
 			return d.broadcast()
 		}
 	case *api.NumberCommandRequest:
+		if v.Key == speakerVolumeKey {
+			if err := d.music.player.setOutputVolume(v.State); err != nil {
+				return err
+			}
+			return d.broadcast()
+		}
 		if d.ring != nil && v.Key == ringBrightnessKey {
 			if err := d.ring.configure(&v.State, nil); err != nil {
 				return err
@@ -312,6 +327,19 @@ func (d *biscuitControls) Handle(ctx context.Context, c *esphome.Conn, msg proto
 	return d.Proxy.Handle(ctx, c, msg)
 }
 func (d *biscuitControls) state(c *esphome.Conn) error {
+	// Serialize snapshots and delivery so concurrent key/API broadcasts cannot
+	// send an older volume after a newer one on the same subscription.
+	d.stateMu.Lock()
+	defer d.stateMu.Unlock()
+	volume, muted := d.music.player.outputState()
+	for _, state := range []proto.Message{
+		&api.NumberStateResponse{Key: speakerVolumeKey, State: volume},
+		&api.SwitchStateResponse{Key: speakerMuteKey, State: muted},
+	} {
+		if err := c.Send(state); err != nil {
+			return err
+		}
+	}
 	if d.ring != nil {
 		for _, state := range d.ring.states() {
 			if err := c.Send(state); err != nil {
@@ -363,6 +391,16 @@ func (d *biscuitControls) Run(ctx context.Context) {
 	var workers sync.WaitGroup
 	workers.Go(func() { d.Proxy.Run(ctx) })
 	workers.Go(func() { d.music.Run(ctx) })
+	workers.Go(func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-d.music.player.volumeChanged:
+				_ = d.broadcast()
+			}
+		}
+	})
 	if d.management != nil {
 		workers.Go(func() { d.watchManagement(ctx) })
 	}
