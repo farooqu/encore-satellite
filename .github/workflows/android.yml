@@ -1,0 +1,94 @@
+name: Android APK checks and signing
+
+on:
+  pull_request:
+  push:
+  workflow_dispatch:
+    inputs:
+      signed_candidate:
+        type: boolean
+        default: false
+        description: Build a signed candidate (no feed or release publication)
+      revision:
+        type: string
+        description: Centrally reserved monotonic package revision (versionCode)
+      version:
+        type: string
+        description: APK versionName
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.27.4'
+          cache: false
+      - name: Use Java 21
+        run: echo "JAVA_HOME=$JAVA_HOME_21_X64" >> "$GITHUB_ENV"
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+      - name: Install SDK and NDK
+        run: sdkmanager 'platforms;android-36' 'build-tools;36.0.0' 'ndk;28.0.13004108'
+      - name: Regenerate engine, assemble, test and lint
+        run: devices/android-generic/build-android :app:assembleDebug :app:testDebugUnitTest :app:lintDebug
+
+  signed-candidate:
+    if: github.event_name == 'workflow_dispatch' && inputs.signed_candidate && github.ref == 'refs/heads/main'
+    needs: check
+    # Owner must configure required reviewers and main-only deployment branches
+    # on this environment before storing signing secrets. Do not run for PR code.
+    environment: android-signing
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      ENCORE_VERSION_CODE: ${{ inputs.revision }}
+      ENCORE_VERSION_NAME: ${{ inputs.version }}
+      ENCORE_UPDATE_BASE_URL: ${{ vars.ANDROID_UPDATE_BASE_URL }}
+      ENCORE_UPDATE_PUBLIC_KEY: ${{ vars.ANDROID_UPDATE_PUBLIC_KEY }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.27.4'
+          cache: false
+      - name: Use Java 21
+        run: echo "JAVA_HOME=$JAVA_HOME_21_X64" >> "$GITHUB_ENV"
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+      - name: Install SDK and NDK
+        run: sdkmanager 'platforms;android-36' 'build-tools;36.0.0' 'ndk;28.0.13004108'
+      - name: Build signed candidate with private keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ENCORE_STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
+          ENCORE_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ENCORE_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          EXPECTED_CERTIFICATE: ${{ vars.ANDROID_CERTIFICATE_SHA256 }}
+        run: |
+          set -euo pipefail
+          umask 077
+          export ENCORE_KEYSTORE="$RUNNER_TEMP/encore.jks"
+          trap 'rm -f "$ENCORE_KEYSTORE"' EXIT
+          test -n "$KEYSTORE_BASE64"
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$ENCORE_KEYSTORE"
+          devices/android-generic/build-android :app:assembleRelease
+          apk=devices/android-generic/app/build/outputs/apk/release/app-release.apk
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs "$apk" > "$RUNNER_TEMP/signature.txt"
+          test -n "$EXPECTED_CERTIFICATE"
+          grep -Fqx "Signer #1 certificate SHA-256 digest: $EXPECTED_CERTIFICATE" "$RUNNER_TEMP/signature.txt"
+          sha256sum "$apk" > "$apk.sha256"
+          git rev-parse HEAD > "$apk.source"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: android-incubator-candidate-${{ inputs.revision }}-${{ github.sha }}
+          path: devices/android-generic/app/build/outputs/apk/release/app-release.apk*
+          if-no-files-found: error
+          retention-days: 30

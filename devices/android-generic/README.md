@@ -22,9 +22,18 @@ The script binds the matching Go engine into an AAR for `arm64-v8a` and
 then builds `app/build/outputs/apk/debug/app-debug.apk` under this directory.
 It does not install, upload, publish or update a device. Gradle uses its normal
 local development signing key; do not use that identity for a production release.
-The provisional application ID is `com.encore.satellite.incubator.dev`, versionCode
-2 (`0.1.1-incubator-dev`), minimum API 26, target API 35. Final package identity, signing and upgrade policy
+The provisional application ID is `com.encore.satellite.incubator.dev`, default versionCode
+3 (`0.1.2-incubator-dev`), minimum API 26, target API 35. Final package identity, signing and migration policy
 are not decided by these development defaults.
+
+The separate [signing/update foundation](../../release/android-updates.md) adds
+APK CI checks, an explicitly gated signed-candidate workflow, authenticated
+stable/dev feeds, a persistent ESPHome **Update channel** dropdown, available-update
+reporting and an install request. Changing channel only changes subsequent checks;
+it never installs or downgrades. Feeds/keys are not provisioned by default. Android
+installation still requires local approval; use **Settings → Review downloaded
+update** or the update notification after requesting it through ESPHome. Existing
+debug installs cannot accept a different production signing key in-place.
 
 Use a build machine with sufficient RAM: the initial 2 GB orb exhausted memory;
 the complete APK/test/lint build passed in an `a1.large` orb. Default settings use
@@ -134,7 +143,9 @@ versionCode algorithm. Central release revision remains zero and support is fals
 Future package/update metadata must bind the backend variant and routine updates
 must preserve it. A later, explicitly opt-in Assist package requires its own
 qualification, validated state migration/recovery and signing/version compatibility,
-not a runtime toggle or an OS reflash. No production updater is implemented.
+not a runtime toggle or an OS reflash. The update foundation is not an activated
+production update service or a silent installer; see its provisioning and device
+qualification gates before using it for distribution.
 
 ## Ownership and attribution
 

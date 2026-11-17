@@ -1,20 +1,52 @@
+import java.util.Base64
+import groovy.json.JsonSlurper
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.plugin.compose")
+}
+fun env(name: String) = System.getenv(name).orEmpty()
+val coreVersion = (JsonSlurper().parse(file("../../../release/targets.json")) as Map<*, *>)["core_version"] as String
+fun quoted(value: String) = "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r") + "\""
+gradle.taskGraph.whenReady {
+  if (allTasks.any { it.project == project && it.name.contains("release", ignoreCase = true) }) {
+    listOf("ENCORE_KEYSTORE", "ENCORE_STORE_PASSWORD", "ENCORE_KEY_ALIAS", "ENCORE_KEY_PASSWORD", "ENCORE_VERSION_CODE", "ENCORE_VERSION_NAME", "ENCORE_UPDATE_BASE_URL", "ENCORE_UPDATE_PUBLIC_KEY").forEach {
+        require(env(it).isNotBlank()) { "$it is required for a signed release" }
+    }
+    require(env("ENCORE_VERSION_CODE").toInt() in 3..2100000000)
+    require(env("ENCORE_UPDATE_BASE_URL").startsWith("https://"))
+    require(Base64.getDecoder().decode(env("ENCORE_UPDATE_PUBLIC_KEY")).size == 32)
+  }
 }
 android {
     namespace = "com.encore.satellite"
     compileSdk = 36
     defaultConfig {
-        // Development identity: not a final release/coexistence decision.
+        // Preserve the existing development package/data. Changing this is an
+        // explicit new installation, not a routine update or channel switch.
         applicationId = "com.encore.satellite.incubator.dev"
         minSdk = 26
         targetSdk = 35
-        versionCode = 2
-        versionName = "0.1.1-incubator-dev"
+        versionCode = env("ENCORE_VERSION_CODE").ifBlank { "3" }.toInt()
+        versionName = env("ENCORE_VERSION_NAME").ifBlank { "0.1.2-incubator-dev" }
+        buildConfigField("String", "UPDATE_BASE_URL", quoted(env("ENCORE_UPDATE_BASE_URL")))
+        buildConfigField("String", "UPDATE_PUBLIC_KEY", quoted(env("ENCORE_UPDATE_PUBLIC_KEY")))
+        buildConfigField("String", "CORE_VERSION", quoted(coreVersion))
+        manifestPlaceholders["coreVersion"] = coreVersion
         // Match the Go engine; transitive AndroidX libraries also ship x86 binaries.
         ndk { abiFilters += setOf("arm64-v8a", "armeabi-v7a") }
     }
+    signingConfigs {
+        create("release") {
+            if (env("ENCORE_KEYSTORE").isNotBlank()) {
+                storeFile = file(env("ENCORE_KEYSTORE"))
+                storePassword = env("ENCORE_STORE_PASSWORD")
+                keyAlias = env("ENCORE_KEY_ALIAS")
+                keyPassword = env("ENCORE_KEY_PASSWORD")
+            }
+        }
+    }
+    buildTypes { getByName("release") { signingConfig = signingConfigs.getByName("release") } }
     sourceSets {
         getByName("main") {
             kotlin.directories += "../../../platforms/android/src/main/java"
@@ -34,6 +66,7 @@ android {
     packaging { resources.excludes += setOf("META-INF/AL2.0", "META-INF/LGPL2.1") }
 }
 dependencies {
+    implementation("androidx.core:core:1.15.0")
     implementation(files("../../../build/android/encore.aar"))
     implementation(project(":player"))
     implementation(platform("androidx.compose:compose-bom:2025.04.01"))

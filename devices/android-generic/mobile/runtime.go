@@ -34,26 +34,30 @@ type Audio interface {
 }
 
 type settings struct {
-	MAC       string `json:"mac"`
-	Key       string `json:"key"`
-	Dashboard string `json:"dashboard"`
-	Muted     bool   `json:"muted"`
+	MAC               string `json:"mac"`
+	Key               string `json:"key"`
+	Dashboard         string `json:"dashboard"`
+	Muted             bool   `json:"muted"`
+	Channel           string `json:"channel"`
+	ChannelGeneration int64  `json:"channel_generation"`
 }
 
 type Runtime struct {
-	mu        sync.Mutex
-	path      string
-	config    settings
-	engine    *session.Engine
-	voice     *incubator.Server
-	control   *esphome.Server
-	cancel    context.CancelFunc
-	done      sync.WaitGroup
-	sequence  uint64
-	samples   int64
-	captureMu sync.Mutex
-	reload    int
-	problem   string
+	mu          sync.Mutex
+	path        string
+	config      settings
+	engine      *session.Engine
+	voice       *incubator.Server
+	control     *esphome.Server
+	cancel      context.CancelFunc
+	done        sync.WaitGroup
+	sequence    uint64
+	samples     int64
+	captureMu   sync.Mutex
+	reload      int
+	problem     string
+	updater     UpdateHost
+	updateState *api.UpdateStateResponse
 }
 
 func Open(directory string, output Audio) (*Runtime, error) {
@@ -86,6 +90,12 @@ func Open(directory string, output Audio) (*Runtime, error) {
 		}
 	} else {
 		return nil, err
+	}
+	if r.config.Channel == "" {
+		r.config.Channel = "dev"
+	}
+	if r.config.Channel != "dev" && r.config.Channel != "stable" {
+		return nil, errors.New("invalid saved update channel")
 	}
 	r.engine = session.New(androidhost.NewPlayback(output))
 	r.engine.SetMuted(r.config.Muted)
@@ -228,12 +238,65 @@ func (r *Runtime) Handle(_ context.Context, c *esphome.Conn, msg proto.Message) 
 		if err := c.Send(&api.ListEntitiesButtonResponse{ObjectId: "reload_dashboard", Key: reloadKey, Name: "Reload dashboard", EntityCategory: esphome.CategoryConfig}); err != nil {
 			return err
 		}
+		for _, entity := range []proto.Message{
+			&api.ListEntitiesUpdateResponse{ObjectId: "apk_update", Key: updateKey, Name: "APK update", DeviceClass: "firmware", EntityCategory: esphome.CategoryConfig},
+			&api.ListEntitiesSelectResponse{ObjectId: "update_channel", Key: channelKey, Name: "Update channel", Options: []string{"dev", "stable"}, EntityCategory: esphome.CategoryConfig},
+			&api.ListEntitiesButtonResponse{ObjectId: "check_updates", Key: checkKey, Name: "Check for updates", EntityCategory: esphome.CategoryConfig},
+		} {
+			if err := c.Send(entity); err != nil {
+				return err
+			}
+		}
 		return c.Send(&api.ListEntitiesDoneResponse{})
 	case *api.SubscribeStatesRequest:
 		r.mu.Lock()
 		v := r.config.Dashboard
+		channel := r.config.Channel
+		state := &api.UpdateStateResponse{Key: updateKey, MissingState: true}
+		if r.updateState != nil {
+			state = proto.Clone(r.updateState).(*api.UpdateStateResponse)
+		}
 		r.mu.Unlock()
+		if err := c.Send(&api.SelectStateResponse{Key: channelKey, State: channel}); err != nil {
+			return err
+		}
+		if err := c.Send(state); err != nil {
+			return err
+		}
 		return c.Send(&api.TextStateResponse{Key: dashboardKey, State: v})
+	case *api.SelectCommandRequest:
+		if m.Key != channelKey || (m.State != "dev" && m.State != "stable") {
+			return nil
+		}
+		r.mu.Lock()
+		next := r.config
+		next.Channel = m.State
+		if next.Channel != r.config.Channel {
+			next.ChannelGeneration++
+		}
+		if err := r.save(next); err != nil {
+			r.mu.Unlock()
+			return err
+		}
+		r.config = next
+		if r.updateState != nil {
+			r.updateState.LatestVersion = ""
+			r.updateState.MissingState = true
+			r.updateState.InProgress = false
+		}
+		host := r.updater
+		r.mu.Unlock()
+		if err := r.control.Broadcast(&api.SelectStateResponse{Key: channelKey, State: m.State}); err != nil {
+			return err
+		}
+		r.UpdateStatus(m.State, next.ChannelGeneration, "", "Checking selected channel", false, false)
+		if host != nil {
+			host.RequestUpdate(m.State, next.ChannelGeneration, false)
+		}
+	case *api.UpdateCommandRequest:
+		if m.Key == updateKey && (m.Command == api.UpdateCommand_UPDATE_COMMAND_UPDATE || m.Command == api.UpdateCommand_UPDATE_COMMAND_CHECK) {
+			r.requestUpdate(m.Command == api.UpdateCommand_UPDATE_COMMAND_UPDATE)
+		}
 	case *api.TextCommandRequest:
 		if m.Key != dashboardKey {
 			return nil
@@ -258,6 +321,9 @@ func (r *Runtime) Handle(_ context.Context, c *esphome.Conn, msg proto.Message) 
 		r.mu.Unlock()
 		return r.control.Broadcast(&api.TextStateResponse{Key: dashboardKey, State: v})
 	case *api.ButtonCommandRequest:
+		if m.Key == checkKey {
+			r.requestUpdate(false)
+		}
 		if m.Key == reloadKey {
 			r.mu.Lock()
 			r.reload++
@@ -265,6 +331,15 @@ func (r *Runtime) Handle(_ context.Context, c *esphome.Conn, msg proto.Message) 
 		}
 	}
 	return nil
+}
+
+func (r *Runtime) requestUpdate(install bool) {
+	r.mu.Lock()
+	host, channel, generation := r.updater, r.config.Channel, r.config.ChannelGeneration
+	r.mu.Unlock()
+	if host != nil {
+		host.RequestUpdate(channel, generation, install)
+	}
 }
 
 // DependencyReport identifies the immutable backend in this package.

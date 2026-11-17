@@ -38,7 +38,7 @@ private val Muted = Color(0xffa0afbd)
 fun EncoreScreen(state: EncoreState, onStart: () -> Unit, onTalk: () -> Unit, onStop: () -> Unit,
     onMuted: (Boolean) -> Unit, noiseKey: () -> String,
     musicToken: () -> String, onMusicConnect: (String) -> Unit, onMusicDisconnect: () -> Unit,
-    onMusicCommand: (String) -> Unit, onDismiss: () -> Unit,
+    onMusicCommand: (String) -> Unit, onDismiss: () -> Unit, onUpdate: () -> Unit = {},
     dashboardContent: @Composable () -> Unit = { Dashboard(state) }) {
     var settings by remember { mutableStateOf(false) }
     MaterialTheme(colorScheme = darkColorScheme(primary = Mint, background = Ink, surface = Color(0xff152330))) {
@@ -93,7 +93,7 @@ fun EncoreScreen(state: EncoreState, onStart: () -> Unit, onTalk: () -> Unit, on
                 }
             }
         }
-        if (settings) SettingsDialog(state, noiseKey, musicToken, onMusicConnect, onMusicDisconnect) { settings = false }
+        if (settings) SettingsDialog(state, noiseKey, musicToken, onMusicConnect, onMusicDisconnect, onUpdate) { settings = false }
     }
 }
 
@@ -182,7 +182,7 @@ internal fun trustedNavigation(origin: String, value: String): Boolean {
 }
 
 @Composable private fun SettingsDialog(state: EncoreState, noiseKey: () -> String,
-    musicToken: () -> String, onMusicConnect: (String) -> Unit, onMusicDisconnect: () -> Unit, close: () -> Unit) {
+    musicToken: () -> String, onMusicConnect: (String) -> Unit, onMusicDisconnect: () -> Unit, onUpdate: () -> Unit, close: () -> Unit) {
     var sendspin by remember { mutableStateOf("") }
     var secret by remember { mutableStateOf("") }
     AlertDialog(onDismissRequest = close, title = { Text("Satellite settings") }, confirmButton = { TextButton(onClick = close) { Text("Done") } },
@@ -192,6 +192,8 @@ internal fun trustedNavigation(origin: String, value: String): Boolean {
                 Text("Incubator voice uses trusted-LAN TCP 6055. ESPHome dashboard controls use encrypted TCP 6053. No Assist or BLE proxy in this build.", fontSize = 12.sp)
                 Text("Set one full Dashboard URL through ESPHome, such as https://home.example/lovelace/home. It supplies both the HA address and dashboard path; no local origin setup is needed. Sign in to HA in the dashboard itself. Navigation stays within the configured origin.", fontSize = 12.sp)
                 TextButton(onClick = { secret = noiseKey() }) { Text("Reveal ESPHome encryption key") }
+                Text("Choose stable/dev, check, and request updates through ESPHome. Installing a downloaded APK needs approval on this device.", fontSize = 12.sp)
+                TextButton(onClick = onUpdate) { Text("Review downloaded update") }
                 HorizontalDivider()
                 OutlinedTextField(sendspin, { sendspin = it }, label = { Text("Sendspin host:port") }, singleLine = true)
                 Row {

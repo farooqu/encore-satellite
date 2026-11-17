@@ -6,8 +6,10 @@ and package revision **0**, meaning never released. `lab-linux-amd64` is a
 runnable virtual test fixture. Echo Dot 2 and generic Android (intended first
 tablet: Samsung Galaxy Tab A7 Lite) are **planned**, not supported packages.
 
-There are no released device packages, network update client, signing trust roots,
-signed manifests, published channels or release credentials. The Dot now has a
+Android now has a development APK and a gated signing/update foundation; see
+[Android signing and updates](android-updates.md). No production trust roots,
+published feeds or release credentials are provisioned by this repository.
+There are no supported device releases. The Dot now has a
 local development builder and explicitly invoked USB/recovery installer/updater;
 its local revisions do not change this release inventory or qualify hardware.
 Its bundle is the Dot Linux environment, including a project-built kernel,
@@ -15,8 +17,10 @@ recovery initramfs and radio/userspace services, not an app for preinstalled Lin
 The dedicated `dot-kernel.yml` workflow builds pinned kernel inputs and retains
 the exact kernel/source kit as unsigned development artifacts for 90 days. It
 does not publish releases; durable source retention and signing remain release gates.
-This directory does not establish a release channel. No production signing, uploading or publishing
-is performed by the foundation workflow. The new code's license remains
+This directory does not establish a release channel.
+No production signing, uploading or publishing is performed by the foundation
+workflow; the separate Android workflow only signs manually approved candidates.
+The new code's license remains
 unselected; keep `ACKNOWLEDGEMENTS.md` and included notices intact. A distribution
 license/dependency/model/asset audit is a prerequisite to eventual releases.
 
@@ -115,12 +119,16 @@ Future automated real-stack CI needs an explicit compatible runner/lifecycle
 contract from the lab owner. Workflow configuration is not evidence that GitHub
 has run anything; record executed commands and actual CI run URLs separately.
 
-## Release model to enforce before any published device update
+## Release model to enforce before device publication
 
-These are requirements for a release channel, **not a verifier or network updater
-shipped now**. The manually supplied local-development USB bundle is explicitly
-unsigned, requires an out-of-band build hash, never downloads code, and must not
-be relabeled as a production update mechanism.
+These are publication requirements, not a claim of supported device releases.
+Android implements the gated verifier/install-request path described above;
+experimental Linux signed-OTA source is separately implemented and platform-owned.
+Neither implementation is published or hardware-qualified. Both use the
+[shared channel/control contract](../docs/device-packages/update-contract.md).
+The manually supplied Dot local-development USB bundle is explicitly unsigned,
+requires an out-of-band build hash, never downloads code, and must not be
+relabeled as a production update mechanism.
 
 - **Incubator default, one backend per package:** the default device package and
   any unqualified build/install choice must use only the native `incubator`
@@ -147,8 +155,10 @@ be relabeled as a production update mechanism.
   publication; do not overwrite a `latest` binary or silently replace old bytes.
 - **Explicit variants and channels:** publish a separate signed entry for each
   supported target/backend/channel combination; channels remain exactly `dev` or
-  `stable`. Routine updates preserve the installed backend and channel, with no
-  implicit fallback between either. Only Incubator is initially in scope; do not
+  `stable`. Routine updates preserve the installed backend and use the explicitly
+  selected persistent desired channel (which may differ from installed package
+  provenance), with no implicit fallback or downgrade. Selection alone never
+  installs a package. Only Incubator is initially in scope; do not
   create empty Assist release entries. Stable entries must not point to a
   prerelease core. Promotion reuses the already
   validated immutable package bytes/revision, not a rebuild disguised as the same
@@ -180,10 +190,11 @@ be relabeled as a production update mechanism.
   Qualify each variant independently; Assist hardware support and switching tests
   must not block an otherwise qualified Incubator package.
 - **Rollback is deliberate:** retain known-good immutable packages and test
-  recovery, but do not let rollback defeat monotonic revision enforcement. A
-  normal rollback should be a newly signed higher package revision carrying the
-  intended older content. Any privileged recovery exception requires a separate
-  reviewed trust policy, not silent channel downgrade acceptance.
+  recovery, but do not let rollback defeat monotonic revision enforcement.
+  Ordinary OTA additionally requires a strictly newer shared-core SemVer in the
+  selected channel. A higher package revision carrying older/equal core is not
+  eligible; a channel behind the installed version waits. Any recovery exception
+  requires a separate reviewed mechanism, not channel downgrade acceptance.
 
 ## Review routing and enforcement still required
 

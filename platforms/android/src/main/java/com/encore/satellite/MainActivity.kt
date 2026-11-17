@@ -39,7 +39,8 @@ class MainActivity : ComponentActivity() {
                 onMusicConnect = { startForegroundService(Intent(this, EncoreService::class.java).setAction("music").putExtra("address", it)) },
                 onMusicDisconnect = { service?.disconnectMusic() },
                 onMusicCommand = { service?.musicCommand(it) },
-                onDismiss = { permissionProblem = ""; service?.dismissProblem() })
+                onDismiss = { permissionProblem = ""; service?.dismissProblem() },
+                onUpdate = { startActivity(Intent(this, UpdateActivity::class.java)) })
         }
     }
 

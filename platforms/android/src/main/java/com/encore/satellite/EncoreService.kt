@@ -47,7 +47,7 @@ class EncoreService : Service() {
         super.onCreate()
         audio = AudioIo(this)
         runCatching { Mobile.open(filesDir.resolve("engine").absolutePath, audio) }
-            .onSuccess { runtime = it; mutable.value = mutable.value.copy(name = it.name()) }
+            .onSuccess { runtime = it; mutable.value = mutable.value.copy(name = it.name()); ApkUpdates(this, it, scope) }
             .onFailure { problem("Engine could not start: ${it.message}") }
         scope.launch {
             while (isActive) {

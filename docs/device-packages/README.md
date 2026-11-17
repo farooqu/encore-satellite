@@ -94,9 +94,12 @@ They do not require an Assist package now or authorize automatic migration.
 - Changing backends means an explicit application-package replacement, not an
   ordinary update, settings toggle or implicit base/OS reflash. Establish and
   validate configuration/state migration and recovery before offering it.
-- Future package provenance and signed update metadata must bind both device
+- Package provenance and signed update metadata must bind both device
   target and backend variant. Routine updates must preserve the installed backend
-  and channel and reject a mismatched variant. Backend is not a dev/stable channel.
+  and use the persisted selected channel, rejecting a mismatched variant. Channel
+  selection alone never installs or permits a downgrade; ordinary OTA requires a
+  strictly newer shared-core SemVer and the platform's revision/base safety gates.
+  See the [shared update contract](update-contract.md). Backend is not a dev/stable channel.
 - Qualify the installed backend on each supported device/base/ABI. Incubator
   acceptance must not depend on Assist hardware qualification or switching tests;
   a later Assist variant needs its own acceptance evidence.
@@ -131,11 +134,15 @@ review.
 
 The Dot bundle supplies its own kernel, initramfs, Linux userspace and runtime.
 Incremental app-slot updates require the same Linux-base identity; they cannot
-silently replace the shared kernel or recovery. Android's future signed APK
+silently replace the shared kernel or recovery. Android's signed APK
 contains its matching native host and Go engine, not a separately downloaded core.
 The Dot's local development installer/updater is explicitly invoked over USB
 recovery with a trusted local build digest and an unsigned-development opt-in.
-There is no network updater, signature implementation or production trust root.
+That USB path is separate from signed OTA. Android has an experimental signed-feed
+verifier and locally approved APK install flow; the separately owned Linux OTA
+source implements signed metadata and guarded app-slot updates. See target notes
+and verification for each implementation's delivery state. Neither is a published
+or hardware-qualified release, and no production trust root is provisioned here.
 
 ## Evidence, attribution and licensing
 
