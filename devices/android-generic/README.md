@@ -22,9 +22,11 @@ The script binds the matching Go engine into an AAR for `arm64-v8a` and
 then builds `app/build/outputs/apk/debug/app-debug.apk` under this directory.
 It does not install, upload, publish or update a device. Gradle uses its normal
 local development signing key; do not use that identity for a production release.
-The provisional application ID is `com.encore.satellite.incubator.dev`, default versionCode
-3 (`0.1.2-incubator-dev`), minimum API 26, target API 35. Final package identity, signing and migration policy
-are not decided by these development defaults.
+Debug builds keep application ID `com.encore.satellite.incubator.dev`, default
+versionCode 3 (`0.1.2-incubator-dev`), minimum API 26, target API 35. Signed release
+builds use `com.encore.satellite.incubator` for both dev and stable update channels.
+This is a separate app with separate data: existing debug installs remain untouched,
+with no automatic uninstall or migration. Release signing custody remains unprovisioned.
 
 The separate [signing/update foundation](../../release/android-updates.md) adds
 APK CI checks, an explicitly gated signed-candidate workflow, authenticated
@@ -161,5 +163,6 @@ bundled in the APK, not fetched as a separate executable.
 
 See [ACKNOWLEDGEMENTS.md](../../ACKNOWLEDGEMENTS.md) for pinned Techo5/frontend,
 mixednet and SendspinDroid provenance. Included notices are also packaged as APK
-assets. New Encore material's license remains unselected; release distribution
-needs its own complete dependency/license review.
+assets, alongside the [MIT License](../../LICENSE) for Encore-owned material.
+Third-party material retains its own terms; release distribution still needs a
+complete dependency/license and corresponding-source review.

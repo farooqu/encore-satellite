@@ -8,6 +8,14 @@ plugins {
 fun env(name: String) = System.getenv(name).orEmpty()
 val coreVersion = (JsonSlurper().parse(file("../../../release/targets.json")) as Map<*, *>)["core_version"] as String
 fun quoted(value: String) = "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r") + "\""
+abstract class EncoreLicenseAssets : Sync() {
+    @get:OutputDirectory abstract val outputDirectory: DirectoryProperty
+    init { into(outputDirectory) }
+}
+val encoreLicenseAssets = tasks.register<EncoreLicenseAssets>("prepareEncoreLicenseAssets") {
+    from("../../../LICENSE")
+    outputDirectory.set(layout.buildDirectory.dir("generated/encoreLicenseAssets"))
+}
 gradle.taskGraph.whenReady {
   if (allTasks.any { it.project == project && it.name.contains("release", ignoreCase = true) }) {
     listOf("ENCORE_KEYSTORE", "ENCORE_STORE_PASSWORD", "ENCORE_KEY_ALIAS", "ENCORE_KEY_PASSWORD", "ENCORE_VERSION_CODE", "ENCORE_VERSION_NAME", "ENCORE_UPDATE_BASE_URL", "ENCORE_UPDATE_PUBLIC_KEY").forEach {
@@ -22,9 +30,8 @@ android {
     namespace = "com.encore.satellite"
     compileSdk = 36
     defaultConfig {
-        // Preserve the existing development package/data. Changing this is an
-        // explicit new installation, not a routine update or channel switch.
-        applicationId = "com.encore.satellite.incubator.dev"
+        // Signed dev/stable releases share an identity separate from debug data.
+        applicationId = "com.encore.satellite.incubator"
         minSdk = 26
         targetSdk = 35
         versionCode = env("ENCORE_VERSION_CODE").ifBlank { "3" }.toInt()
@@ -46,7 +53,10 @@ android {
             }
         }
     }
-    buildTypes { getByName("release") { signingConfig = signingConfigs.getByName("release") } }
+    buildTypes {
+        getByName("debug") { applicationIdSuffix = ".dev" }
+        getByName("release") { signingConfig = signingConfigs.getByName("release") }
+    }
     sourceSets {
         getByName("main") {
             kotlin.directories += "../../../platforms/android/src/main/java"
@@ -64,6 +74,9 @@ android {
     }
     testOptions { unitTests.isIncludeAndroidResources = true }
     packaging { resources.excludes += setOf("META-INF/AL2.0", "META-INF/LGPL2.1") }
+}
+androidComponents.onVariants { variant ->
+    variant.sources.assets?.addGeneratedSourceDirectory(encoreLicenseAssets) { it.outputDirectory }
 }
 dependencies {
     implementation("androidx.core:core:1.15.0")

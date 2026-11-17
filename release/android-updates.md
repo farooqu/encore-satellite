@@ -45,14 +45,17 @@ retry via ESPHome. “Verified / approve installation” does **not** mean insta
 Successful replacement can kill the process; reopen/start Encore afterward.
 There is no automatic boot/replacement restart or installation-success claim.
 
-The existing application ID remains `com.encore.satellite.incubator.dev` on both
-channels. Stable is a feed choice, not a package suffix or backend choice.
-Changing the ID is a new app with separate data; no migration is implied.
-Android requires the same signing identity and a higher versionCode for updates.
-The current debug-signed APK cannot be replaced in-place by a new production
-key. Do not uninstall it as an automatic “fix”: that deletes pairing/dashboard/
-music data. Decide migration before first production provisioning. Do not adopt
-the publicly known Android debug key as a production trust root.
+Signed release builds use `com.encore.satellite.incubator` on both channels,
+as approved by Umer for the first Incubator dev release. Stable is a feed choice,
+not a package suffix or backend choice. Debug builds retain
+`com.encore.satellite.incubator.dev`; the signed app is a separate installation
+with separate data. Leave existing debug installs and their pairing/dashboard/
+music state untouched. No automatic uninstall, data transfer or migration is added.
+The FileProvider authority follows each build's application ID, keeping APK update
+URIs separate too. Android requires the same signing identity and a higher
+versionCode for updates within the chosen app ID. The current debug-signed APK
+cannot be replaced in-place by a new production key. Do not adopt the publicly
+known Android debug key as a production trust root.
 
 ## Build and signing pipeline
 
@@ -171,9 +174,9 @@ package revision cannot authorize an older/equal core through ordinary OTA.
 
 ## Gates before activating this for users
 
-Umer must choose the long-term package ID and migration from debug installations,
-approve key custody/backup and protected credential setup, and choose the immutable
-HTTPS feed/artifact host. Keep feeds disabled until those inputs are provisioned,
+The separate signed-app identity is decided; debug installations remain untouched.
+Umer must approve key custody/backup and protected credential setup, and choose
+the immutable HTTPS feed/artifact host. Keep feeds disabled until those inputs are provisioned,
 central release/cohort/revision/withdrawal rules and the license audit are met,
 and a real device demonstrates higher-version replacement retaining state,
 user cancellation, denied install/notification permission, interrupted download,

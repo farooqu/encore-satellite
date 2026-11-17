@@ -19,7 +19,7 @@ export PATH="$(go env GOPATH)/bin:$PATH"
 if [[ "${SKIP_GO_BIND:-0}" != 1 ]]; then
   go install golang.org/x/mobile/cmd/gomobile@v0.0.0-20261011034528-197770444867
   go install golang.org/x/mobile/cmd/gobind@v0.0.0-20261011034528-197770444867
-  (cd "$root" && gomobile bind -target="${ANDROID_TARGETS:-android/arm64,android/arm}" -androidapi 26 -javapkg com.encore.engine -o "$out/encore.aar" ./devices/android-generic/mobile)
+  (cd "$root" && gomobile bind -trimpath -target="${ANDROID_TARGETS:-android/arm64,android/arm}" -androidapi 26 -javapkg com.encore.engine -o "$out/encore.aar" ./devices/android-generic/mobile)
 fi
 gradle="${GRADLE:-$out/sendspindroid/android/gradlew}"
 if [[ $# == 0 ]]; then set -- :app:assembleDebug; fi
