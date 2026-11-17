@@ -5,7 +5,7 @@ Linux environment: project-built ARMv7 kernel, recovery initramfs, Alpine usersp
 radio services, Satellite runtime and USB/recovery tooling, not an app requiring an
 existing Linux installation. Do not flash a household device expecting a finished Techo5 replacement.
 `profile.json` and the central registry remain planned/revision-zero because no
-supported release or signing/update channel exists. Other Echo models are not supported.
+supported release or provisioned public update channel exists. Other Echo models are not supported.
 
 ## What is implemented
 
@@ -30,9 +30,13 @@ supported release or signing/update channel exists. Other Echo models are not su
   the real wlan0 MAC identifies the device. No lab HTTP controls are packaged.
 - Clean application state, first-boot Improv BLE or prompted USB Wi-Fi credentials, optional custom name,
   recovery/misc backups, USB transfer read-back checks and two Encore rootfs slots.
+- Experimental signed Linux application OTA, persistent dev/stable selection,
+  ESPHome availability and explicit trial installation, with locally provisioned
+  trust and no production feed/key or physical OTA qualification.
 
 **Not implemented by this package:** AEC/beamforming, speaker EQ calibration,
-Voice PE ring parity, OTA or release signatures. Activation uses Action or
+Voice PE ring parity, base/kernel OTA migration or a production release service.
+Voice activation uses Action or
 app-pushed microWakeWord/MixedNet models. Incubator does not advertise AEC,
 monitoring or intercom. A source-backed
 route is not an acoustic result; playback level and every physical control still
@@ -423,7 +427,7 @@ From the USB console, `encore-recovery twrp --apply` restores the verified saved
 TWRP image and reboots into it. Run `install.py update` with `--serial`, `--bundle`
 and `--sha256` (preflight by default, or `--apply --allow-development`). It retains
 Encore's name, Wi-Fi and Noise key and stages only the **inactive** rootfs slot.
-Routine updates must preserve the installed backend and channel. A future
+This USB development path preserves the installed backend and channel. A future
 Assist variant would require explicit application-package replacement with tested
 state migration/recovery, not a config edit, ordinary update or Linux-base reflash.
 That cross-variant replacement is not implemented. Older local prototypes with a
@@ -454,30 +458,101 @@ while recovery is still running, not blindly rerunning or erasing partitions.
 Power-loss boot/rollback, USB enumeration and restoration remain hardware tests,
 not guarantees established by filesystem unit tests.
 
-### Selected update channel remains a Linux integration gap
+### Signed selected-channel application OTA (experimental)
 
-The current installer accepts unsigned local **dev** bundles only. It preserves
-the installed channel and has no network feed, update entity or persistent
-stable/dev selector. Do not interpret the maintenance controls above as OTA.
+The USB/TWRP installer above remains an unsigned local **dev** path and preserves
+the installed channel. The Linux runtime separately implements signed network
+application-slot updates through its **encrypted** ESPHome management endpoint:
 
-The cross-platform channel control is being coordinated with the Android update
-owner: `update_channel`, options `dev`/`stable`, persisted separately from the
-installed package's provenance. Selecting it will affect eligibility only, not
-install or downgrade. Linux must match candidates to that selected channel while
-retaining target/backend/base compatibility and its highest-attempted-revision
-anti-rollback fence. Failed trials must not allow lower-revision installation.
-Signed metadata verification, availability reporting and a reviewed Linux
-staging/activation mechanism remain future work; base migration remains separate.
-Whether “next” includes an already-published compatible higher revision or only
-post-switch publications has been decided: an eligible already-published release
-counts. Eligibility requires `core_version` SemVer strictly greater than the
-installed core version as well as a higher target/highest-attempted revision.
-Equal or older SemVer at a higher revision is not an ordinary update. If the
-selected channel is behind the installed version, wait for a newer release;
-never downgrade. Linux records installed `core_version` in each slot's immutable
-`etc/encore-package.json`; desired channel must remain separate. This contract is
-for the follow-on OTA implementation, not additional behavior of today's dev
-USB installer.
+- **Update channel** (`update_channel`) has exactly `dev` and `stable`. Desired
+  channel and a generation counter are persisted privately in
+  `/data/encore/update-state.json` before acknowledgment. The shared `config.json`
+  is unchanged so the previous good runtime can still read it after rollback;
+  older-runtime settings changes also leave updater state intact. An absent
+  updater-state file initializes from the installed manifest,
+  not a version suffix. Selection clears old availability and cancels old work;
+  it never downloads, installs or restarts anything. A dev→stable→dev change also
+  invalidates the original dev authorization.
+- **Check for updates** (`check_updates`) and the `linux_update` entity's CHECK
+  command discover only. Discovery also runs hourly. Installed and latest strings
+  include core SemVer and package revision. Missing trust, network failures and
+  compatibility/recovery failures report unknown with a reason, not up-to-date.
+- Only an explicit `linux_update` UPDATE command requests download, inactive-slot
+  staging, trial activation and an orderly reboot. Downloaded, staged, activated
+  and health-accepted are distinct states. No automatic installation occurs.
+
+An eligible already-published release counts: there is no switch-time watermark.
+Its signed selected-channel `core_version` must be strictly newer than the actual
+installed core under SemVer precedence, **and** its revision must exceed the
+highest attempted revision (including failed trials). Build metadata, equal core
+at a higher revision and older cores do not qualify. A selected channel behind
+installed waits; no downgrade or automatic fallback is allowed. Stable forbids
+prereleases. Installed provenance stays immutable and separate from selection.
+
+Linux and Android share these control semantics, not installers or privileges.
+The Linux implementation is `platforms/linuxupdate` plus this device's adapter;
+no Android or shared backend is imported by its updater.
+
+#### Feed trust and offline approval
+
+There is **no production endpoint or key built in**. A separately approved local
+operator must provision `/data/encore/update-trust.json` (0600, root-owned, inside
+the private device directory) with `base_url` (HTTPS) and `public_key` (base64 raw
+32-byte Ed25519 public key). Optional `root_ca_pem` supplies a locally trusted HTTPS
+CA PEM; otherwise Go uses system roots. The maintenance base may not contain a CA
+bundle, so provision this CA explicitly when required. Never disable TLS validation.
+The device clock must be correct: stale or implausibly future signed metadata
+fails closed. This task does not provision trust, time services or any device.
+
+Fetch exactly `<base_url>/echo-dot-2/incubator/<dev|stable>.jws`. Metadata is compact
+JWS (RFC 7515, EdDSA/RFC 8037) with the exact protected header
+`{"alg":"EdDSA","typ":"encore-linux-update+jws"}`. Payload fields are:
+
+`target`, `backend`, `format`, `channel`, `core_version`, `revision`, `base_sha256`,
+`url`, `size`, `sha256`, `issued`, `expires`.
+
+Times are Unix seconds; validity is at most seven days, with five minutes of
+future-issued tolerance. Metadata is bounded to 32 KiB and bundles to 256 MiB.
+HTTPS is required for metadata, artifacts and redirects, without URL credentials,
+query or fragment. Private per-channel replay checkpoints reject lower issue
+times/revisions and replacement of an observed revision's immutable identity.
+The signed SHA-256 covers the entire ZIP, binding its manifest and all payloads;
+individual members and exact decompressed size limits are checked again locally.
+
+`packaging/feed.py` validates an inspected local dev bundle and signs its metadata
+using an **offline Ed25519 PEM key** and OpenSSL 3. Its arguments are `--bundle`,
+`--url`, `--channel`, `--expires`, `--key`, `--output`, and optional `--issued`.
+It refuses output overwrite and performs no upload or device operation. A stable
+entry promotes the exact existing dev-provenance bytes/revision of a non-prerelease
+core; it does not rewrite or rebuild the bundle. Channel is signed feed policy,
+not a reason to modify installed provenance. A signature is publisher approval,
+not evidence of hardware qualification. Key rotation/revocation and publication
+need their own reviewed operational procedure; feed data cannot replace trust.
+
+#### Staging, activation and recovery boundaries
+
+Before staging and again before activation, the running slot must equal active
+and be `good`; target/backend/format and the exact shared-base identity must match.
+Saved Linux/TWRP hashes, the live recovery image and padded MISC `boot-recovery`
+selection must be intact. The existing USB install lock serializes writes. A
+stale lock fails closed and needs physical recovery inspection, not auto-deletion.
+
+The updater verifies the ZIP, extracts a bounded safe rootfs into private staging,
+fsyncs its files/directories, durably reserves the revision, invalidates the
+inactive slot, and replaces **only that slot**. Active remains the running good
+slot until a generation-fenced explicit activation writes `trial 2` and switches
+active last. Cancellation can leave an unactivated bad inactive slot/reserved
+revision, never authorization to reuse that revision. The lock is released before
+the orderly reboot. If activation/reboot durability is uncertain, further requests
+are blocked until reboot/inspection rather than claiming success or retrying.
+
+The unchanged initramfs/health service owns the two-boot trial, health commitment
+and old-good-slot fallback described above. OTA never writes the kernel, initramfs,
+recovery or MISC and never mutates Wi-Fi, SSH keys, pairing or saved recovery
+backups. **Base/kernel migration remains unsupported.** Host filesystem/Noise/TLS
+tests exercise this path, but actual power-loss behavior and physical-device OTA
+acceptance remain unqualified. Existing devices do not gain OTA until a separately
+approved installation of an OTA-capable runtime and local trust provisioning.
 
 ## Provenance and qualification
 

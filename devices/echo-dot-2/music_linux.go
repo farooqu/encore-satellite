@@ -184,6 +184,7 @@ type dotControls struct {
 	*bluetooth.Proxy
 	music       *musicService
 	management  *management
+	updates     *linuxUpdates
 	mu          sync.Mutex
 	subscribers map[*esphome.Conn]struct{}
 }
@@ -198,6 +199,11 @@ var (
 func (d *dotControls) Handle(ctx context.Context, c *esphome.Conn, msg proto.Message) error {
 	switch v := msg.(type) {
 	case *api.ListEntitiesRequest:
+		if d.updates != nil {
+			if err := d.updates.list(c); err != nil {
+				return err
+			}
+		}
 		for _, ent := range []proto.Message{
 			&api.ListEntitiesSwitchResponse{Key: musicKey, ObjectId: "sendspin", Name: "Sendspin music", Icon: "mdi:music", EntityCategory: esphome.CategoryConfig},
 			&api.ListEntitiesTextResponse{Key: musicURLKey, ObjectId: "sendspin_url", Name: "Sendspin server", Icon: "mdi:server", EntityCategory: esphome.CategoryConfig, MinLength: 0, MaxLength: 255},
@@ -226,6 +232,23 @@ func (d *dotControls) Handle(ctx context.Context, c *esphome.Conn, msg proto.Mes
 		if err := d.state(c); err != nil {
 			return err
 		}
+	case *api.SelectCommandRequest:
+		if d.updates != nil && v.Key == updateChannelKey {
+			if err := d.updates.selectChannel(v.State); err != nil {
+				return err
+			}
+			return d.broadcast()
+		}
+	case *api.UpdateCommandRequest:
+		if d.updates != nil && v.Key == linuxUpdateKey {
+			switch v.Command {
+			case api.UpdateCommand_UPDATE_COMMAND_CHECK:
+				d.updates.request(false)
+			case api.UpdateCommand_UPDATE_COMMAND_UPDATE:
+				d.updates.request(true)
+			}
+			return d.broadcast()
+		}
 	case *api.SwitchCommandRequest:
 		if d.management != nil && v.Key == sshEnabledKey {
 			if err := d.management.ssh.setEnabled(v.State); err != nil {
@@ -247,6 +270,10 @@ func (d *dotControls) Handle(ctx context.Context, c *esphome.Conn, msg proto.Mes
 			return d.broadcast()
 		}
 	case *api.ButtonCommandRequest:
+		if d.updates != nil && v.Key == checkUpdatesKey {
+			d.updates.request(false)
+			return d.broadcast()
+		}
 		if v.Key == musicPlayKey {
 			d.music.command(linuxsendspin.Play)
 			return nil
@@ -266,6 +293,13 @@ func (d *dotControls) Handle(ctx context.Context, c *esphome.Conn, msg proto.Mes
 	return d.Proxy.Handle(ctx, c, msg)
 }
 func (d *dotControls) state(c *esphome.Conn) error {
+	if d.updates != nil {
+		for _, state := range d.updates.states() {
+			if err := c.Send(state); err != nil {
+				return err
+			}
+		}
+	}
 	enabled, url, _ := d.music.snapshot()
 	if err := c.Send(&api.SwitchStateResponse{Key: musicKey, State: enabled}); err != nil {
 		return err
@@ -305,6 +339,9 @@ func (d *dotControls) Run(ctx context.Context) {
 	workers.Go(func() { d.music.Run(ctx) })
 	if d.management != nil {
 		workers.Go(func() { d.watchManagement(ctx) })
+	}
+	if d.updates != nil {
+		workers.Go(func() { d.updates.run(ctx, d.broadcast) })
 	}
 	workers.Wait()
 }

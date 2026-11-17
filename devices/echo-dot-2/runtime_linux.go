@@ -147,6 +147,10 @@ func Run(parent context.Context, c Config) error {
 		return err
 	}
 	controls := &dotControls{Proxy: proxy, music: newMusic(c, saved, player), management: admin}
+	controls.updates, err = newLinuxUpdates("/data/encore/update-state.json", "/etc/encore-package.json")
+	if err != nil {
+		return err
+	}
 	key, err := noiseKey(KeyPath)
 	if err != nil {
 		return err
