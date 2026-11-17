@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/farooqu/encore-satellite/core/audio"
+	"github.com/farooqu/encore-satellite/core/presentation"
 	"github.com/farooqu/encore-satellite/core/session"
 	"github.com/farooqu/encore-satellite/core/wake"
 )
@@ -32,15 +33,24 @@ func (l *link) Send(c session.Command) error {
 }
 
 type player struct {
-	writes           int
-	flushed          int
-	entered, release chan struct{}
-	holdCancelled    bool
+	writes                     int
+	flushed                    int
+	entered, release           chan struct{}
+	holdCancelled              bool
+	writeEntered, writeRelease chan struct{}
+	writeErr                   error
 }
 
 func (p *player) Write(ctx context.Context, samples []int16) error {
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	if p.writeEntered != nil {
+		close(p.writeEntered)
+		<-p.writeRelease
+	}
+	if p.writeErr != nil {
+		return p.writeErr
 	}
 	p.writes += len(samples)
 	return nil
@@ -111,12 +121,18 @@ func TestVoiceActivityCoversListeningThroughPhysicalDrain(t *testing.T) {
 			if !active.Load() {
 				t.Fatal("wire end released ducking before physical drain")
 			}
+			if s := e.Snapshot(); !s.Active || s.Output.State != "draining" || s.Output.Owner != "voice" || !s.Output.Received || s.TalkAllowed {
+				t.Fatal("draining output was hidden by wire completion", s)
+			}
 			close(p.release)
 			if err := <-done; err != nil {
 				t.Fatal(err)
 			}
 			if active.Load() {
 				t.Fatal("finished turn retained ducking")
+			}
+			if s := e.Snapshot(); s.Active || s.Output.State != "" {
+				t.Fatal("drained output retained presentation ownership", s)
 			}
 			_ = e.StartManual()
 			_ = e.Stop()
@@ -871,5 +887,146 @@ func TestNativeStopThenMuteDuringAnnouncementDrainReconnects(t *testing.T) {
 	_ = e.Output(ng, []int16{13, -29})
 	if p.writes != 3 {
 		t.Fatal("new call after cancelled announcement did not play", p.writes)
+	}
+}
+
+func TestPresentationTurnAttributionAndPolicyLifetimes(t *testing.T) {
+	e, _, _, g := fixture(t)
+	on := true
+	_ = e.Handle(g, session.Event{Kind: "night", Night: &on})
+	_ = e.Wake(wake.Detection{Word: "nabu"})
+	first := e.Snapshot()
+	if first.Generation != g || first.Turn == 0 || first.Invocation != "wake" || first.Input != "tentative" || first.Accepted || first.Night != "on" {
+		t.Fatal(first)
+	}
+	_ = e.Handle(g, session.Event{Kind: "listening"})
+	if s := e.Snapshot(); s.Input != "listening" || !s.InputOpen || !s.Accepted || !s.Active {
+		t.Fatal(s)
+	}
+	person := presentation.Speaker{Name: "Person", Score: 0, ScoreKnown: true, RGB: [3]byte{0, 37, 255}, ColorKnown: true}
+	for range 2 {
+		_ = e.Handle(g, session.Event{Kind: "processing", Speaker: person})
+		if s := e.Snapshot(); s.Turn != first.Turn || s.Input != "" || !s.InputOpen || s.Speaker != person || s.Output.State != "" {
+			t.Fatal("processing metadata changed the turn or ownership", s)
+		}
+	}
+	copy := e.Snapshot()
+	copy.Speaker.RGB[1] = 99
+	if e.Snapshot().Speaker != person {
+		t.Fatal("snapshot aliases retained attribution")
+	}
+	_ = e.Handle(g, session.Event{Kind: "responding", Text: "Actual reply"})
+	_ = e.Handle(g, session.Event{Kind: "processing", Speaker: presentation.Speaker{Name: "Late speaker"}})
+	if s := e.Snapshot(); s.Phase != "speaking" || !s.InputOpen || s.Output.State != "queued" || s.Output.Received || s.Speaker != person || s.Reply != "Actual reply" || s.Turn != first.Turn {
+		t.Fatal("text/late attribution claimed playback or restarted work", s)
+	}
+	_ = e.Output(g, []int16{321, -765})
+	if s := e.Snapshot(); s.Output.State != "playing" || !s.InputOpen || s.Speaker != person {
+		t.Fatal("output lost independent input or current-turn attribution", s)
+	}
+	_ = e.Handle(g, session.Event{Kind: "hangup", Reason: "done"})
+	if s := e.Snapshot(); s.InputOpen || s.Output.State != "playing" || s.Speaker != person {
+		t.Fatal("HANGUP did not close input independently of remaining playback", s)
+	}
+	_ = e.EndOutput(g)
+	if s := e.Snapshot(); s.Output.State != "" {
+		t.Fatal(s)
+	}
+	_ = e.Handle(g, session.Event{Kind: "hangup", Listen: true})
+	if s := e.Snapshot(); s.Turn != first.Turn+1 || s.Invocation != "follow_up" || s.Input != "listening" || !s.InputOpen || s.Speaker.Name != "" || s.Accepted || s.Reply != "" || s.Night != "on" {
+		t.Fatal("follow-up did not establish its own clean turn", s)
+	}
+	_ = e.Stop()
+	_ = e.Handle(g, session.Event{Kind: "processing", Speaker: person})
+	if s := e.Snapshot(); !s.Inhibited || s.InputOpen || s.Active || s.Output.State != "" || s.Speaker.Name != "" || s.Heard != "" || s.Reply != "" || s.Night != "on" || s.TalkAllowed {
+		t.Fatal("stop retained or revived turn presentation", s)
+	}
+	e.SetMuted(true)
+	on = false
+	_ = e.Handle(g, session.Event{Kind: "night", Night: &on})
+	if s := e.Snapshot(); !s.Inhibited || s.Night != "off" {
+		t.Fatal("privacy suppressed connection-scoped policy", s)
+	}
+	e.Disconnect(g, "test")
+	ng, _ := e.Attach(&link{backend: session.Incubator})
+	_ = e.Handle(g, session.Event{Kind: "night", Night: &on})
+	_ = e.Handle(g, session.Event{Kind: "processing", Speaker: person})
+	if s := e.Snapshot(); s.Generation != ng || s.Night != "unknown" || s.Speaker.Name != "" || s.Output.State != "" {
+		t.Fatal("old reader revived replacement presentation", s)
+	}
+}
+
+func TestPresentationOutputRequiresSuccessfulCurrentHostWrite(t *testing.T) {
+	for _, finish := range []string{"accepted", "failed", "stop", "mute", "replace"} {
+		t.Run(finish, func(t *testing.T) {
+			p := &player{writeEntered: make(chan struct{}), writeRelease: make(chan struct{})}
+			if finish == "failed" {
+				p.writeErr = errors.New("host write failed")
+			}
+			e := session.New(p)
+			g, _ := e.Attach(&link{backend: session.Incubator})
+			_ = e.StartManual()
+			_ = e.Handle(g, session.Event{Kind: "listening"})
+			_ = e.Handle(g, session.Event{Kind: "responding", Text: "Reply"})
+			done := make(chan error, 1)
+			go func() { done <- e.Output(g, []int16{19, -43}) }()
+			<-p.writeEntered
+			if s := e.Snapshot(); s.Output.State != "queued" || !s.Output.Received || s.Output.Owner != "voice" {
+				t.Fatal("pending write claimed accepted playback", s)
+			}
+			switch finish {
+			case "stop":
+				_ = e.Stop()
+			case "mute":
+				e.SetMuted(true)
+			case "replace":
+				e.Disconnect(g, "test")
+				_, _ = e.Attach(&link{backend: session.Incubator})
+			}
+			close(p.writeRelease) // Host may return success despite cancellation.
+			err := <-done
+			if (err != nil) != (finish == "failed") {
+				t.Fatal(err)
+			}
+			want := ""
+			if finish == "accepted" {
+				want = "playing"
+			} else if finish == "failed" {
+				want = "failed"
+			}
+			if s := e.Snapshot(); s.Output.State != want {
+				t.Fatal("completed write misrepresented current ownership", s)
+			}
+		})
+	}
+}
+
+func TestPresentationAnnouncementOwnershipSurvivesDrainAndAlertOverlap(t *testing.T) {
+	p := &player{entered: make(chan struct{}), release: make(chan struct{})}
+	e := session.New(p)
+	g, _ := e.Attach(&link{backend: session.Incubator})
+	_ = e.Handle(g, session.Event{Kind: "announcement", Active: true})
+	if s := e.Snapshot(); !s.Active || !s.Announcing || s.Output.State != "" {
+		t.Fatal("announcement marker was lost or claimed PCM playback", s)
+	}
+	_ = e.Output(g, []int16{7})
+	_ = e.Handle(g, session.Event{Kind: "announcement", Active: false})
+	_ = e.Handle(g, session.Event{Kind: "timer_ringing"})
+	done := make(chan error, 1)
+	go func() { done <- e.EndOutput(g) }()
+	<-p.entered
+	if s := e.Snapshot(); !s.Alert || s.Announcing || s.Output.Owner != "announcement" || s.Output.State != "draining" || !s.Active {
+		t.Fatal("alert or announcement-end relabeled owned output", s)
+	}
+	close(p.release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if s := e.Snapshot(); !s.Active || s.Output.State != "" || !s.Alert {
+		t.Fatal("drain cleared the independent alert", s)
+	}
+	_ = e.Output(g, []int16{13})
+	if s := e.Snapshot(); s.Output.Owner != "alert" || s.Output.State != "playing" {
+		t.Fatal("alert PCM not attributed to the alert", s)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -132,6 +133,47 @@ type captureControls interface {
 	Get(alsa.Control) ([]uint32, error)
 }
 
+// One scalar and its observation time, never samples or direction. The capture
+// owner publishes only after its final privacy/loss/delivery checks. A single
+// atomic word makes reads coherent without blocking acquisition or inference.
+type captureMeter struct {
+	origin time.Time
+	value  atomic.Uint64
+}
+
+type captureReading struct {
+	level float64
+	at    time.Time
+	ready bool
+}
+
+func (m *captureMeter) clear() { m.value.Store(0) }
+
+func (m *captureMeter) observe(samples []int16, now time.Time) {
+	var sum float64
+	for _, sample := range samples {
+		x := float64(sample)
+		sum += x * x
+	}
+	level := uint64(math.Sqrt(sum/float64(len(samples))) * 65535 / 32768)
+	stamp := uint64(now.Sub(m.origin)/time.Millisecond) + 1
+	m.value.Store(stamp<<16 | level)
+}
+
+func (m *captureMeter) snapshot(now time.Time) captureReading {
+	v := m.value.Load()
+	if v == 0 {
+		return captureReading{}
+	}
+	at := m.origin.Add(time.Duration((v>>16)-1) * time.Millisecond)
+	// Fresh silent PCM is healthy; missing PCM is not silence. This is only
+	// visual freshness (12.5 normal blocks), never a new audio/network watchdog.
+	if age := now.Sub(at); age < 0 || age > 250*time.Millisecond {
+		return captureReading{}
+	}
+	return captureReading{level: float64(v&65535) / 65535, at: at, ready: true}
+}
+
 func captureLossMonitor(m captureControls) (func() (bool, error), error) {
 	var controls []alsa.Control
 	for _, name := range []string{"FPGA Overruns", "Kernel Overruns"} {
@@ -163,9 +205,13 @@ func captureLossMonitor(m captureControls) (func() (bool, error), error) {
 	}, nil
 }
 
-func capture(ctx context.Context, pcm capturePCM, loss func() (bool, error), gate *echo.Privacy, voice *incubator.Server, ready func(), privacy ...func(bool)) error {
+func capture(ctx context.Context, pcm capturePCM, loss func() (bool, error), gate *echo.Privacy, voice *incubator.Server, meter *captureMeter, ready func(), privacy ...func(bool)) error {
 	engine := voice.Engine
+	defer meter.clear()
 	setPrivacy := func(muted bool) {
+		if muted {
+			meter.clear()
+		}
 		for _, notify := range privacy {
 			notify(muted)
 		}
@@ -225,6 +271,7 @@ func capture(ctx context.Context, pcm capturePCM, loss func() (bool, error), gat
 		}
 		if lost {
 			clear(b)
+			meter.clear()
 			engine.SetMuted(true) // invalidate active speech immediately
 			if err := pcm.Rewind(); err != nil {
 				return err
@@ -242,6 +289,11 @@ func capture(ctx context.Context, pcm capturePCM, loss func() (bool, error), gat
 			muted, privacyErr = gate.Check(func() {
 				engine.SetMuted(false)
 				captureErr = voice.Capture(audio.Frame{Samples: samples, Sequence: sequence, CapturedAt: time.Since(opened), Discontinuity: discontinuity})
+				if captureErr == nil && !discontinuity && ctx.Err() == nil {
+					meter.observe(samples, time.Now())
+				} else {
+					meter.clear()
+				}
 			})
 			setPrivacy(muted || privacyErr != nil)
 			if muted {

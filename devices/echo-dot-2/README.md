@@ -20,7 +20,7 @@ supported release or provisioned public update channel exists. Other Echo models
   pairing, private persistent trust and an independent default-OFF music switch.
   Voice and music share one ALSA mixer, not competing speaker devices.
 - Authoritative hardware privacy-state reads around acquisition/delivery, buffer
-  invalidation on mute, Action start/stop, volume buttons and a minimal status ring.
+  invalidation on mute, Action start/stop, volume buttons and a full-ring renderer.
   Driver-first mute is not toggled a second time. Never read `power_button_state`.
 - Incubator is the default Dot package. A possible future package for the
   **Home Assistant Assist pipeline** would be opt-in and separately qualified.
@@ -109,6 +109,52 @@ Evdev-record tests through the real input reader cover taps/holds/releases,
 volume limits, Action start/cancel/timer Stop, duplicate downs, muted Action and
 driver-lag/privacy behavior. The event node, audio hardware and voice peer are
 virtual in those tests; all four physical keys still require a Dot acceptance run.
+
+## Full-ring presentation
+
+The Incubator-only renderer uses all 12 RGB segments during active presentation:
+mint follows actual gated mono microphone energy during accepted/local listening;
+tentative wake is dimmer and steady. Processing has a blue rotating intensity
+crest with a bounded secondary server-speaker RGB accent. Queued response text
+is steady lilac; only successful local playback and its drain pulse together.
+The pulse indicates playback ownership, not measured speaker amplitude.
+Alerts swell more slowly in amber. Privacy/fail-closed input suppression is
+steady red and wins over every other state. Healthy ready idle is off.
+
+Disconnected, failed output, missing/stale capture, errors and idle without an
+armed ordinary wake model use steady amber, not an invented readiness or network
+diagnosis. Quiet wake arbitration rejection and the cancellation fence suppress
+old animations. Connection/capture loss still wins over that quiet fence.
+Missing capture is distinct from fresh silent PCM: the visual observer expires
+after 250 ms without a delivered block. This is a conservative presentation
+freshness guard, not a new microphone or network watchdog. It changes no audio
+policy. Only an atomic scalar/time pair is shared with the renderer; no samples,
+sound direction, extra recorder or extra loss-counter reader are added.
+
+Encrypted ESPHome controls expose **Ring brightness** (`ring_brightness`, integer
+1..100%) and **Ring reduced motion** (`ring_reduced_motion`). They persist before
+applying in private `/data/encore/ring.json`, separately from strict `config.json`
+so older good-slot binaries can ignore them safely. Missing policy defaults to
+100% of the software ceiling and ordinary motion. Invalid policy fails startup;
+an invalid command or failed save leaves live settings unchanged.
+
+`led_current=3` is unchanged. The software ceiling is 32 per channel and 48 summed
+channels per segment (576 across the ring), **not a calibrated current or comfort
+guarantee**. Night **on or unknown** caps channels at 8 and stops decorative
+motion; reduced motion freezes the processing crest and steadies output/alerts.
+Brightness cannot black out privacy: red retains a floor of 8. Real-input energy
+can still change the mint ring under reduced motion. The 50 ms frame tick,
+2.4 s rotation, 1.8 s output pulse, 3.2 s alert swell, scalar easing and microphone
+visual gain are initial software tuning, not hardware-qualified values.
+
+One frame writer coalesces unchanged driver payloads and recomputes the current
+state rather than resuming a saved sequence. Provisioning/update/music status
+animations and other Echo models are not implemented here. Independent music,
+capture processing, release scope and audio cancellation policy are unchanged.
+Fake-PCM/clock/sink and encrypted-control tests plus ARMv7 cross-builds validate
+software behavior only; actual LED order, diffuser color, brightness/night comfort,
+capture-to-light latency and resource/audio continuity still require an authorized
+physical-device run.
 
 ## Bluetooth provisioning and optional proxy
 

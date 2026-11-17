@@ -2,50 +2,16 @@ package dot
 
 import (
 	"context"
-	"encoding/hex"
 	"errors"
-	"os"
 	"strings"
 	"time"
 
-	"github.com/farooqu/encore-satellite/core/presentation"
 	"github.com/farooqu/encore-satellite/core/session"
 	"github.com/farooqu/encore-satellite/platforms/echo"
 	"github.com/farooqu/encore-satellite/platforms/echo/input"
 )
 
 const ringPath = "/sys/bus/i2c/devices/0-003f/"
-
-// RingColor is deliberately static. Privacy always outranks calls and alerts.
-func RingColor(s presentation.State) [3]byte {
-	if s.Muted {
-		return [3]byte{32, 0, 0}
-	}
-	if s.Alert {
-		return [3]byte{32, 16, 0}
-	}
-	switch s.Phase {
-	case "listening", "tentative":
-		return [3]byte{0, 24, 24}
-	case "working":
-		return [3]byte{0, 0, 24}
-	case "speaking":
-		return [3]byte{0, 24, 0}
-	case "disconnected", "error":
-		return [3]byte{24, 8, 0}
-	default:
-		return [3]byte{}
-	}
-}
-
-func writeRing(s presentation.State) error {
-	c := RingColor(s)
-	b := make([]byte, 36)
-	for i := range b {
-		b[i] = c[i%3]
-	}
-	return os.WriteFile(ringPath+"frame", []byte(hex.EncodeToString(b)+"\n"), 0644)
-}
 
 func openButtons() ([]*input.Device, error) {
 	devices, err := input.List()

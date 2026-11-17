@@ -79,7 +79,7 @@ func TestPrivateUpdateSelectionInitialization(t *testing.T) {
 
 // Exercise the real Noise endpoint. Selection is durable before its state
 // arrives; neither selection nor CHECK can become an installation request.
-func TestLinuxUpdateControlsEncryptedAPI(t *testing.T) {
+func TestLinuxUpdateAndRingControlsEncryptedAPI(t *testing.T) {
 	c := Config{Schema: 1, Name: "update-test"}
 	s := &settings{path: filepath.Join(t.TempDir(), "config.json"), config: c}
 	if err := SaveConfig(s.path, c); err != nil {
@@ -93,7 +93,11 @@ func TestLinuxUpdateControlsEncryptedAPI(t *testing.T) {
 	u.trustPath = filepath.Join(t.TempDir(), "absent-trust.json")
 	p := newSpeaker(&speakerPCM{})
 	defer p.Close()
-	d := &dotControls{Proxy: bluetooth.New(managementRadio{}, bluetooth.Options{}), music: newMusic(c, s, p), updates: u}
+	ring, err := loadRingSettings(filepath.Join(filepath.Dir(s.path), "ring.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &dotControls{Proxy: bluetooth.New(managementRadio{}, bluetooth.Options{}), music: newMusic(c, s, p), updates: u, ring: ring}
 	key, err := esphome.GeneratePSK()
 	if err != nil {
 		t.Fatal(err)
@@ -110,10 +114,21 @@ func TestLinuxUpdateControlsEncryptedAPI(t *testing.T) {
 	peer.send(&api.HelloRequest{ClientInfo: "linux-update-test", ApiVersionMajor: 1, ApiVersionMinor: 12})
 	peer.receive()
 	peer.send(&api.ListEntitiesRequest{})
-	var channel, check, update uint32
+	var channel, check, update, brightness, motion uint32
 listing:
 	for {
 		switch v := peer.receive().(type) {
+		case *api.ListEntitiesNumberResponse:
+			if v.ObjectId == "ring_brightness" {
+				brightness = v.Key
+				if v.MinValue != 1 || v.MaxValue != 100 || v.Step != 1 || v.EntityCategory != esphome.CategoryConfig {
+					t.Fatal(v)
+				}
+			}
+		case *api.ListEntitiesSwitchResponse:
+			if v.ObjectId == "ring_reduced_motion" {
+				motion = v.Key
+			}
 		case *api.ListEntitiesSelectResponse:
 			if v.ObjectId == "update_channel" {
 				channel = v.Key
@@ -133,8 +148,8 @@ listing:
 			break listing
 		}
 	}
-	if channel == 0 || check == 0 || update == 0 {
-		t.Fatal("incomplete update discovery")
+	if channel == 0 || check == 0 || update == 0 || brightness == 0 || motion == 0 {
+		t.Fatal("incomplete update/ring discovery")
 	}
 	peer.send(&api.SubscribeStatesRequest{})
 	for {
@@ -144,6 +159,25 @@ listing:
 			}
 			break
 		}
+	}
+	peer.send(&api.NumberCommandRequest{Key: brightness, State: 34})
+	for {
+		if v, ok := peer.receive().(*api.NumberStateResponse); ok && v.Key == brightness && v.State == 34 {
+			break
+		}
+	}
+	peer.send(&api.SwitchCommandRequest{Key: motion, State: true})
+	for {
+		if v, ok := peer.receive().(*api.SwitchStateResponse); ok && v.Key == motion && v.State {
+			break
+		}
+	}
+	loadedRing, err := loadRingSettings(ring.path)
+	if err != nil || loadedRing.snapshot() != (RingOptions{Brightness: 34, ReducedMotion: true}) {
+		t.Fatal("ring state acknowledged before durable persistence", err)
+	}
+	if b, err := os.ReadFile(s.path); err != nil || string(b) != legacyConfig {
+		t.Fatal("ring policy changed the old good slot's config", err)
 	}
 	for _, value := range []string{"stable", "dev"} {
 		peer.send(&api.SelectCommandRequest{Key: channel, State: value})

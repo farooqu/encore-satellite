@@ -43,11 +43,13 @@ type Link interface {
 
 // Event contains only actually supplied upstream presentation data.
 type Event struct {
-	Kind   string
-	Text   string
-	Reason string
-	Listen bool
-	Active bool
+	Kind    string
+	Text    string
+	Reason  string
+	Listen  bool
+	Active  bool
+	Speaker presentation.Speaker
+	Night   *bool
 }
 
 var (
@@ -61,6 +63,12 @@ type Engine struct {
 	state                           presentation.State
 	link                            Link
 	generation                      uint64
+	turn                            uint64
+	invocation                      string
+	responsePending                 bool
+	outputOwner                     string
+	outputAccepted, outputDraining  bool
+	outputFailed                    bool
 	active, discard                 bool
 	outputTimer                     bool
 	inputOpen, outputOpen, runEnded bool
@@ -88,7 +96,47 @@ func New(player audio.Playback) *Engine {
 func (e *Engine) Snapshot() presentation.State {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return e.state
+	s := e.state
+	s.Generation, s.Turn = e.generation, e.turn
+	if s.Night == "" {
+		s.Night = "unknown"
+	}
+	s.Inhibited = e.link == nil || s.Muted || e.cancelling || e.discard
+	s.InputOpen = e.inputOpen && !s.Inhibited
+	s.Speaker = presentation.Speaker{}
+	if s.Inhibited {
+		return s
+	}
+	s.Active = e.active || e.outputOpen || e.announcing || s.Alert
+	s.Announcing = e.announcing
+	s.TalkAllowed = !s.Active
+	// This is engine permission only. Incubator additionally checks whether
+	// its ordinary model worker has armed and the host reports healthy capture.
+	s.WakeAllowed = !s.Active
+	if e.active || (e.outputOpen && e.outputOwner == "voice") {
+		s.Invocation = e.invocation
+		s.Speaker = e.state.Speaker
+	}
+	if e.active {
+		s.Accepted = e.runStarted
+		if e.inputOpen && (s.Phase == "tentative" || s.Phase == "listening") {
+			s.Input = s.Phase
+		}
+	}
+	if e.outputOpen {
+		s.Output = presentation.Output{State: "queued", Owner: e.outputOwner, Received: e.outputReceived}
+		if e.outputFailed {
+			s.Output.State = "failed"
+		} else if e.outputAccepted {
+			s.Output.State = "playing"
+			if e.outputDraining {
+				s.Output.State = "draining"
+			}
+		}
+	} else if e.active && e.responsePending {
+		s.Output = presentation.Output{State: "queued", Owner: "voice"}
+	}
+	return s
 }
 
 // SetActivityHandler connects speaker policy to the entire local voice activity,
@@ -174,6 +222,8 @@ func (e *Engine) disconnect(reason string) {
 	e.runStarted = false
 	e.outputReceived = false
 	e.announcing = false
+	e.invocation, e.outputOwner = "", ""
+	e.responsePending, e.outputAccepted, e.outputDraining, e.outputFailed = false, false, false, false
 	e.state = presentation.State{Backend: e.state.Backend, Muted: e.state.Muted, Phase: "disconnected", Reason: reason}
 	if e.state.Muted {
 		e.state.Phase = "muted"
@@ -203,6 +253,7 @@ func (e *Engine) SetMuted(muted bool) {
 		e.haveFrame = false
 		e.active, e.inputOpen, e.outputOpen, e.announcing = false, false, false, false
 		e.state.Heard, e.state.Reply, e.state.Alert = "", "", false
+		e.state.Speaker = presentation.Speaker{}
 		if alert {
 			_ = e.send(Command{Kind: "stop_alert"})
 		}
@@ -343,6 +394,13 @@ func (e *Engine) start(detection wake.Detection, pre []int16) error {
 	}
 	e.resetOutput()
 	e.state.Heard, e.state.Reply, e.state.Reason = "", "", ""
+	e.state.Speaker = presentation.Speaker{}
+	e.turn++
+	e.invocation = "wake"
+	if detection.Word == "manual" || detection.Word == "follow_up" {
+		e.invocation = detection.Word
+	}
+	e.responsePending = false
 	e.state.Phase = "tentative"
 	if detection.Word == "manual" || detection.Word == "follow_up" {
 		e.state.Phase = "listening"
@@ -396,6 +454,8 @@ func (e *Engine) stop() error {
 	e.announcing = false
 	e.inputOpen, e.outputOpen = false, false
 	e.state.Heard, e.state.Reply, e.state.Alert = "", "", false
+	e.state.Speaker = presentation.Speaker{}
+	e.responsePending = false
 	e.state.Reason = "cancelled"
 	e.state.Phase = "idle"
 	if e.link == nil {
@@ -428,6 +488,17 @@ func (e *Engine) Handle(generation uint64, event Event) error {
 	if generation != e.generation || e.link == nil {
 		return ErrStale
 	}
+	// Area visual policy is connection scoped, not turn scoped. It can update
+	// during mute/cancellation but never from an old reader.
+	if event.Kind == "night" {
+		if event.Night != nil {
+			e.state.Night = "off"
+			if *event.Night {
+				e.state.Night = "on"
+			}
+		}
+		return nil
+	}
 	if event.Kind == "run_start" && !e.runStarted {
 		e.runStarted = true
 		if e.cancelling {
@@ -457,6 +528,7 @@ func (e *Engine) Handle(generation uint64, event Event) error {
 	}
 	if event.Kind == "run_end" {
 		e.inputOpen, e.runEnded = false, true
+		e.state.Speaker = presentation.Speaker{}
 		if !e.outputOpen && e.state.Phase != "speaking" && !e.discard {
 			e.active = false
 			e.state.Phase = "idle"
@@ -466,11 +538,13 @@ func (e *Engine) Handle(generation uint64, event Event) error {
 	if event.Kind == "hangup" {
 		e.active = false
 		e.inputOpen = false
+		e.responsePending = false
 		e.pre.Clear()
 		e.state.Phase, e.state.Reason = "idle", event.Reason
 		// Incubator owns election. A losing candidate returns quietly; its
 		// evidence was already sent without any local peer pre-election.
 		if event.Reason == "answered_elsewhere" || event.Reason == "wake_rejected" {
+			e.state.Speaker = presentation.Speaker{}
 			// HANGUP ends the call, not the healthy native connection. Closing
 			// it here makes ordinary wake rejection trigger upstream backoff.
 			e.cancelOutput()
@@ -512,19 +586,28 @@ func (e *Engine) Handle(generation uint64, event Event) error {
 		if e.active {
 			e.runStarted = true
 			e.state.Phase = "listening"
+			e.state.Speaker = presentation.Speaker{}
 		}
 	case "processing":
-		if e.active {
-			e.state.Phase = "working"
-			if e.state.Backend == string(Assist) {
-				e.inputOpen = false
-			}
+		// Incubator repeats processing to replace speaker attribution. A late
+		// metadata event must not turn an output/failed turn back into input work.
+		if !e.active {
+			break
+		}
+		if e.state.Backend == string(Incubator) && (e.outputOpen || e.state.Phase == "speaking" || e.state.Phase == "error") {
+			break
+		}
+		e.state.Phase = "working"
+		e.state.Speaker = event.Speaker
+		if e.state.Backend == string(Assist) {
+			e.inputOpen = false
 		}
 	case "output_start":
 		if e.active || e.state.Backend == string(Incubator) {
 			e.streamExpected, e.streamEnded = true, false
 			e.openOutput()
 			e.outputReceived = false
+			e.outputAccepted = false
 		}
 	case "recognized":
 		if e.active {
@@ -533,10 +616,12 @@ func (e *Engine) Handle(generation uint64, event Event) error {
 	case "responding":
 		if e.active {
 			e.state.Phase, e.state.Reply = "speaking", event.Text
+			e.responsePending = !e.outputOpen
 		}
 	case "not_recognized", "wake_rejected":
 		if e.active {
 			e.state.Phase, e.state.Reason = "error", event.Kind
+			e.state.Speaker = presentation.Speaker{}
 		}
 	}
 	return nil
@@ -585,7 +670,19 @@ func (e *Engine) Output(generation uint64, samples []int16) error {
 	if discard {
 		return nil
 	}
-	return e.player.Write(ctx, samples)
+	err := e.player.Write(ctx, samples)
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	// A blocked Write can finish after Stop, mute or connection replacement.
+	// It must not reassert playback in the newer presentation.
+	if generation == e.generation && ctx == e.output && e.outputOpen && !e.discard && !e.cancelling && !e.state.Muted {
+		if err == nil {
+			e.outputAccepted = true
+		} else {
+			e.outputFailed = true
+		}
+	}
+	return err
 }
 
 func (e *Engine) EndOutput(generation uint64) error {
@@ -602,6 +699,7 @@ func (e *Engine) EndOutput(generation uint64) error {
 		e.mu.Unlock()
 		return nil
 	}
+	e.responsePending = false
 	if !e.outputOpen && !e.discard {
 		e.mu.Unlock()
 		return nil
@@ -621,6 +719,7 @@ func (e *Engine) EndOutput(generation uint64) error {
 		return nil
 	}
 	ctx, discarded := e.output, e.discard
+	e.outputDraining = !discarded
 	e.mu.Unlock()
 	var err error
 	if !discarded {
@@ -659,6 +758,18 @@ func (e *Engine) openOutput() {
 		// Ownership lasts through cancellation until the stream's boundary;
 		// HANGUP or a later timer event cannot relabel an open voice stream.
 		e.outputTimer = e.state.Backend == string(Incubator) && e.state.Alert && !e.active && !e.announcing
+		e.outputOwner = "voice"
+		if e.outputTimer {
+			e.outputOwner = "alert"
+		} else if e.announcing && !e.active {
+			e.outputOwner = "announcement"
+		}
+		e.outputAccepted, e.outputDraining, e.outputFailed = false, false, false
+		e.outputReceived = false
+		e.responsePending = false
+		if e.outputOwner != "voice" {
+			e.state.Speaker = presentation.Speaker{}
+		}
 		e.outputOpen = true
 	}
 }

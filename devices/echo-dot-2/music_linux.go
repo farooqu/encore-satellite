@@ -185,6 +185,7 @@ type dotControls struct {
 	music       *musicService
 	management  *management
 	updates     *linuxUpdates
+	ring        *ringSettings
 	mu          sync.Mutex
 	subscribers map[*esphome.Conn]struct{}
 }
@@ -199,6 +200,11 @@ var (
 func (d *dotControls) Handle(ctx context.Context, c *esphome.Conn, msg proto.Message) error {
 	switch v := msg.(type) {
 	case *api.ListEntitiesRequest:
+		if d.ring != nil {
+			if err := d.ring.list(c); err != nil {
+				return err
+			}
+		}
 		if d.updates != nil {
 			if err := d.updates.list(c); err != nil {
 				return err
@@ -250,6 +256,12 @@ func (d *dotControls) Handle(ctx context.Context, c *esphome.Conn, msg proto.Mes
 			return d.broadcast()
 		}
 	case *api.SwitchCommandRequest:
+		if d.ring != nil && v.Key == ringMotionKey {
+			if err := d.ring.configure(nil, &v.State); err != nil {
+				return err
+			}
+			return d.broadcast()
+		}
 		if d.management != nil && v.Key == sshEnabledKey {
 			if err := d.management.ssh.setEnabled(v.State); err != nil {
 				return err
@@ -258,6 +270,13 @@ func (d *dotControls) Handle(ctx context.Context, c *esphome.Conn, msg proto.Mes
 		}
 		if v.Key == musicKey {
 			if err := d.music.configure(&v.State, nil); err != nil {
+				return err
+			}
+			return d.broadcast()
+		}
+	case *api.NumberCommandRequest:
+		if d.ring != nil && v.Key == ringBrightnessKey {
+			if err := d.ring.configure(&v.State, nil); err != nil {
 				return err
 			}
 			return d.broadcast()
@@ -293,6 +312,13 @@ func (d *dotControls) Handle(ctx context.Context, c *esphome.Conn, msg proto.Mes
 	return d.Proxy.Handle(ctx, c, msg)
 }
 func (d *dotControls) state(c *esphome.Conn) error {
+	if d.ring != nil {
+		for _, state := range d.ring.states() {
+			if err := c.Send(state); err != nil {
+				return err
+			}
+		}
+	}
 	if d.updates != nil {
 		for _, state := range d.updates.states() {
 			if err := c.Send(state); err != nil {

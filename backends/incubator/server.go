@@ -15,6 +15,7 @@ import (
 
 	"github.com/farooqu/encore-satellite/backends/internal/outbox"
 	"github.com/farooqu/encore-satellite/core/audio"
+	"github.com/farooqu/encore-satellite/core/presentation"
 	"github.com/farooqu/encore-satellite/core/session"
 )
 
@@ -54,6 +55,24 @@ func (s *Server) ModelCount() int {
 		return 0
 	}
 	return s.models.count()
+}
+
+// Snapshot adds Incubator readiness without taking the inference lock. The host
+// must supply current permission/capture health, not merely a connected socket
+// or a previously delivered frame; unknown health must be passed as false.
+// Existing engine-only consumers remain unchanged until their host is wired.
+func (s *Server) Snapshot(captureReady bool) presentation.State {
+	s.captureMu.RLock()
+	defer s.captureMu.RUnlock()
+	state := s.Engine.Snapshot()
+	state.CaptureReady = captureReady && state.Connected && !state.Muted
+	state.TalkReady = state.TalkAllowed && state.CaptureReady
+	if m := s.models; m != nil && m.generation == state.Generation {
+		state.WakeModels = int(m.ordinary.Load())
+		state.WakeArmed = state.WakeAllowed && m.armed.Load()
+	}
+	state.WakeReady = state.CaptureReady && state.WakeModels > 0 && state.WakeArmed
+	return state
 }
 
 // Serve refuses competing clients. The caller owns mDNS advertisement and the
@@ -201,14 +220,49 @@ func (s *Server) serveConn(ctx context.Context, conn net.Conn) error {
 			var event struct {
 				Type string `json:"type"`
 				Data struct {
-					Text   string `json:"text"`
-					Active bool   `json:"active"`
+					Text    string          `json:"text"`
+					Active  bool            `json:"active"`
+					Speaker json.RawMessage `json:"speaker"`
+					Score   json.RawMessage `json:"score"`
+					R       json.RawMessage `json:"r"`
+					G       json.RawMessage `json:"g"`
+					B       json.RawMessage `json:"b"`
+					On      json.RawMessage `json:"on"`
 				} `json:"data"`
 			}
 			if err = json.Unmarshal(data, &event); err != nil {
 				return fmt.Errorf("incubator: invalid event: %w", err)
 			}
-			err = s.Engine.Handle(generation, session.Event{Kind: event.Type, Text: event.Data.Text, Active: event.Data.Active})
+			incoming := session.Event{Kind: event.Type, Text: event.Data.Text, Active: event.Data.Active}
+			if event.Type == "processing" {
+				var name string
+				if json.Unmarshal(event.Data.Speaker, &name) == nil && name != "" && name != "unknown" {
+					incoming.Speaker.Name = name
+					var score *float64
+					if json.Unmarshal(event.Data.Score, &score) == nil && score != nil {
+						incoming.Speaker.Score, incoming.Speaker.ScoreKnown = *score, true
+					}
+					incoming.Speaker.ColorKnown = true
+					for i, raw := range []json.RawMessage{event.Data.R, event.Data.G, event.Data.B} {
+						var channel *int
+						if json.Unmarshal(raw, &channel) != nil || channel == nil || *channel < 0 || *channel > 255 {
+							incoming.Speaker.ColorKnown = false
+							break
+						}
+						incoming.Speaker.RGB[i] = byte(*channel)
+					}
+					if !incoming.Speaker.ColorKnown {
+						incoming.Speaker.RGB = [3]byte{}
+					}
+				}
+			} else if event.Type == "night" {
+				// Optional visual metadata must not tear down a healthy call.
+				// Null/absent/invalid values leave the last valid policy intact.
+				if json.Unmarshal(event.Data.On, &incoming.Night) != nil {
+					incoming.Night = nil
+				}
+			}
+			err = s.Engine.Handle(generation, incoming)
 		case 0x13:
 			var event struct {
 				Reason string `json:"reason"`

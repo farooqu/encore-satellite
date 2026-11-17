@@ -39,8 +39,11 @@ func TestPublicCenterChannelPacked24Asymmetric(t *testing.T) {
 
 func TestPublicRingPrivacyHasHighestPriority(t *testing.T) {
 	for _, phase := range []string{"idle", "listening", "working", "speaking", "error", "disconnected"} {
-		if got := dot.RingColor(presentation.State{Muted: true, Alert: true, Phase: phase}); got != [3]byte{32, 0, 0} {
-			t.Fatalf("privacy lost to %s: %v", phase, got)
+		frame := dot.RingFrame(presentation.State{Muted: true, Alert: true, Phase: phase, Night: "off"}, 1, 0, dot.RingOptions{Brightness: 100})
+		for i := range 12 {
+			if got := [3]byte{frame[i*3], frame[i*3+1], frame[i*3+2]}; got != [3]byte{32, 0, 0} {
+				t.Fatalf("privacy lost to %s: %v", phase, frame)
+			}
 		}
 	}
 }

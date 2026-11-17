@@ -63,6 +63,8 @@ type modelSession struct {
 	upload     *modelUpload // only the protocol reader accesses staging
 	frames     chan modelFrame
 	epoch      atomic.Uint64
+	ordinary   atomic.Int32 // presentation reads never wait for inference
+	armed      atomic.Bool  // at least one ordinary detector armed by the worker
 	cancel     context.CancelFunc
 	done       chan struct{}
 }
@@ -86,6 +88,7 @@ func newModelSession(parent context.Context, engine *session.Engine, generation 
 					if !haveFrame || frame.Discontinuity || frame.Sequence != last.Sequence+1 || frame.CapturedAt <= last.CapturedAt {
 						m.reset()
 					}
+					ordinaryArmed := false
 					for _, model := range m.models {
 						if model == nil {
 							continue
@@ -94,6 +97,8 @@ func newModelSession(parent context.Context, engine *session.Engine, generation 
 						armed := listen
 						if isStop {
 							armed = stop
+						} else if armed {
+							ordinaryArmed = true
 						}
 						if model.armed != armed {
 							model.detector.Reset()
@@ -111,6 +116,7 @@ func newModelSession(parent context.Context, engine *session.Engine, generation 
 							_ = engine.WakeFor(generation, wake.Detection{Word: word, Probability: mean, MaxProbability: peak, Cutoff: uint8(float32(float32(model.header.Cutoff)*255) + .5)})
 						}
 					}
+					m.armed.Store(ordinaryArmed)
 					last = frame.Frame
 					last.Samples = nil
 					haveFrame = true
@@ -157,6 +163,7 @@ func (m *modelSession) feed(frame audio.Frame) {
 }
 
 func (m *modelSession) reset() {
+	m.armed.Store(false)
 	for _, model := range m.models {
 		if model != nil {
 			model.detector.Reset()
@@ -170,6 +177,7 @@ func (m *modelSession) clear() {
 	defer m.mu.Unlock()
 	m.reset()
 	m.models = [modelSlots]*wakeModel{}
+	m.ordinary.Store(0)
 	m.epoch.Add(1)
 }
 
@@ -207,6 +215,13 @@ func (m *modelSession) install(upload *modelUpload) error {
 	}
 	m.reset()
 	m.models[at] = &wakeModel{header: upload.header, detector: detector}
+	var ordinary int32
+	for _, model := range m.models {
+		if model != nil && model.header.ID != "stop" && model.header.WakeWord != "stop" {
+			ordinary++
+		}
+	}
+	m.ordinary.Store(ordinary)
 	m.epoch.Add(1) // New models cannot consume audio queued before installation.
 	return nil
 }

@@ -89,7 +89,18 @@ func TestCapturePrivacyAtOSBoundaryAndAfterRead(t *testing.T) {
 				pcm.duringRead = func() { muted.Store(true) }
 			}
 			ready := false
-			err := capture(ctx, pcm, func() (bool, error) { return false, nil }, gate, &incubator.Server{Engine: e}, func() { ready = true; cancel() })
+			meter := &captureMeter{origin: time.Now()}
+			err := capture(ctx, pcm, func() (bool, error) { return false, nil }, gate, &incubator.Server{Engine: e}, meter, func() {
+				reading := meter.snapshot(time.Now())
+				if reading.ready != (scenario == "open") || (reading.ready && reading.level <= 0) {
+					t.Fatal("visual observation escaped capture/privacy boundary", reading)
+				}
+				ready = true
+				cancel()
+			})
+			if meter.snapshot(time.Now()).ready {
+				t.Fatal("capture exit retained visual observation")
+			}
 			if scenario == "driver_error" {
 				if err == nil || ready {
 					t.Fatal("unreadable privacy declared ready")
@@ -217,10 +228,14 @@ func TestCaptureLossDiscardsRewindsAndMarksRecovery(t *testing.T) {
 			} else if scenario == "between_reads" {
 				wantReads = 2
 			}
+			meter := &captureMeter{origin: time.Now()}
 			pcm := &captureStub{}
 			pcm.duringRead = func() {
 				pcm.readErr = nil
 				if pcm.reads == wantReads {
+					if meter.snapshot(time.Now()).ready {
+						t.Fatal("capture loss retained a healthy microphone observation")
+					}
 					if !initial.closed || pcm.rewinds != wantRewinds {
 						t.Fatal("loss did not immediately close speech and rewind")
 					}
@@ -252,8 +267,11 @@ func TestCaptureLossDiscardsRewindsAndMarksRecovery(t *testing.T) {
 				}
 			}
 			ready := false
-			err = capture(ctx, pcm, loss, echo.NewPrivacy(func() (bool, error) { return false, nil }), &incubator.Server{Engine: e}, func() {
+			err = capture(ctx, pcm, loss, echo.NewPrivacy(func() (bool, error) { return false, nil }), &incubator.Server{Engine: e}, meter, func() {
 				ready = true
+				if !meter.snapshot(time.Now()).ready {
+					t.Fatal("successful capture did not publish a microphone observation")
+				}
 				if scenario == "between_reads" {
 					m.pending[0] = 1
 				}
@@ -319,7 +337,7 @@ func TestCaptureLossControlReadErrorsFailClosed(t *testing.T) {
 				t.Fatal(err)
 			}
 			ready := false
-			err = capture(ctx, pcm, loss, echo.NewPrivacy(func() (bool, error) { return scenario == "muted_before", nil }), &incubator.Server{Engine: e}, func() { ready = true; cancel() })
+			err = capture(ctx, pcm, loss, echo.NewPrivacy(func() (bool, error) { return scenario == "muted_before", nil }), &incubator.Server{Engine: e}, &captureMeter{origin: time.Now()}, func() { ready = true; cancel() })
 			if err == nil || ready || !link.closed || !e.Snapshot().Muted || pcm.reads != wantReads {
 				t.Fatalf("did not fail closed: err=%v ready=%v closed=%v muted=%v reads=%d", err, ready, link.closed, e.Snapshot().Muted, pcm.reads)
 			}

@@ -92,10 +92,20 @@ func Run(parent context.Context, c Config) error {
 	}
 	engine.SetMuted(muted)
 	defer engine.SetMuted(true)
-	if err = writeRing(engine.Snapshot()); err != nil {
+	ringPolicy, err := loadRingSettings(ringSettingsPath)
+	if err != nil {
 		return err
 	}
-	defer func() { engine.SetMuted(true); _ = writeRing(engine.Snapshot()) }()
+	ring := &ringRenderer{write: func(frame []byte) error {
+		return os.WriteFile(ringPath+"frame", frame, 0644)
+	}}
+	if err = ring.update(engine.Snapshot(), captureReading{}, time.Now(), ringPolicy.snapshot()); err != nil {
+		return err
+	}
+	defer func() {
+		engine.SetMuted(true)
+		_ = ring.update(engine.Snapshot(), captureReading{}, time.Now(), ringPolicy.snapshot())
+	}()
 	if err = mixer.SetEnum("Ext_Speaker_Amp_Switch", "On"); err != nil {
 		return err
 	}
@@ -146,7 +156,7 @@ func Run(parent context.Context, c Config) error {
 	if err != nil {
 		return err
 	}
-	controls := &dotControls{Proxy: proxy, music: newMusic(c, saved, player), management: admin}
+	controls := &dotControls{Proxy: proxy, music: newMusic(c, saved, player), management: admin, ring: ringPolicy}
 	controls.updates, err = newLinuxUpdates("/data/encore/update-state.json", "/etc/encore-package.json")
 	if err != nil {
 		return err
@@ -213,6 +223,7 @@ func Run(parent context.Context, c Config) error {
 	for _, d := range devices {
 		start(func() error { return buttons(ctx, d, gate, engine, player) })
 	}
+	meter := &captureMeter{origin: time.Now()}
 	start(func() error {
 		t := time.NewTicker(50 * time.Millisecond)
 		defer t.Stop()
@@ -235,7 +246,9 @@ func Run(parent context.Context, c Config) error {
 				if e != nil || string(generation) != string(baseGeneration) {
 					return errors.New("dot: Bluetooth base restarted; reinitialization required")
 				}
-				if e := writeRing(engine.Snapshot()); e != nil {
+				now = time.Now()
+				reading := meter.snapshot(now)
+				if e := ring.update(voice.Snapshot(reading.ready), reading, now, ringPolicy.snapshot()); e != nil {
 					return e
 				}
 			}
@@ -243,7 +256,7 @@ func Run(parent context.Context, c Config) error {
 	})
 	ready := make(chan struct{}, 1)
 	start(func() error {
-		return capture(ctx, mic, loss, gate, voice, func() { ready <- struct{}{} }, player.SetMusicPrivacy)
+		return capture(ctx, mic, loss, gate, voice, meter, func() { ready <- struct{}{} }, player.SetMusicPrivacy)
 	})
 	for {
 		select {

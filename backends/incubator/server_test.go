@@ -18,6 +18,7 @@ import (
 
 	"github.com/farooqu/encore-satellite/backends/incubator"
 	"github.com/farooqu/encore-satellite/core/audio"
+	"github.com/farooqu/encore-satellite/core/presentation"
 	"github.com/farooqu/encore-satellite/core/session"
 	"github.com/farooqu/encore-satellite/core/wake"
 )
@@ -513,6 +514,9 @@ func TestPushedModelsValidateBeforeAckAndPreserveReplacement(t *testing.T) {
 			if _, err := io.ReadFull(next, body); err != nil || head[0] != 1 {
 				t.Fatal("invalid reconnect HELLO", err)
 			}
+			if state := s.Snapshot(true); state.WakeModels != 0 || state.WakeArmed || state.WakeReady {
+				t.Fatal("replacement connection inherited model readiness", state)
+			}
 			check(pushModel(t, next, "fresh", blob, nil, "fresh"), true, 1)
 			break
 		}
@@ -691,5 +695,170 @@ func TestNativeModelTransferValidationCapacityAndPrivacy(t *testing.T) {
 			t.Fatal("models survived privacy disconnect")
 		}
 		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestNativeOptionalAttributionAndNightDoNotBreakCall(t *testing.T) {
+	e, address := start(t, &speaker{})
+	c := connect(t, address)
+	receive(t, c, 1)
+	_ = e.StartManual()
+	receive(t, c, 2)
+	send(t, c, 0x12, []byte(`{"type":"listening"}`))
+	turn := e.Snapshot().Turn
+	var step int
+	apply := func(event string) presentation.State {
+		t.Helper()
+		send(t, c, 0x12, []byte(event))
+		step++
+		marker := fmt.Sprintf("Actual transcript %d", step)
+		barrier, _ := json.Marshal(map[string]any{"type": "recognized", "data": map[string]string{"text": marker}})
+		send(t, c, 0x12, barrier)
+		deadline := time.Now().Add(time.Second)
+		for {
+			s := e.Snapshot()
+			if s.Heard == marker {
+				if !s.Connected || s.Turn != turn {
+					t.Fatal("optional metadata replaced the call", s)
+				}
+				return s
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("reader stopped on optional metadata", s)
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	valid := `{"speaker":"Person","score":0,"r":0,"g":37,"b":255}`
+	for _, tc := range []struct {
+		data string
+		want presentation.Speaker
+	}{
+		{valid, presentation.Speaker{Name: "Person", ScoreKnown: true, RGB: [3]byte{0, 37, 255}, ColorKnown: true}},
+		{`{"speaker":"Replacement","score":-2.75,"r":255,"g":0,"b":3}`, presentation.Speaker{Name: "Replacement", Score: -2.75, ScoreKnown: true, RGB: [3]byte{255, 0, 3}, ColorKnown: true}},
+		{`{"speaker":"unknown","r":1,"g":2,"b":3}`, presentation.Speaker{}},
+		{`{}`, presentation.Speaker{}},
+		{`{"speaker":42,"score":0.9,"r":1,"g":2,"b":3}`, presentation.Speaker{}},
+		{`{"speaker":"Person"}`, presentation.Speaker{Name: "Person"}},
+		{`{"speaker":"Person","score":null,"r":0,"g":0,"b":0}`, presentation.Speaker{Name: "Person", ColorKnown: true}},
+		{`{"speaker":"Person","score":"bad","r":1,"g":2,"b":3}`, presentation.Speaker{Name: "Person", RGB: [3]byte{1, 2, 3}, ColorKnown: true}},
+		{`{"speaker":"Person","score":1e999,"r":1,"g":2,"b":3}`, presentation.Speaker{Name: "Person", RGB: [3]byte{1, 2, 3}, ColorKnown: true}},
+		{`{"speaker":"Person","r":0,"g":37}`, presentation.Speaker{Name: "Person"}},
+		{`{"speaker":"Person","r":1,"g":2,"b":null}`, presentation.Speaker{Name: "Person"}},
+		{`{"speaker":"Person","r":1,"g":2,"b":256}`, presentation.Speaker{Name: "Person"}},
+		{`{"speaker":"Person","r":-1,"g":2,"b":3}`, presentation.Speaker{Name: "Person"}},
+		{`{"speaker":"Person","r":1,"g":2.5,"b":3}`, presentation.Speaker{Name: "Person"}},
+		{`{"speaker":"Person","r":1,"g":"2","b":3}`, presentation.Speaker{Name: "Person"}},
+	} {
+		// Seed a preceding valid accent before every replacement, so absent or
+		// malformed fields cannot accidentally retain a previous person's RGB.
+		apply(`{"type":"processing","data":` + valid + `}`)
+		s := apply(`{"type":"processing","data":` + tc.data + `}`)
+		if s.Speaker != tc.want || s.Phase != "working" || s.Input != "" || s.Output.State != "" {
+			t.Fatalf("data %s: %+v, want %+v", tc.data, s, tc.want)
+		}
+	}
+	if s := apply(`{"type":"night","data":{"on":true}}`); s.Night != "on" {
+		t.Fatal(s)
+	}
+	for _, data := range []string{`{}`, `{"on":null}`, `{"on":"false"}`, `{"on":0}`} {
+		if s := apply(`{"type":"night","data":` + data + `}`); s.Night != "on" {
+			t.Fatal("invalid optional policy changed last valid value", s)
+		}
+	}
+	if s := apply(`{"type":"night","data":{"on":false}}`); s.Night != "off" {
+		t.Fatal(s)
+	}
+	apply(`{"type":"responding","data":{"text":"Actual reply"}}`)
+	if s := apply(`{"type":"processing","data":` + valid + `}`); s.Phase != "speaking" || s.Speaker != (presentation.Speaker{Name: "Person"}) || !s.InputOpen || s.Output.State != "queued" || s.Output.Received {
+		t.Fatal("late speaker data reopened processing or claimed playback", s)
+	}
+}
+
+func TestNativeReadinessNeedsOrdinaryArmedModelAndHealthyCapture(t *testing.T) {
+	blob, err := os.ReadFile("../../core/wake/mixednet/testdata/pooled.mnb")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, address := startServer(t, &speaker{}, true)
+	c := connect(t, address)
+	receive(t, c, 1)
+	if state := s.Snapshot(true); state.WakeReady || state.WakeArmed || state.WakeModels != 0 || !state.TalkReady {
+		t.Fatal("connection without models claimed wake readiness", state)
+	}
+	for _, id := range []string{"stop", "stop-alias"} {
+		result := pushModel(t, c, id, blob, func(h map[string]any) { h["wake_word"] = "stop" }, id)
+		if result["ok"] != true {
+			t.Fatal(result)
+		}
+	}
+	if state := s.Snapshot(true); s.ModelCount() != 2 || state.WakeModels != 0 || state.WakeReady || state.WakeArmed {
+		t.Fatal("stop-only registry claimed ordinary wake readiness", state)
+	}
+	if result := pushModel(t, c, "nabu", blob, nil, "nabu"); result["ok"] != true {
+		t.Fatal(result)
+	}
+	if state := s.Snapshot(true); state.WakeModels != 1 || state.WakeArmed || state.WakeReady {
+		t.Fatal("installed model claimed it had already armed", state)
+	}
+	if err := s.Capture(audio.Frame{Samples: make([]int16, 320)}); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for !s.Snapshot(true).WakeReady {
+		if time.Now().After(deadline) {
+			t.Fatal("ordinary model did not arm on healthy idle capture", s.Snapshot(true))
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if state := s.Snapshot(false); state.WakeReady || state.TalkReady || state.CaptureReady {
+		t.Fatal("missing host capture health claimed readiness", state)
+	}
+	if result := pushModel(t, c, "nabu", []byte("invalid executable"), nil, "nabu"); result["ok"] != false {
+		t.Fatal(result)
+	}
+	if state := s.Snapshot(true); state.WakeModels != 1 || !state.WakeReady {
+		t.Fatal("failed replacement removed working readiness", state)
+	}
+	s.Engine.SetMuted(true)
+	if state := s.Snapshot(true); state.WakeReady || state.WakeArmed || state.TalkReady || state.CaptureReady || !state.Inhibited {
+		t.Fatal("privacy did not override readiness", state)
+	}
+	s.Engine.SetMuted(false)
+	if result := pushModel(t, c, "nabu", blob, func(h map[string]any) { h["wake_word"] = "stop" }, "nabu"); result["ok"] != true {
+		t.Fatal(result)
+	}
+	if state := s.Snapshot(true); state.WakeReady || state.WakeModels != 0 || state.WakeArmed {
+		t.Fatal("ordinary-to-stop replacement retained readiness", state)
+	}
+	if result := pushModel(t, c, "nabu", blob, nil, "nabu"); result["ok"] != true {
+		t.Fatal(result)
+	}
+	if err := s.Capture(audio.Frame{Samples: make([]int16, 320), Sequence: 1, CapturedAt: 20 * time.Millisecond}); err != nil {
+		t.Fatal(err)
+	}
+	deadline = time.Now().Add(time.Second)
+	for !s.Snapshot(true).WakeReady {
+		if time.Now().After(deadline) {
+			t.Fatal("replacement ordinary model did not arm", s.Snapshot(true))
+		}
+		time.Sleep(time.Millisecond)
+	}
+	send(t, c, 0x23, nil)
+	// Ordered policy event is a reader barrier after MODEL_CLEAR.
+	send(t, c, 0x12, []byte(`{"type":"night","data":{"on":true}}`))
+	deadline = time.Now().Add(time.Second)
+	for s.Snapshot(true).Night != "on" {
+		if time.Now().After(deadline) {
+			t.Fatal("model clear did not finish")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if state := s.Snapshot(true); state.WakeReady || state.WakeArmed || state.WakeModels != 0 || s.ModelCount() != 0 || !state.TalkReady {
+		t.Fatal("model clear retained wake readiness or disabled manual Talk", state)
+	}
+	_ = s.Capture(audio.Frame{Samples: []int16{0}, Discontinuity: true})
+	if state := s.Snapshot(true); state.Connected || state.WakeReady || state.TalkReady || state.CaptureReady || state.Night != "unknown" || !state.Inhibited {
+		t.Fatal("capture loss retained ready/connected claims", state)
 	}
 }
