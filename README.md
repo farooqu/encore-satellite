@@ -3,8 +3,10 @@
 **Your devices aren't done yet.**
 
 Encore Satellite aims to turn existing speakers and displays into satellites
-for [Voice Incubator](https://github.com/OHF-Voice/voice-incubator) and
-[Home Assistant Assist](https://www.home-assistant.io/voice_control/).
+that expose their useful hardware to Home Assistant and provide voice input and
+output for [Voice Incubator](https://github.com/OHF-Voice/voice-incubator).
+[Home Assistant Assist](https://www.home-assistant.io/voice_control/) remains a
+possible later option through separate device packages.
 
 I'm building it for my own home and sharing it in case it's useful to yours.
 
@@ -31,10 +33,25 @@ long after its manufacturer moves on. Reusing one keeps working hardware out of
 a landfill, and buying secondhand can make it much more affordable to put a
 satellite in another room.
 
-Several projects I looked at offered more features than I needed. I wanted a
-small set of features that worked well, with Home Assistant or Voice Incubator
-doing the heavy lifting. Encore's job is to connect the device, handle its audio
-and controls, and present what comes back—not become another assistant to manage.
+I want Home Assistant to make good use of the hardware already in each device,
+with Home Assistant and Voice Incubator doing the application-level heavy lifting.
+Encore's job is to expose that hardware, handle voice input and output, and
+present what comes back—not become another assistant to manage.
+
+### Broad hardware support, focused purpose
+
+Encore aims to expose as many real sensors and useful ESPHome capabilities to
+Home Assistant as each target can practically support—not a minimal sensor set.
+This is a long-term goal, not a claim that every sensor works today or a gate
+for the first release. Support depends on hardware, platform access and safe
+driver/image qualification. Temporarily unavailable readings are valid;
+advertising hardware entities that can never work on a target is not.
+
+Voice/media controls, buttons, privacy, status lights, dashboards and device
+management belong where they support the satellite. Optional Sendspin music
+also belongs and works independently of voice. The boundary is unrelated
+standalone applications such as SIP calling—not sensors or satellite controls.
+That's a choice for my home, not a judgment on projects with different goals.
 
 ## With or without a screen
 
