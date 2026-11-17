@@ -1,0 +1,17 @@
+#!/bin/sh
+# Physical USB access only, never a network login. Also works without Wi-Fi.
+g=/sys/class/android_usb/android0
+if [ -d "$g" ]; then
+  echo 1 > /sys/devices/platform/mt_usb/cmode
+  echo 0 > "$g/enable"
+  echo 18d1 > "$g/idVendor"
+  echo 4ee7 > "$g/idProduct"
+  echo Encore > "$g/iManufacturer"
+  echo 'Encore Dot 2' > "$g/iProduct"
+  echo 1 > "$g/f_acm/instances"
+  echo acm > "$g/functions"
+  echo 02 > "$g/bDeviceClass"
+  echo 1 > "$g/enable"
+fi
+while [ ! -e /dev/ttyGS0 ]; do /bin/busybox.static mdev -s; sleep 1; done
+exec /bin/sh < /dev/ttyGS0 > /dev/ttyGS0 2>&1

@@ -6,9 +6,16 @@ and package revision **0**, meaning never released. `lab-linux-amd64` is a
 runnable virtual test fixture. Echo Dot 2 and generic Android (intended first
 tablet: Samsung Galaxy Tab A7 Lite) are **planned**, not supported packages.
 
-There are no installable device packages, update client, signing trust roots,
-signed manifests, published channels or release credentials. This directory
-does not establish any of them. No production signing, uploading or publishing
+There are no released device packages, network update client, signing trust roots,
+signed manifests, published channels or release credentials. The Dot now has a
+local development builder and explicitly invoked USB/recovery installer/updater;
+its local revisions do not change this release inventory or qualify hardware.
+Its bundle is the Dot Linux environment, including a project-built kernel,
+recovery initramfs and radio/userspace services, not an app for preinstalled Linux.
+The dedicated `dot-kernel.yml` workflow builds pinned kernel inputs and retains
+the exact kernel/source kit as unsigned development artifacts for 90 days. It
+does not publish releases; durable source retention and signing remain release gates.
+This directory does not establish a release channel. No production signing, uploading or publishing
 is performed by the foundation workflow. The new code's license remains
 unselected; keep `ACKNOWLEDGEMENTS.md` and included notices intact. A distribution
 license/dependency/model/asset audit is a prerequisite to eventual releases.
@@ -76,6 +83,8 @@ pinned to full commit IDs. PR code is untrusted: do not change this into a
 2. Refuse package targets until a real package-build contract exists.
 3. Always run `make check` (dependency boundaries, `go vet`, race-enabled Go tests)
    and `go build ./cmd/encore-lab`, using Go 1.27.4 on Ubuntu x86-64.
+4. Check the Dot development package contracts/shell syntax and cross-build the
+   ARMv7 runtime, WMT helper and Bluetooth bridge. This does not boot a Dot or publish an artifact.
 
 The package-validation step uses the stdlib entry points inspected at package
 scaffold commit [`686cd2b`](https://github.com/farooqu/encore-satellite/commit/686cd2bf57fd8b8540ab3e90804319c7fcfa5ea6).
@@ -106,9 +115,12 @@ Future automated real-stack CI needs an explicit compatible runner/lifecycle
 contract from the lab owner. Workflow configuration is not evidence that GitHub
 has run anything; record executed commands and actual CI run URLs separately.
 
-## Release model to enforce before any device update exists
+## Release model to enforce before any published device update
 
-These are requirements for later work, **not a verifier or updater shipped now**.
+These are requirements for a release channel, **not a verifier or network updater
+shipped now**. The manually supplied local-development USB bundle is explicitly
+unsigned, requires an out-of-band build hash, never downloads code, and must not
+be relabeled as a production update mechanism.
 
 - **Incubator default, one backend per package:** the default device package and
   any unqualified build/install choice must use only the native `incubator`
@@ -153,8 +165,11 @@ These are requirements for later work, **not a verifier or updater shipped now**
   migrations and tested backend baselines. Exact constraints must come from
   tested target contracts, not a generic ARM or Android label. Test rejection as
   well as successful application, interruption recovery and health checks.
-- **Satellite packages, not base replacement:** Dot application bundles update
-  over a separately maintained stable base. Android packages bundle matching host
+- **Full environment, safe incremental updates:** the Dot installation bundle
+  supplies its kernel, recovery initramfs, Linux userspace and Satellite runtime.
+  Its incremental app-slot updater requires the exact kernel/userspace/initramfs
+  base identity; it cannot replace the kernel shared by both fallback slots.
+  A safe base-migration updater is not yet implemented. Android packages bundle matching host
   and engine, subject to real signing/install permissions. Base maintenance and
   recovery are separate; no implicit OS flashing, arbitrary remote execution,
   independently fetched Android engine or promised unattended APK update.

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/farooqu/encore-satellite/core/improv"
 	"github.com/farooqu/encore-satellite/platforms/linuxble"
@@ -49,6 +50,24 @@ func Provision(ctx context.Context, options improv.Options) (err error) {
 		return err
 	}
 	defer func() { err = errors.Join(err, p.Close()) }()
+	health := options.Health
+	options.Health = func() error {
+		// A live process is not enough: bluetoothd/the adapter may have died
+		// while the system bus and this GATT object's connection remain alive.
+		probe, done := context.WithTimeout(ctx, 3*time.Second)
+		defer done()
+		var powered bool
+		if err := object(p.conn, p.adapter).CallWithContext(probe, propsIfc+".Get", 0, adapterIfc, "Powered").Store(&powered); err != nil {
+			return err
+		}
+		if !powered {
+			return errors.New("bluez: provisioning adapter powered off")
+		}
+		if health != nil {
+			return health()
+		}
+		return nil
+	}
 	updates := make(chan []byte, 8)
 	state := improv.AuthorizationRequired
 	var updateErr error

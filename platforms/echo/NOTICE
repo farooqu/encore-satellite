@@ -1,0 +1,18 @@
+Linux ALSA ioctl and evdev implementations in alsa/ and input/ are adapted
+from TECHO5 echod, https://github.com/farooqu/techo5
+revision 2b091439765d5f881de4b89255b8cf0637d80cba:
+  echod/internal/lib/alsa/{alsa,playback,mixer,layout_test}.go
+  echod/internal/lib/input/{input,input_test}.go
+Copyright (c) 2026 Yuri Gelfand. MIT; see LICENSE.techo5.
+
+Dot wiring and sysfs encodings derive from the same revision's
+echod/internal/hardware/{mic,privacy,buttons,led,speaker} source and the
+hardware documentation in https://github.com/farooqu/techo5-dot at
+b2a50c74bbe8b34785748574aa39fbd045fc4e46 (docs/hardware.md).
+TECHO5 builds upon EchoLocal, https://github.com/ygelfand/echolocal,
+Copyright (c) 2026 Yuri Gelfand, MIT.
+
+Encore changes: nonblocking PCM reads/writes/drain, cancellation and DROP
+fencing, GC-visible transfer pointers, explicit device assembly, fail-closed
+state parsing, center-only capture and minimal controls. No TECHO5 feature registry, models, DSP,
+vendor coefficients, kernel code or binary data are included.

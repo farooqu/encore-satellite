@@ -1,0 +1,47 @@
+#!/bin/busybox.static sh
+# Recovery-partition initramfs. No Android system or Wi-Fi settings are read.
+BB=/bin/busybox.static
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/sbin
+$BB mount -t proc proc /proc
+$BB mount -t sysfs sysfs /sys
+$BB mount -t tmpfs tmpfs /dev
+$BB mkdir -p /dev/pts /store /newroot /run
+$BB mount -t devpts devpts /dev/pts
+$BB mdev -s
+for p in 8 12 15 16; do $BB mknod -m 600 /dev/mmcblk0p$p b 179 $p 2>/dev/null; done
+# Recovery must stay selected: boot_a/b add skip_initramfs on this boot chain.
+# Touch only the first 32-byte command field, not Android slot metadata.
+select_recovery() {
+  printf boot-recovery | $BB dd of=/run/recovery-command bs=32 count=1 conv=sync || return 1
+  $BB dd if=/dev/mmcblk0p8 of=/run/misc-command bs=32 count=1 || return 1
+  [ "$($BB wc -c < /run/misc-command)" -eq 32 ] || return 1
+  if ! $BB cmp -s /run/recovery-command /run/misc-command; then
+    $BB dd if=/run/recovery-command of=/dev/mmcblk0p8 bs=32 count=1 conv=notrunc || return 1
+    $BB sync || return 1
+    $BB dd if=/dev/mmcblk0p8 of=/run/misc-command bs=32 count=1 || return 1
+    $BB cmp -s /run/recovery-command /run/misc-command || return 1
+  fi
+}
+# Never mount/boot a rootfs unless the exact padded command survived read-back.
+if select_recovery && $BB mount -t ext4 -o noatime /dev/mmcblk0p15 /store; then
+  slot=$(/usr/local/sbin/slotctl next)
+  if [ $? -eq 0 ] && $BB mount --bind /store/encore/slots/$slot /newroot; then
+    $BB mkdir -p /newroot/run/encore
+    echo "$slot" > /newroot/run/encore/slot
+    for m in dev sys proc; do $BB mount --move /$m /newroot/$m; done
+    exec $BB switch_root /newroot /sbin/init
+  fi
+fi
+echo 'Encore recovery selection or slots unavailable: USB rescue; verify MISC boot-recovery and slot state before reboot' > /dev/kmsg
+# A physical USB console remains available even with no working rootfs/network.
+g=/sys/class/android_usb/android0
+echo 1 > /sys/devices/platform/mt_usb/cmode
+echo 0 > $g/enable
+echo 18d1 > $g/idVendor
+echo 4ee7 > $g/idProduct
+echo 1 > $g/f_acm/instances
+echo acm > $g/functions
+echo 02 > $g/bDeviceClass
+echo 1 > $g/enable
+$BB mdev -s
+while :; do $BB sh < /dev/ttyGS0 > /dev/ttyGS0 2>&1; $BB sleep 2; done

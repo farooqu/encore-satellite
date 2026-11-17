@@ -1,0 +1,177 @@
+#!/bin/sh
+# BusyBox init owns this service, not the voice runtime. Persist bare keys;
+# expose only a validated, restrictive derivative to Dropbear.
+set -eu
+umask 077
+export LC_ALL=C
+data=/data/encore/ssh
+run=/run/encore/ssh
+while [ ! -e /run/encore/base-ready ]; do sleep 1; done
+mkdir -p "$data" "$run" /root/.ssh
+chmod 700 "$data" "$run" /root /root/.ssh
+ln -sfn "$run/authorized_keys" /root/.ssh/authorized_keys
+exec 8>"$run/supervisor.lock"
+flock -n 8 || exit 1
+# Shared with the Go manager. Children must not inherit either lock.
+exec 9>"$run/lock"
+pid=
+stamp=
+
+starttime() {
+  [ -r "/proc/$1/stat" ] || return 1
+  sed 's/^.*) //' "/proc/$1/stat" | awk '$1 != "Z" {print $20}'
+}
+same() { [ -n "$2" ] && [ "$(starttime "$1")" = "$2" ]; }
+
+# Dropbear forks/re-execs sessions with the original argv (plus internal -2).
+# Identify those too, even if a crashed listener/supervisor orphaned them. A
+# stale PID file alone is never a reason to signal any process.
+managed_pids() {
+  wanted=$(printf '%s\n' /usr/sbin/dropbear -F -E -s -g -j -k -T 3 -I 300 \
+    -r "$data/host_ed25519" -P "$run/dropbear.pid")
+  for entry in /proc/[0-9]*; do
+    read -r name < "$entry/comm" 2>/dev/null || continue
+    [ "$name" = dropbear ] || continue
+    [ "$(readlink "$entry/exe" 2>/dev/null)" = /usr/sbin/dropbear ] || continue
+    command=$(head -c 4096 "$entry/cmdline" 2>/dev/null | tr '\000' '\n')
+    case "$command" in "$wanted"|"$wanted
+-2
+"*)
+      number=${entry##*/}
+      born=$(starttime "$number")
+      [ -z "$born" ] || printf '%s %s\n' "$number" "$born"
+    ;; esac
+  done
+}
+
+# Sessions have their own process groups. Freeze the listener and recursively
+# freeze descendants until stable before killing them; kill(-pgid) misses them.
+descendants() {
+  awk -v roots="$roots" '
+    { p=FILENAME; sub("/proc/", "", p); sub("/stat", "", p);
+      sub(/^.*\) /, ""); parent[p]=$2; stamp[p]=$20 }
+    END { count=split(roots, seed, " "); for(i=1;i<=count;i++) seen[seed[i]]=1;
+      changed=1; while (changed) { changed=0;
+      for (p in parent) if (!seen[p] && seen[parent[p]]) {seen[p]=1; changed=1} }
+      for (p in seen) if (seen[p] && stamp[p]!="") print p, stamp[p] }
+  ' /proc/[0-9]*/stat 2>/dev/null | sort -n
+}
+stop_server() {
+  # Gate precedes ESTABLISHED accept in the firewall. Close it before touching
+  # processes, and never acknowledge disabled if the gate operation failed.
+  closed=1
+  /usr/local/sbin/encore-firewall ssh-close || closed=0
+  managed_pids > "$run/owned"
+  if [ -n "$pid" ] && same "$pid" "$stamp"; then
+    printf '%s %s\n' "$pid" "$stamp" >> "$run/owned"
+  fi
+  roots=
+  while read -r child born; do
+    if same "$child" "$born"; then
+      kill -STOP "$child" 2>/dev/null || :
+      roots="$roots $child"
+    fi
+  done < "$run/owned"
+  if [ -n "$roots" ]; then
+      : > "$run/frozen"
+      while :; do
+        descendants > "$run/children"
+        while read -r child born; do
+          if same "$child" "$born"; then kill -STOP "$child" 2>/dev/null || :; fi
+        done < "$run/children"
+        cmp -s "$run/children" "$run/frozen" && break
+        cp "$run/children" "$run/frozen"
+      done
+      while read -r child born; do
+        if same "$child" "$born"; then kill -KILL "$child" 2>/dev/null || :; fi
+      done < "$run/frozen"
+  fi
+  if [ -n "$pid" ]; then
+    wait "$pid" 2>/dev/null || :
+    pid=; stamp=
+  fi
+  rm -f "$run/running" "$run/dropbear.pid" "$run/authorized_keys"
+  [ "$closed" -eq 1 ]
+}
+trap stop_server EXIT
+trap 'exit 0' INT TERM HUP
+# Also clean up a previous supervisor's listener/sessions, but only after
+# verifying the executable and complete configuration argv for each instance.
+stop_server
+
+valid_keys() {
+  [ -f "$data/authorized_keys" ] && [ ! -L "$data/authorized_keys" ] || return 1
+  size=$(wc -c < "$data/authorized_keys")
+  [ "$size" -gt 0 ] && [ "$size" -le 32768 ] || return 1
+  awk 'NF!=2 || length($0)>2048 || ($1!="ssh-ed25519" && $1!="ssh-rsa") ||
+       $0!=$1" "$2 || seen[$0]++ {exit 1} END {if (NR<1 || NR>16) exit 1}' "$data/authorized_keys" || return 1
+  : > "$run/keys.new"
+  while read -r kind encoded || [ -n "$kind" ]; do
+    printf '%s' "$encoded" | base64 -d > "$run/wire" 2>/dev/null || return 1
+    [ "$(base64 < "$run/wire" | tr -d '\n')" = "$encoded" ] || return 1
+    od -An -v -tu1 "$run/wire" | awk -v kind="$kind" '
+      function uint(  v,j) { if (at+3>n) exit 1; v=0; for(j=0;j<4;j++) v=v*256+b[at++]; return v }
+      function algorithm(  size,j) { size=uint(); if(size!=length(kind) || size>n-at+1) exit 1;
+        for(j=1;j<=size;j++) if(sprintf("%c",b[at++])!=substr(kind,j,1)) exit 1 }
+      function integer(  size,first,v,j) { size=uint(); if(size<1 || size>n-at+1) exit 1;
+        first=b[at]; if(first>=128 || (first==0 && (size==1 || b[at+1]<128))) exit 1;
+        bits=(size-1)*8; v=first; while(v>0) {bits++;v=int(v/2)};
+        v=0; for(j=0;j<size;j++) {last=b[at++]; if(size<=4) v=v*256+last}; return v }
+      {for(i=1;i<=NF;i++) b[++n]=$i}
+      END {at=1; algorithm();
+        if(kind=="ssh-ed25519") {size=uint(); if(size!=32 || at+31!=n) exit 1; at+=size}
+        else {e=integer(); if(e<3 || e>=16777216 || e%2!=1) exit 1;
+          integer(); if(bits<3072 || bits>8192 || last%2!=1) exit 1}
+        if(at!=n+1) exit 1 }
+    ' || return 1
+    printf 'no-port-forwarding,no-agent-forwarding,no-X11-forwarding %s %s\n' "$kind" "$encoded" >> "$run/keys.new"
+  done < "$data/authorized_keys"
+  chmod 600 "$data/authorized_keys" "$run/keys.new"
+}
+
+while :; do
+  flock -x 9
+  if [ -f "$data/enabled" ] && [ ! -L "$data/enabled" ] &&
+     [ "$(wc -c < "$data/enabled")" -eq 2 ] &&
+     [ "$(cat "$data/enabled")" = 1 ] && valid_keys; then
+    rm -f "$run/stopped"
+    if [ -n "$pid" ] && ! same "$pid" "$stamp"; then stop_server; fi
+    # Rotation updates authorization only, never restarts existing sessions.
+    if ! cmp -s "$run/keys.new" "$run/authorized_keys"; then
+      mv "$run/keys.new" "$run/authorized_keys"
+    fi
+    if [ -z "$pid" ]; then
+      /usr/local/sbin/encore-firewall ssh-close
+      if [ ! -e "$data/host_ed25519" ]; then
+        rm -f "$data/host_ed25519.new"
+        dropbearkey -t ed25519 -f "$data/host_ed25519.new" >/dev/null 2>&1
+        chmod 600 "$data/host_ed25519.new"
+        sync
+        mv "$data/host_ed25519.new" "$data/host_ed25519"
+        sync
+      fi
+      [ -f "$data/host_ed25519" ] && [ ! -L "$data/host_ed25519" ]
+      [ "$(wc -c < "$data/host_ed25519")" -le 4096 ]
+      chmod 600 "$data/host_ed25519"
+      /usr/sbin/dropbear -F -E -s -g -j -k -T 3 -I 300 \
+        -r "$data/host_ed25519" -P "$run/dropbear.pid" 8>&- 9>&- &
+      pid=$!
+      stamp=$(starttime "$pid")
+      tries=0
+      while [ "$(cat "$run/dropbear.pid" 2>/dev/null)" != "$pid" ]; do
+        same "$pid" "$stamp" || exit 1
+        tries=$((tries+1)); [ "$tries" -lt 40 ] || exit 1
+        sleep 0.05
+      done
+      /usr/local/sbin/encore-firewall ssh-open
+      printf '%s %s\n' "$pid" "$stamp" > "$run/running.new"
+      mv "$run/running.new" "$run/running"
+    fi
+  else
+    stop_server
+    : > "$run/stopped"
+  fi
+  rm -f "$run/wire" "$run/keys.new"
+  flock -u 9
+  sleep 1
+done

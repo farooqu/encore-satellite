@@ -1,0 +1,102 @@
+#!/bin/sh
+# Encore Dot 2 Linux owns the filter tables. Never run in a shared host namespace.
+# Kernel 3.18 has legacy xt_state, NOT xt_conntrack or nftables.
+set -eu
+umask 077
+case "${1:-}" in
+  apply|ssh-open|ssh-close) action=$1;;
+  *) echo 'usage: encore-firewall {apply|ssh-open|ssh-close}' >&2; exit 2;;
+esac
+[ "$#" -eq 1 ] || exit 2
+for tool in iptables-legacy ip6tables-legacy iptables-legacy-restore ip6tables-legacy-restore flock; do
+  command -v "$tool" >/dev/null || { echo "encore-firewall: missing $tool" >&2; exit 1; }
+done
+mkdir -p /run/encore
+exec 9>/run/encore/firewall.lock
+flock -x 9
+
+rules() {
+  cat <<'EOF'
+*filter
+:INPUT DROP [0:0]
+:FORWARD DROP [0:0]
+:OUTPUT ACCEPT [0:0]
+:ENCORE-SSH - [0:0]
+-A ENCORE-SSH -i wlan0 -j DROP
+-A ENCORE-SSH -j DROP
+-A INPUT -i lo -j ACCEPT
+-A INPUT -p tcp --dport 22 -j ENCORE-SSH
+-A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+-A INPUT -i wlan0 -p tcp --dport 6053 -j ACCEPT
+-A INPUT -i wlan0 -p tcp --dport 6055 -j ACCEPT
+EOF
+  # Native Incubator is unauthenticated: 6055 is for a trusted Wi-Fi LAN only.
+  # Sendspin is an outbound WebSocket client; it has no inbound listener.
+  if [ "$1" = 4 ]; then
+    cat <<'EOF'
+-A INPUT -i wlan0 -p udp -d 224.0.0.251/32 --dport 5353 -j ACCEPT
+-A INPUT -i wlan0 -p udp -d 224.0.0.0/4 --dport 5353 -j DROP
+-A INPUT -i wlan0 -p udp -d 255.255.255.255/32 --dport 5353 -j DROP
+-A INPUT -i wlan0 -p udp --sport 5353 --dport 5353 -j ACCEPT
+-A INPUT -i wlan0 -p udp --sport 67 --dport 68 -j ACCEPT
+-A INPUT -i wlan0 -p icmp --icmp-type 0 -j ACCEPT
+-A INPUT -i wlan0 -p icmp --icmp-type 3 -j ACCEPT
+-A INPUT -i wlan0 -p icmp --icmp-type 8 -j ACCEPT
+-A INPUT -i wlan0 -p icmp --icmp-type 11 -j ACCEPT
+-A INPUT -i wlan0 -p icmp --icmp-type 12 -j ACCEPT
+EOF
+  else
+    cat <<'EOF'
+-A INPUT -i wlan0 -p udp -d ff02::fb/128 --dport 5353 -j ACCEPT
+-A INPUT -i wlan0 -p udp -d ff00::/8 --dport 5353 -j DROP
+-A INPUT -i wlan0 -p udp --sport 5353 --dport 5353 -j ACCEPT
+-A INPUT -i wlan0 -p udp -s fe80::/10 --sport 547 --dport 546 -j ACCEPT
+-A INPUT -i wlan0 -p ipv6-icmp --icmpv6-type 1 -j ACCEPT
+-A INPUT -i wlan0 -p ipv6-icmp --icmpv6-type 2 -j ACCEPT
+-A INPUT -i wlan0 -p ipv6-icmp --icmpv6-type 3 -j ACCEPT
+-A INPUT -i wlan0 -p ipv6-icmp --icmpv6-type 4 -j ACCEPT
+-A INPUT -i wlan0 -p ipv6-icmp --icmpv6-type 128 -j ACCEPT
+-A INPUT -i wlan0 -p ipv6-icmp --icmpv6-type 129 -j ACCEPT
+-A INPUT -i wlan0 -p ipv6-icmp -s fe80::/10 --icmpv6-type 130 -j ACCEPT
+-A INPUT -i wlan0 -p ipv6-icmp -s fe80::/10 --icmpv6-type 134 -j ACCEPT
+-A INPUT -i wlan0 -p ipv6-icmp --icmpv6-type 135 -j ACCEPT
+-A INPUT -i wlan0 -p ipv6-icmp --icmpv6-type 136 -j ACCEPT
+EOF
+  fi
+  echo COMMIT
+}
+
+close_gates() {
+  failed=0
+  for tool in iptables-legacy ip6tables-legacy; do
+    if ! "$tool" -w 5 -R ENCORE-SSH 1 -i wlan0 -j DROP; then
+      echo "encore-firewall: $tool emergency SSH close failed" >&2
+      failed=1
+    fi
+  done
+  return "$failed"
+}
+
+# Restore commits each family atomically, including DROP policies. Even if one
+# fails, try the other: IPv6 must never be skipped after an IPv4 error. apply
+# deliberately closes SSH too; the supervisor may subsequently open it again.
+failed=0
+rules 4 | iptables-legacy-restore -w 5 || failed=1
+rules 6 | ip6tables-legacy-restore -w 5 || failed=1
+if [ "$failed" -ne 0 ]; then
+  close_gates || echo 'encore-firewall: could not confirm SSH closed' >&2
+  echo 'encore-firewall: policy install failed; do not start networking' >&2
+  exit 1
+fi
+
+if [ "$action" = ssh-open ]; then
+  # Start from both families closed. If opening either fails (or a catchable
+  # signal interrupts), close both again before returning failure. The process
+  # lock spans restores, gate updates and rollback, not just individual calls.
+  armed=1
+  trap '[ "$armed" -eq 0 ] || close_gates' EXIT
+  trap 'exit 1' HUP INT TERM
+  iptables-legacy -w 5 -R ENCORE-SSH 1 -i wlan0 -j ACCEPT
+  ip6tables-legacy -w 5 -R ENCORE-SSH 1 -i wlan0 -j ACCEPT
+  armed=0
+fi

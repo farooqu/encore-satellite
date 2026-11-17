@@ -252,7 +252,7 @@ func TestTimerStopRecoversWithoutStreamEndAndKeepsCallFence(t *testing.T) {
 
 func TestWakeRetainsEvidenceAndBoundedPreRoll(t *testing.T) {
 	e, l, _, _ := fixture(t)
-	for i := range 18 {
+	for i := range 34 {
 		block := make([]int16, 1000)
 		for j := range block {
 			block[j] = int16(i*1000 + j)
@@ -266,7 +266,7 @@ func TestWakeRetainsEvidenceAndBoundedPreRoll(t *testing.T) {
 	if err := e.Wake(d); err != nil {
 		t.Fatal(err)
 	}
-	if l.commands[0].Detection != d || l.commands[0].PreRollBytes != 32000 {
+	if l.commands[0].Detection != d || l.commands[0].PreRollBytes != 64000 {
 		t.Fatalf("lost evidence: %+v", l.commands[0])
 	}
 	var pcm []int16
@@ -276,7 +276,7 @@ func TestWakeRetainsEvidenceAndBoundedPreRoll(t *testing.T) {
 		}
 		pcm = append(pcm, c.Samples...)
 	}
-	if len(pcm) != 16000 || pcm[0] != 2000 || pcm[len(pcm)-1] != 17999 {
+	if len(pcm) != 32000 || pcm[0] != 2000 || pcm[len(pcm)-1] != -31537 {
 		t.Fatal("wrong ring order or unbounded pre-roll")
 	}
 	if e.Snapshot().Phase != "tentative" {
@@ -323,8 +323,20 @@ func TestPrivacyAndBackendSwitchFenceStaleReader(t *testing.T) {
 	if err := e.Handle(g, session.Event{Kind: "timer_ringing"}); !errors.Is(err, session.ErrStale) {
 		t.Fatal("stale alert accepted")
 	}
+	if listen, stop := e.WakeState(g); listen || stop {
+		t.Fatal("stale model execution armed")
+	}
+	if err := e.WakeFor(g, wake.Detection{Word: "old-model"}); !errors.Is(err, session.ErrStale) {
+		t.Fatal("old model restarted capture", err)
+	}
+	if err := e.WakeFor(ng, wake.Detection{Word: "stop"}); !errors.Is(err, session.ErrUnavailable) {
+		t.Fatal("stop model armed while idle", err)
+	}
 	if err := e.Wake(wake.Detection{Word: "another-model"}); err != nil {
 		t.Fatal(err)
+	}
+	if err := e.StopFor(g); !errors.Is(err, session.ErrStale) || e.Snapshot().Phase != "tentative" {
+		t.Fatal("stale model clear cancelled current turn", err)
 	}
 	if newLink.commands[0].PreRollBytes != 0 || e.Snapshot().Alert || ng == g {
 		t.Fatal("state/audio survived reconnect")

@@ -19,3 +19,16 @@ generates exactly the same inputs and compares every probability and logit.
 
 Normal Go tests require neither Python, the other repositories, nor a C++
 compiler. The reference harness is only for reproducing the golden file.
+
+Both fixtures and the harness were copied unchanged from Techo5 revision
+`2b091439765d5f881de4b89255b8cf0637d80cba`,
+`echod/internal/lib/mixednet/testdata`. The firmware revision above belongs
+to `OHF-Voice/firmware-voice-incubator`; the serializer revision belongs
+to `OHF-Voice/voice-incubator`.
+
+SHA-256:
+
+```
+8652d236d7c3c28c08e47dddb03db755a80b384beb93679fa271623511762212  pooled.mnb
+20d1c33cc7ca61dc20db954007fa9af5d79ab95ffb209faaec07f13d5b5684ce  pooled.golden
+```

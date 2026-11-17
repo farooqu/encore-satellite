@@ -1,0 +1,10 @@
+#!/bin/sh
+# Explicit physical-console escape to saved TWRP, or back to saved Encore.
+set -eu
+case "${1:-}" in twrp|linux) image=$1;; *) echo 'usage: encore-recovery twrp|linux --apply'; exit 1;; esac
+[ "${2:-}" = --apply ] || { echo "Would restore saved $image to recovery and reboot; add --apply"; exit 0; }
+cd /store/encore
+sha256sum -c "$image.img.sha256"
+dd if="$image.img" of=/dev/mmcblk0p12 bs=4096 conv=fsync
+sync
+reboot -f

@@ -1,0 +1,59 @@
+name: Echo Dot Linux kernel
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/dot-kernel.yml'
+      - 'devices/echo-dot-2/packaging/kernel*'
+      - 'devices/echo-dot-2/packaging/KERNEL-SOURCE.md'
+      - 'devices/echo-dot-2/packaging/package.py'
+      - 'tools/check_ble_kernel.py'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/dot-kernel.yml'
+      - 'devices/echo-dot-2/packaging/kernel*'
+      - 'devices/echo-dot-2/packaging/KERNEL-SOURCE.md'
+      - 'devices/echo-dot-2/packaging/package.py'
+      - 'tools/check_ble_kernel.py'
+
+permissions:
+  contents: read
+
+jobs:
+  kernel:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    container:
+      image: ubuntu:24.04@sha256:73b999393d07f2bf65a40373778a44dc9a6d54ad7718d29247d8ff9413c4d6a8
+    env:
+      ENCORE_KERNEL_BUILD_IMAGE: ubuntu:24.04@sha256:73b999393d07f2bf65a40373778a44dc9a6d54ad7718d29247d8ff9413c4d6a8
+    steps:
+      - name: Install kernel build tools
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            ca-certificates git make gcc libc6-dev bc patch curl xz-utils bzip2 \
+            perl python3 flex bison util-linux
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      # Only source archives are cached; the recipe verifies their locked hashes.
+      # Build outputs are never restored from an unqualified binary cache.
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: .amp/in/orb-backup/dot-kernel/dl
+          key: dot-kernel-sources-${{ hashFiles('devices/echo-dot-2/packaging/kernel-inputs.json') }}
+      - name: Build and verify the kernel and source kit
+        run: make dot-kernel
+      - name: Retain the exact development artifact and corresponding source
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: echo-dot-2-kernel-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/echo-dot-2/kernel/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
+      # No release publication, signing, flashing or hardware qualification.

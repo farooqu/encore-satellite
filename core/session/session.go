@@ -296,6 +296,47 @@ func (e *Engine) Wake(detection wake.Detection) error {
 	return e.start(detection, e.pre.Snapshot())
 }
 
+// WakeState scopes local model execution to its owning backend connection.
+// Stop models are armed only for response output, announcements and alerts;
+// ordinary models run only while genuinely idle. Inference runs outside this lock.
+func (e *Engine) WakeState(generation uint64) (listen, stop bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if generation != e.generation || e.link == nil || e.state.Muted {
+		return false, false
+	}
+	stop = !e.discard && (e.outputOpen || e.announcing || e.state.Alert)
+	listen = !e.active && !e.outputOpen && !e.discard && !e.announcing && !e.state.Alert
+	return
+}
+
+// WakeFor accepts a model result only for the connection that supplied its
+// model. Both generation and arming are checked again after inference. Unlike
+// host/manual Wake, the reserved stop identity cancels rather than starts a call.
+func (e *Engine) WakeFor(generation uint64, detection wake.Detection) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if generation != e.generation || e.link == nil {
+		return ErrStale
+	}
+	if e.state.Muted || e.discard {
+		return ErrUnavailable
+	}
+	if detection.Word == "stop" {
+		if !e.outputOpen && !e.announcing && !e.state.Alert {
+			return ErrUnavailable
+		}
+		return e.stop()
+	}
+	if err := detection.Validate(); err != nil {
+		return err
+	}
+	if e.announcing || e.state.Alert {
+		return ErrUnavailable
+	}
+	return e.start(detection, e.pre.Snapshot())
+}
+
 func (e *Engine) start(detection wake.Detection, pre []int16) error {
 	if e.state.Muted || e.cancelling || e.link == nil || e.active || e.outputOpen || e.discard {
 		return ErrUnavailable
@@ -332,6 +373,20 @@ func (e *Engine) start(detection wake.Detection, pre []int16) error {
 func (e *Engine) Stop() error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	return e.stop()
+}
+
+// StopFor prevents a stale model-control reader from cancelling a newer peer.
+func (e *Engine) StopFor(generation uint64) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if generation != e.generation || e.link == nil {
+		return ErrStale
+	}
+	return e.stop()
+}
+
+func (e *Engine) stop() error {
 	e.cancelOutput()
 	e.player.Flush()
 	e.pre.Clear()
@@ -353,13 +408,15 @@ func (e *Engine) Stop() error {
 		e.finishCancellation()
 	}
 	e.publishActivity()
-	if alert {
-		if err := e.send(Command{Kind: "stop_alert"}); err != nil {
+	// End discards unsent capture in the transport queue. Send it first so
+	// it cannot discard the timer dismissal when both owners are active.
+	if active {
+		if err := e.send(Command{Kind: "end", Reason: "cancelled"}); err != nil {
 			return err
 		}
 	}
-	if active {
-		return e.send(Command{Kind: "end", Reason: "cancelled"})
+	if alert {
+		return e.send(Command{Kind: "stop_alert"})
 	}
 	return nil
 }

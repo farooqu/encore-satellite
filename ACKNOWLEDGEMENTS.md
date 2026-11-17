@@ -8,6 +8,8 @@ frontends and a native Android host made this investigation possible:
   `2b091439765d5f881de4b89255b8cf0637d80cba`.
 - [Techo5 Panel](https://github.com/farooqu/techo5-panel), inspected at
   `14c16fea2fbc64ce9b706009a3fed16766523e6d`.
+- [Techo5 Dot](https://github.com/farooqu/techo5-dot), inspected at
+  `b2a50c74bbe8b34785748574aa39fbd045fc4e46`.
 
 Techo5's NOTICE traces historical daemon ancestry to Yuri Gelfand's MIT
 **EchoLocal**, and its microWakeWord feature frontend to Julian Imhof's MIT
@@ -57,8 +59,51 @@ Encore assistant. No Kiosk Satellite application code or assets are included.
 - `github.com/ygelfand/go-esphome-device` is a pinned MIT Go dependency for the
   native API, Noise transport and mDNS. It and transitive modules remain under
   their own licenses supplied with their source; `go.mod`/`go.sum` identify the
-  exact versions. No complete Techo5 feature registry or concrete device code is
-  carried into Encore.
+  exact versions. No complete Techo5 feature registry is carried into Encore.
+- `core/wake/mixednet` ports Techo5's pure-Go MNB1 executor/detector and
+  microWakeWord frontend at the Techo5 pin above. Apache-2.0 applies to the
+  Voice Incubator/mixednet-executor adaptations; frontend ancestry includes
+  MIT echo-dot-assist, Apache-2.0 TensorFlow Lite Micro and BSD-3-Clause KISS FFT.
+  The package retains the full applicable notices/license and external test
+  fixture provenance. `backends/incubator/models.go` follows Techo5's MIT
+  model-transfer validation/lifecycle contract. Device packaging includes the
+  runtime notices. No trained wake model is shipped in the runtime; transferred
+  models retain their own terms independently of the executor.
+- `platforms/echo/{alsa,input}` adapts the pinned Techo5 daemon's Linux ALSA/evdev
+  primitives, originally from Yuri Gelfand's MIT EchoLocal. Its license and source
+  inventory are retained in `platforms/echo/LICENSE.techo5` and `NOTICE`. Dot-local
+  routing/control mappings cite that same source rather than claiming new measurements.
+- `devices/echo-dot-2/cmd/wmtup` copies Techo5 Dot's two-file MediaTek bring-up
+  helper at the pin above. That work credits Wil Bowes's MIT EchoMuse/emOS findings.
+  `devices/echo-dot-2/packaging/Techo5-Dot-{MIT,NOTICE}.txt` retain its license and
+  complete historical provenance; the latter lists upstream components **not** all
+  included here. Encore's small image/slot tooling is informed by that boot-chain work.
+- `devices/echo-dot-2/packaging/kernel.sh` invokes the exact Techo5 Dot kernel
+  recipe at the same pin with its Bluetooth/security patch series and AOSP
+  arm-eabi 4.8 toolchain at `26e93f6af47f7bd3a9beb5c102a5f45e19bfa38a`.
+  The separately built kernel combines Amazon's checksum-verified biscuit GPL
+  source release with missing Bluetooth files from Linux 3.18.19. Linux source,
+  patches and toolchain retain their own licenses; the MIT license of the upstream
+  build recipe does not relicense them. The project kernel artifact retains the
+  prepared corresponding source, configuration and build inputs in `source.tar.gz`;
+  the Linux-environment bundle includes that kernel and its provenance, and the
+  rootfs retains its COPYING. Preserve the full source kit durably with any release.
+- The local Dot base builder fetches signature-verified Alpine ARMv7 packages,
+  including GPL BusyBox, musl and wpa_supplicant with their own licenses. No vendor
+  firmware or coefficient blob is committed or distributed in the environment bundle.
+  A complete corresponding-source/license inventory is required before distribution;
+  the development builder is not a release-compliance process.
+- The optional Dot Sendspin companion builds the official Apache-2.0
+  `sendspin-cpp` SDK at `a4a9b65fb356657e3a39a2ab70b4aae957bf53e0` with
+  ArduinoJson (MIT), IXWebSocket (BSD-3-Clause), micro-flac/micro-ogg-demuxer
+  (Apache-2.0) and noise-c (MIT plus bundled crypto notices). Exact commits and
+  compiler download checksums are in `platforms/linuxsendspin/dependencies.lock.json`.
+  Its static ARMv7 musl/libc++ build uses Zig 0.14.1, not the kernel toolchain;
+  Zig/musl and LLVM runtime sources retain their respective MIT/Apache-2.0 with
+  LLVM-exception and per-file notices. Each build retains notices, provenance
+  and a source kit including the integration and bundled runtime sources. Keep
+  them with the exact binary. This is independent of the lab-only MA server and
+  does not package Python, FFmpeg, the HTTP PCM sink or guest pairing policy.
 - Home Assistant and its Python dependencies are downloaded separately for the
   development lab under their respective upstream licenses. The lab fixtures are
   Encore test instrumentation, not replacement implementations of HA protocols.
@@ -72,10 +117,11 @@ Encore assistant. No Kiosk Satellite application code or assets are included.
   environments, not dependencies bundled into Encore's Go runtime or approved
   release packages.
 
-No Panel Java code, DSP frontend, wake model, TensorFlow implementation, FFT,
-native Incubator model runtime, firmware blob, sound or visual asset has been
-copied into the Encore runtime in this increment. The test tone is generated
-mathematically. Research acknowledgement is distinct from code inclusion.
+No Panel Java code, trained wake model, TFLite interpreter, firmware blob,
+sound or visual asset is bundled in the Encore runtime. The MixedNet executor
+and DSP frontend inclusion is described above; regression-only model/audio
+fixtures have their own provenance and are not packaged. The test tone is
+generated mathematically. Research acknowledgement is distinct from inclusion.
 
 The license for **new Encore code remains unselected**, as stated in the README.
 A permissive license is intended; Apache-2.0 is a recommendation, not an applied

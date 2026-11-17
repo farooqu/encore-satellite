@@ -1,5 +1,5 @@
-// Package wake carries evidence from a host's wake executor. No executor or
-// trained model is bundled in the first increment.
+// Package wake carries evidence from a host's wake executor. The mixednet
+// subpackage executes app-pushed models; no trained model ships in the runtime.
 package wake
 
 import "errors"

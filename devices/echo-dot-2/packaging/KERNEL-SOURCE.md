@@ -1,0 +1,42 @@
+# Echo Dot 2 kernel source kit
+
+`source.tar.gz` accompanies every project kernel artifact. It contains the
+patched kernel source (`src/`, including its COPYING and component notices),
+the upstream build recipe/configuration/security patches, Encore's build inputs,
+the effective `.config`, and Amazon's generated Trapz header and build certificate.
+It does not contain Wi-Fi/Bluetooth firmware or the compiled cross-toolchain.
+`provenance.json` identifies and hashes the source kit, configuration, System.map
+and actual kernel bytes. Build-input identity is not a promise of identical bytes
+on different build environments; retain the exact artifact you qualify.
+
+## Rebuild the archived prepared source
+
+Extract the kit into a new working directory. Obtain the AOSP arm-eabi 4.8
+cross-toolchain at the exact repository/commit in
+`devices/echo-dot-2/packaging/kernel-inputs.json`. It is a
+separate build tool under its own licenses, not part of the shipped kernel.
+Use the Linux x86-64 environment/dependency installation in
+`.github/workflows/dot-kernel.yml`; the recorded environment describes the actual
+build. To rebuild without downloading Amazon's archive again:
+
+1. Export `ARCH=arm`, `CROSS_COMPILE=/absolute/path/to/toolchain/bin/arm-eabi-`,
+   `KBUILD_BUILD_VERSION=1`, `KCONFIG_NOTIMESTAMP=1`, and `SOURCE_DATE_EPOCH` from
+   the lock. Set `KBUILD_BUILD_TIMESTAMP` to that epoch formatted in UTC with
+   `date -u -d "@$SOURCE_DATE_EPOCH"`.
+2. Create `out/include/generated`. Copy `.config` and `verity-keys` into `out/`,
+   and `include/generated/trapz_generated_kernel.h` into `out/include/generated/`.
+3. Run `make -C src O="$PWD/out" HOSTCFLAGS=-fcommon USE_TRAPZ=true
+   KBUILD_BUILD_USER=techo5 KBUILD_BUILD_HOST=techo5-dot LOCALVERSION=-bt olddefconfig`,
+   then the same command with `-j2 zImage-dtb` instead of `olddefconfig`.
+
+The upstream build banner is retained; Encore owns the artifact provenance and
+packaging, not authorship of the vendor kernel. The pinned recipe checks the
+original Amazon/upstream source hashes and applies its complete patch series.
+Those backports do not make Linux 3.18 a currently supported or fully audited
+kernel. Track security updates and qualify replacement artifacts explicitly.
+
+Kernel and system-source/license compliance remains a release responsibility.
+CI artifacts are unsigned development outputs with bounded retention, not a
+durable public source distribution or a supported release. Before binary
+publication, retain the corresponding source kit and build inputs durably with
+the exact release; preserve all applicable licenses/notices.

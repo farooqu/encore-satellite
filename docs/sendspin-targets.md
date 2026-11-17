@@ -1,8 +1,9 @@
 # Sendspin music integration TODOs
 
 Encore's real Music Assistant/Sendspin lab validates the music/voice policy with
-virtual audio. Echo Dot 2 and Android still need target integration and physical
-qualification. This checklist is a handoff, not a device-support claim.
+virtual audio. Echo Dot 2 now has an experimental package integration; Android
+still needs its target integration. Both need physical qualification. This
+checklist is a handoff, not a device-support claim.
 
 ## What is already available
 
@@ -69,28 +70,39 @@ See the lab README and [dependency notices](../lab/sendspin/NOTICES.md).
 The [Echo packaging thread](https://ampcode.com/threads/T-01a1e5ab-b7b7-72ae-b3ec-ff58e6f691a2)
 owns `devices/echo-dot-2/`, `platforms/echo/` and its package/base. At handoff it
 reports a locally built, unflashed Alpine 3.22 ARMv7 package with ALSA, controls
-and Action-activated voice. Those changes are separate from this lab checkout;
-this document neither imports them nor asks that thread to rebuild a runtime
-from scratch. Physical qualification and music integration remain outstanding.
+and Action-activated voice. Its experimental integration is documented in the
+[Dot package](../devices/echo-dot-2/README.md#sendspin-music). The production adapter
+is `platforms/linuxsendspin`, not the lab receiver. Physical qualification remains
+outstanding; these checked items describe implementation, not Dot measurements.
 
-- [ ] Cross-build official `Sendspin/sendspin-cpp` at the lab pin (or a deliberately
+- [x] Cross-build official `Sendspin/sendspin-cpp` at the lab pin (or a deliberately
   revalidated upgrade) for the package's ARMv7 musl userspace. Establish a C++20
   userspace toolchain and compatible native dependencies. The kernel's AOSP
   arm-eabi 4.8 compiler is not that toolchain, and the current CGO-disabled Go
   runtime alone cannot supply the C++ player. Choose a small native/companion
   boundary against the actual package; the lab child process is not a fixed API.
-- [ ] Add bounded asynchronous output to the real ALSA speaker route, with proper
+- [x] Add bounded asynchronous output to the real ALSA speaker route, with proper
   resampling/channel conversion and separate music/voice gain. Wire SDK
   `on_audio_write` and `notify_audio_played` to real consumption and monotonic
   presentation timing, not HTTP return time or samples merely accepted by ALSA.
-- [ ] Wire `SetActivityHandler` and physical privacy/Stop to the output owner;
+  The Dot driver cannot atomically stop/snapshot shared DMA: cancellation that
+  drops it invalidates affected audio and renegotiates music's epoch rather than
+  replaying uncertain frames. Voice Drain stays source-scoped. Gain changes keep
+  the clock and apply within the bounded 20 ms DMA window; underruns recover
+  without killing the host. Seamless Flush preservation above remains a target,
+  not a capability claimed for this driver.
+- [x] Wire `SetActivityHandler` and physical privacy/Stop to the output owner;
   connect persistent Sendspin settings to common controls without restarting
   voice or BLE. Keep Dot wiring, speaker tuning and button mappings device-local.
-- [ ] Package only the chosen client/runtime dependencies and audited notices.
+- [x] Package only the chosen client/runtime dependencies and audited notices.
   Record ABI/libc/compiler, source pins, runtime footprint and any added base
   libraries. Account for the package updater's Linux-base compatibility rules
   if music introduces base changes; do not assume an application-slot update
   safely replaces the shared kernel/base. No public release is authorized here.
+  The companion is statically linked ARMv7 musl/libc++; no base library is added.
+  Pairing/revocation uses a private physical-console token and manual server URL;
+  automatic discovery and a friendlier pairing UI are not implemented. Retain the
+  build's complete source/notices/provenance kit before any binary distribution.
 - [ ] Measure real playback quality, CPU/RAM, underruns, physical drain/Stop/mute,
   timer Stop followed by another voice turn, music/voice/BLE coexistence and
   reboot/update recovery on the exact Dot build. The existing Action invocation

@@ -2,7 +2,7 @@
 
 One module: `github.com/farooqu/encore-satellite`. Core version
 `0.1.0-dev.0`; these pre-1.0 contracts are still being established. No device is
-release-supported and no installer, signature trust or update channel is shipped.
+release-supported and no production signature trust or update channel is shipped.
 The target inventory is `release/targets.json`; revision zero means never released.
 An eventual package must record target ID, backend variant, core SemVer,
 monotonically increasing per-target package revision, explicit dev/stable channel
@@ -12,7 +12,8 @@ and exact source commit.
 
 - `core/audio`: mono PCM16/16 kHz capture, bounded frames and pre-roll; cancellable
   playback with an explicit consumption/drain contract.
-- `core/wake`: host-supplied detection evidence, not a wake model implementation.
+- `core/wake`: host-supplied detection evidence, with a pure-Go MixedNet/MNB1
+  frontend/executor for app-pushed microWakeWord models in `core/wake/mixednet`.
 - `core/session`: one active backend, session/privacy/output ownership and generation
   fencing. Upstream owns recognition, intents and scheduling.
 - `core/presentation`: snapshots containing only actual backend text and state.
@@ -25,6 +26,11 @@ and exact source commit.
   The encrypted selector and restart controls are private to the lab command,
   not a shared backend package.
 - `lab`: pinned real HA service, deterministic speech fixtures and integration checks.
+- `platforms/echo` and `devices/echo-dot-2`: experimental Linux hardware host and
+  complete Dot Linux environment: project kernel/source artifacts, initramfs,
+  Alpine radio services and runtime, recovery-only clean provisioning and local
+  inactive-slot app updates. Not hardware-qualified; see the device README for missing
+  AEC/calibration and required BLE kernel/physical qualification. This is not the lab fixture.
 - `lab/incubator` and `lab/assist-wake`: separately provisioned real upstream
   service suites; their source/model pins, licenses and fixture boundaries are
   documented locally. Neither is a production host or packaging implementation.
@@ -38,19 +44,18 @@ see `lab/README.md` for prerequisites and the scoped upstream suite entry points
 The checker rejects core imports outside core, backend cross-imports or concrete
 platform/device imports, platform imports of backends/devices, and cross-device
 imports. It includes tests. Composition roots choose implementations explicitly;
-there is no runtime plugin registry. Platforms/devices are reserved paths, not
-implemented support. Assist quality-based cross-device arbitration is not yet
+there is no runtime plugin registry. Device code is not a claim of qualified
+support. Assist quality-based cross-device arbitration is not yet
 implemented; raw probabilities are not assumed comparable across devices.
 
 ## Single-backend packages and common controls
 
-Production packages will contain exactly one voice backend. Native Incubator is
-the default package, not just the first release. Assist remains in the repository;
+Production packages contain exactly one voice backend. Native Incubator is the
+default package, not just the first release. Assist remains in the repository;
 any future package for the Home Assistant Assist pipeline would be explicitly
-labeled, opt-in and is deferred.
-No product setup/HA backend selector, cross-backend fallback or live switching is
-planned. Backend changes require explicit application-package replacement, and
-routine updates must preserve the variant. See the
+labeled, opt-in and is deferred. No runtime selector, cross-backend fallback or
+live switching is planned. Changing backends requires explicit application-package
+replacement, while routine updates preserve the variant and channel. See the
 [package contract](device-packages/README.md#incubator-first-single-backend-packages).
 
 BLE and Sendspin enablement remain independent of that package choice.
@@ -63,6 +68,10 @@ without advertising Assist capability. Software mute and the independent BLE
 choice survive runtime/process restarts; default BLE is off. Selecting alone is
 non-disruptive. Applying deliberately restarts the shared endpoint and can
 interrupt Bluetooth connections; ordinary mute/unmute keeps it alive.
+
+That lab-only selection is not a production package requirement. The Dot binary links only Incubator
+and keeps a separate encrypted ESPHome endpoint for Bluetooth/music controls,
+without advertising Assist voice.
 
 The pinned native integration creates its own persistent timer device with the
 same stable MAC, not an `assist_satellite` or per-native-voice availability entity.
@@ -87,10 +96,11 @@ claimed updater are established by this checkpoint. Shared changes should select
 all release-supported targets; today that set is empty, so the virtual lab still
 needs checking rather than an empty successful matrix.
 
-Independent package-section work can own `devices/echo-dot-2/**`,
-`devices/android-generic/**` and package contract documentation only. Record missing
-base/ABI/install prerequisites explicitly. No device runtime, working installer,
-physical audio, unattended APK update or OS-image replacement is implied.
+The initial device scaffolds have evolved: Dot work now includes a concrete Echo
+host, device runtime, kernel/Linux-base builder and local recovery tooling. Android remains planning-only.
+Keep hardware, required BLE integration, release authenticity and power-loss
+qualification gaps explicit; no supported install, unattended APK update or new
+base/kernel release is implied by the development builder.
 
 The verified foundation is published to the shared GitHub baseline. New orbs
 should fetch it and rebase their scoped work rather than integrating archives.

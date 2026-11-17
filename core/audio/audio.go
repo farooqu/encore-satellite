@@ -10,8 +10,8 @@ import (
 
 const (
 	SampleRate     = 16000
-	MaxSamples     = 1024 // At most 64 ms per mono PCM16 block.
-	PreRollSamples = SampleRate
+	MaxSamples     = 1024           // At most 64 ms per mono PCM16 block.
+	PreRollSamples = 2 * SampleRate // Retain the whole wake phrase for upstream verification.
 )
 
 // Frame is a host-owned capture block. Samples are copied before retention.

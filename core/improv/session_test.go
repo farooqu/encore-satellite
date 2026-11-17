@@ -106,14 +106,16 @@ func TestPhysicalAuthorizationFragmentedWiFiAndRetry(t *testing.T) {
 	})
 }
 
-func TestClosedAuthorizationDoesNotAuthorizeAndOfferExpires(t *testing.T) {
+func TestClosedAuthorizationDoesNotAuthorizeAndCallerCanCancel(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
+		defer cancel()
 		auth := make(chan struct{})
 		close(auth)
 		writes := make(chan []byte, 1)
 		writes <- improv.WiFiFrame(improv.WiFi{SSID: "network"})
 		var unauthorized bool
-		err := improv.Run(context.Background(), improv.Options{Authorize: auth, Join: func(context.Context, improv.WiFi) (string, error) {
+		err := improv.Run(ctx, improv.Options{Authorize: auth, Join: func(context.Context, improv.WiFi) (string, error) {
 			t.Error("closed channel authorized WiFi")
 			return "", nil
 		}}, writes, func(uuid string, b []byte) {
@@ -123,6 +125,67 @@ func TestClosedAuthorizationDoesNotAuthorizeAndOfferExpires(t *testing.T) {
 		})
 		if !unauthorized || !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("unauthorized=%v error=%v", unauthorized, err)
+		}
+	})
+}
+
+func TestHealthyUserWaitingIsUnlimitedButHealthFailureStopsOffer(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		failure := errors.New("transport or button lost")
+		checks := 0
+		start := time.Now()
+		err := improv.Run(context.Background(), improv.Options{
+			Authorize: make(chan struct{}),
+			Join: func(context.Context, improv.WiFi) (string, error) {
+				t.Fatal("joined without user credentials")
+				return "", nil
+			},
+			Health: func() error {
+				checks++
+				if time.Since(start) >= 24*time.Hour {
+					return failure
+				}
+				return nil
+			},
+		}, make(chan []byte), func(string, []byte) {})
+		if !errors.Is(err, failure) || checks < 86400 {
+			t.Fatalf("checks=%d err=%v", checks, err)
+		}
+	})
+}
+
+func TestJoinHeartbeatsUntilDeadlineAndWaitsForCleanupBeforeRetry(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		auth := make(chan struct{}, 1)
+		writes := make(chan []byte, 1)
+		auth <- struct{}{}
+		checks, attempts := 0, 0
+		cleaned := false
+		err := improv.Run(ctx, improv.Options{
+			Authorize: auth,
+			Health:    func() error { checks++; return nil },
+			Join: func(ctx context.Context, _ improv.WiFi) (string, error) {
+				attempts++
+				<-ctx.Done()
+				time.Sleep(2 * time.Second) // Supplicant cleanup must finish first.
+				cleaned = true
+				return "", ctx.Err()
+			},
+		}, writes, func(uuid string, b []byte) {
+			if uuid == improv.StateUUID && bytes.Equal(b, []byte{byte(improv.Authorized)}) && attempts == 0 {
+				writes <- improv.WiFiFrame(improv.WiFi{SSID: "network", Passphrase: "password"})
+			}
+			if uuid == improv.ErrorUUID && bytes.Equal(b, []byte{byte(improv.ErrUnableToConnect)}) {
+				if !cleaned {
+					t.Error("retry before candidate cleanup finished")
+				}
+				cancel()
+			}
+		})
+		if !errors.Is(err, context.Canceled) || checks < 79 || attempts != 1 {
+			t.Fatalf("checks=%d attempts=%d err=%v", checks, attempts, err)
 		}
 	})
 }

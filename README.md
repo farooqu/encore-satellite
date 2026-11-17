@@ -44,9 +44,19 @@ on more hardware. On displays, that also means your Home Assistant dashboard
 with a small conversation overlay. Timers, alarms, and household automations
 stay with Home Assistant or Voice Incubator.
 
-**Early implementation has started.** An [Incubator-only Android development
-APK](devices/android-generic/README.md) can be built locally; device support has
-not been verified and no supported release is published. The shared Go protocol core has a
+**Early implementation has started; no device is release-supported.** An
+[Incubator-only Android development APK](devices/android-generic/README.md)
+can be built locally; device support has not been verified. An
+[experimental Echo Dot 2 package](devices/echo-dot-2/README.md) builds the Linux
+environment itself: kernel, recovery initramfs, Alpine radio services and ARMv7
+runtime, with clean-slate recovery provisioning/update tools. It has not been
+booted or acoustically tested on hardware. Activation supports Action and
+Voice Incubator-pushed microWakeWord/MixedNet models. Improv BLE provisioning and a default-off
+Bluetooth proxy with active connections are integrated, but require a compatible
+Bluetooth-enabled kernel and hardware validation. The installer stages the
+bundled project-built kernel from ordinary TWRP; no installed Linux or Fire OS
+version is required.
+The shared Go protocol core has a
 [reproducible Home Assistant lab](lab/README.md) pinned to a 2026.12 development
 build. [Native Incubator](docs/incubator-validation.md) is tested with its real
 upstream wake verification, recognition, HA actions and speech output.
@@ -58,8 +68,11 @@ packages must link one voice backend: Incubator by default, with a possible
 separate Home Assistant Assist pipeline package later. Changing backend requires
 application-package replacement, not a runtime switch. See the
 [foundation scope](docs/foundation.md) for what works and what remains.
-Android starts with Incubator and shared dashboard controls; other production
-device hosts remain to be implemented.
+Android starts with Incubator and shared dashboard controls.
+Dot packages contain only native Incubator. The encrypted common-control endpoint handles the optional
+Bluetooth proxy and Sendspin independently of voice. Sendspin uses an authenticated
+official SDK companion and the Dot's shared audio mixer; physical music/audio
+qualification is still outstanding.
 
 ## Devices
 
@@ -77,9 +90,10 @@ My planned home setup includes multiple units and variations of:
 
 These are the devices I intend to use, not a tested compatibility list.
 
-The [device package sections](docs/device-packages/README.md) are planned
-metadata and documentation only, not installable support. The Tab A7 Lite is the
-intended first Android validation tablet.
+The [device profiles](docs/device-packages/README.md) remain planned release
+metadata, not compatibility claims. The Dot's development builder is separate
+from supported releases; Android has a development APK, with the Tab A7 Lite as
+its intended first validation tablet.
 
 ## Want to help?
 

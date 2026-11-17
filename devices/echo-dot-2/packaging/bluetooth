@@ -1,0 +1,59 @@
+#!/bin/sh
+# One exclusive vendor H4 owner. BusyBox init respawns the whole base if it dies.
+set -eu
+umask 077
+while [ ! -e /run/encore/base-ready ]; do sleep 1; done
+rm -f /run/encore/bluetooth-ready
+test -e /dev/stpbt
+test -e /dev/vhci
+mkdir -p /data/encore/bluetooth /var/lib/bluetooth /var/lib/dbus /run/dbus
+mountpoint -q /var/lib/bluetooth || mount --bind /data/encore/bluetooth /var/lib/bluetooth
+dbus-uuidgen --ensure=/data/encore/machine-id
+# Machine ID is public identity, unlike private config/bonds. messagebus must
+# be able to read it after dropping root without traversing /data/encore (0700).
+cp /data/encore/machine-id /etc/machine-id
+chmod 644 /etc/machine-id
+chmod 755 /var/lib/dbus /run/dbus
+chown messagebus:messagebus /run/dbus
+ln -sf /etc/machine-id /var/lib/dbus/machine-id
+# Clean installation uses factory identity, never Fire OS pairing/Wi-Fi data.
+# If idme has no Bluetooth address, a stable local address derives from wlan0.
+if [ ! -s /data/encore/bdaddr ]; then
+  address=$(tr -d ':\000 \r\n' < /proc/idme/bt_mac_addr 2>/dev/null || :)
+  if ! printf '%s' "$address" | grep -Eq '^[0-9a-fA-F]{12}$' || [ "$address" = 000000000000 ]; then
+    address=$(tr -d ':\n' < /sys/class/net/wlan0/address)
+    first=$(printf '%s' "$address" | cut -c1-2)
+    rest=$(printf '%s' "$address" | cut -c3-12)
+    address=$(printf '%02x%s' "$(( (0x$first | 2) & 254 ))" "$rest")
+  fi
+  printf '%s\n' "$address" > /data/encore/bdaddr
+  sync
+fi
+address=$(cat /data/encore/bdaddr)
+printf '%s' "$address" | grep -Eq '^[0-9a-fA-F]{12}$'
+pids=
+cleanup() {
+  rm -f /run/encore/bluetooth-ready
+  for pid in $pids; do kill "$pid" 2>/dev/null || :; done
+  wait || :
+}
+trap cleanup EXIT
+trap 'exit 1' INT TERM
+dbus-daemon --system --nofork --nopidfile > /run/dbus.log 2>&1 &
+pids="$!"
+/usr/local/bin/btbridge -bdaddr "$address" -max-feature-page 1 -accept-as-peripheral > /run/btbridge.log 2>&1 &
+pids="$pids $!"
+i=0
+while [ ! -S /run/dbus/system_bus_socket ] || [ ! -d /sys/class/bluetooth/hci0 ]; do
+  i=$((i+1)); [ "$i" -lt 30 ] || exit 1
+  sleep 1
+done
+/usr/lib/bluetooth/bluetoothd --nodetach --experimental --noplugin=input,hog,network,sap > /run/bluez.log 2>&1 &
+pids="$pids $!"
+# Runtime's bounded BlueZ Validate probe, not this marker, establishes BLE
+# startup readiness (scanner, central, Improv registration and advertising).
+echo "$$" > /run/encore/bluetooth-ready
+while :; do
+  for pid in $pids; do kill -0 "$pid" || exit 1; done
+  sleep 1
+done

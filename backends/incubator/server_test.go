@@ -6,7 +6,9 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
+	"math"
 	"net"
 	"os"
 	"slices"
@@ -53,16 +55,22 @@ func (s *speaker) Drain(ctx context.Context) error {
 }
 
 func start(t *testing.T, p *speaker) (*session.Engine, string) {
+	s, address := startServer(t, p, false)
+	return s.Engine, address
+}
+
+func startServer(t *testing.T, p *speaker, models bool) (*incubator.Server, string) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	e := session.New(p)
+	s := &incubator.Server{Engine: e, Name: "test", MAC: "02:00:00:00:00:01", Version: "0.1.0-dev.0", EnableModels: models}
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	done := make(chan error, 1)
 	go func() {
-		done <- (&incubator.Server{Engine: e, Name: "test", MAC: "02:00:00:00:00:01", Version: "0.1.0-dev.0"}).Serve(ctx, l)
+		done <- s.Serve(ctx, l)
 	}()
 	t.Cleanup(func() {
 		cancel()
@@ -75,7 +83,7 @@ func start(t *testing.T, p *speaker) (*session.Engine, string) {
 			t.Error("server leaked connection")
 		}
 	})
-	return e, l.Addr().String()
+	return s, l.Addr().String()
 }
 func connect(t *testing.T, address string) net.Conn {
 	t.Helper()
@@ -126,6 +134,9 @@ func TestNativeWireEvidenceEndpointingDrainAndFollowUp(t *testing.T) {
 	hello := object(t, receive(t, c, 0x01))
 	if hello["protocol"] != float64(2) || hello["aec"] != false || hello["monitor"] != false || hello["intercom"] != false {
 		t.Fatal(hello)
+	}
+	if hello["wake_format"] != nil || hello["model_slots"] != nil {
+		t.Fatal("manual-only host claimed pushed-model execution", hello)
 	}
 	if err := e.Capture(audio.Frame{Samples: []int16{7, -11, 300}, Sequence: 0}); err != nil {
 		t.Fatal(err)
@@ -412,6 +423,194 @@ func TestNativeMalformedFramesAndCompetingClient(t *testing.T) {
 				t.Fatal("malformed frame accepted")
 			}
 		})
+	}
+}
+
+func pushModel(t *testing.T, c net.Conn, id string, blob []byte, edit func(map[string]any), endID string) map[string]any {
+	t.Helper()
+	header := map[string]any{"format": "mixednet", "id": id, "size": len(blob), "sha256": fmt.Sprintf("%x", sha256.Sum256(blob)), "slot": 6}
+	if edit != nil {
+		edit(header)
+	}
+	b, err := json.Marshal(header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	send(t, c, 0x20, b)
+	for off := 0; off < len(blob); {
+		n := min(997, len(blob)-off)
+		send(t, c, 0x21, blob[off:off+n])
+		off += n
+	}
+	b, _ = json.Marshal(map[string]string{"id": endID})
+	send(t, c, 0x22, b)
+	return object(t, receive(t, c, 0x07))
+}
+
+func TestPushedModelsValidateBeforeAckAndPreserveReplacement(t *testing.T) {
+	blob, err := os.ReadFile("../../core/wake/mixednet/testdata/pooled.mnb")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, address := startServer(t, &speaker{}, true)
+	c := connect(t, address)
+	hello := object(t, receive(t, c, 0x01))
+	if hello["wake_format"] != "mixednet" || hello["model_slots"] != float64(6) || hello["max_pool"] != true || hello["stop_word"] != true || hello["aec"] != false {
+		t.Fatal("incorrect execution capabilities", hello)
+	}
+	check := func(result map[string]any, ok bool, count int) {
+		t.Helper()
+		if result["ok"] != ok || result["models"] != float64(count) || (!ok && result["error"] == "") {
+			t.Fatal(result)
+		}
+	}
+	check(pushModel(t, c, "nabu", blob, nil, "nabu"), true, 1)
+	for _, tc := range []struct {
+		name string
+		edit func(map[string]any)
+		end  string
+		blob []byte
+	}{
+		{"wrong digest", func(h map[string]any) { h["sha256"] = fmt.Sprintf("%064d", 1) }, "nabu", blob},
+		{"wrong end ID", nil, "another-model", blob},
+		{"truncated", func(h map[string]any) { h["size"] = len(blob) + 1 }, "nabu", blob},
+		{"invalid executable", nil, "nabu", []byte("MNB1 invalid but correctly hashed")},
+		{"unsupported format", func(h map[string]any) { h["format"] = "tflite" }, "nabu", blob},
+		{"VAD not executed", func(h map[string]any) { h["kind"] = "vad" }, "nabu", blob},
+		{"bad settings", func(h map[string]any) { h["feature_step_size"] = 31 }, "nabu", blob},
+		{"oversized declaration", func(h map[string]any) { h["size"] = 512*1024 + 1 }, "nabu", blob},
+		{"overrun", func(h map[string]any) { h["size"] = 3 }, "nabu", []byte{1, 2, 3, 4}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			check(pushModel(t, c, "nabu", tc.blob, tc.edit, tc.end), false, 1)
+		})
+	}
+	for i, id := range []string{"jarvis", "mycroft", "custom-one", "custom-two", "stop"} {
+		check(pushModel(t, c, id, blob, nil, id), true, i+2)
+	}
+	check(pushModel(t, c, "seventh", blob, nil, "seventh"), false, 6)
+	check(pushModel(t, c, "nabu", blob, nil, "nabu"), true, 6)
+
+	if err := s.Engine.StartManual(); err != nil {
+		t.Fatal(err)
+	}
+	receive(t, c, 0x02)
+	send(t, c, 0x23, nil)
+	if result := object(t, receive(t, c, 0x04)); result["reason"] != "cancelled" {
+		t.Fatal("model clear did not cancel active voice", result)
+	}
+	check(pushModel(t, c, "after-clear", blob, nil, "after-clear"), true, 1)
+	_ = c.Close()
+	// Models are volatile per connection; a new connection starts with no
+	// residents even when the same server and engine survive.
+	deadline := time.Now().Add(time.Second)
+	for {
+		next := connect(t, address)
+		var head [3]byte
+		_ = next.SetReadDeadline(deadline)
+		if _, err := io.ReadFull(next, head[:]); err == nil {
+			body := make([]byte, binary.BigEndian.Uint16(head[1:]))
+			if _, err := io.ReadFull(next, body); err != nil || head[0] != 1 {
+				t.Fatal("invalid reconnect HELLO", err)
+			}
+			check(pushModel(t, next, "fresh", blob, nil, "fresh"), true, 1)
+			break
+		}
+		_ = next.Close()
+		if time.Now().After(deadline) {
+			t.Fatal("model worker prevented reconnect")
+		}
+	}
+}
+
+func TestPushedModelRunsPCMAndStopCancelsInsteadOfCalling(t *testing.T) {
+	// A tiny valid MNB1 model copies the first microWakeWord feature into the
+	// logit. Silence (-128) maps to 0; energy maps to 255. This tests the real
+	// frontend/executor/transport without asserting trained-model accuracy.
+	blob := make([]byte, 32+10+52+2+256)
+	copy(blob, "MNB1")
+	put := binary.LittleEndian.PutUint16
+	put(blob[4:], 1)
+	put(blob[8:], 1)
+	put(blob[10:], 1)
+	blob[14], blob[16] = 1, 40
+	binary.LittleEndian.PutUint32(blob[20:], 40)
+	put(blob[32:], 1)
+	put(blob[34:], 40)
+	put(blob[38:], 1)
+	blob[43] = 255 // RING_PUSH from external features.
+	put(blob[50:], 1)
+	put(blob[52:], 40)
+	put(blob[54:], 40)
+	for i := len(blob) - 256; i < len(blob); i++ {
+		blob[i] = 255
+	}
+	blob[len(blob)-256+128] = 0
+	s, address := startServer(t, &speaker{}, true)
+	c := connect(t, address)
+	receive(t, c, 1)
+	if result := pushModel(t, c, "energy-fixture", blob, nil, "energy-fixture"); result["ok"] != true {
+		t.Fatal(result)
+	}
+	if result := pushModel(t, c, "stop", blob, nil, "stop"); result["ok"] != true {
+		t.Fatal(result)
+	}
+	var sequence uint64
+	feed := func(energy bool, blocks int) {
+		t.Helper()
+		for range blocks {
+			pcm := make([]int16, 320)
+			if energy {
+				for i := range pcm {
+					pcm[i] = int16(20000 * math.Sin(2*math.Pi*200*float64(i)/16000))
+				}
+			}
+			if err := s.Capture(audio.Frame{Samples: pcm, Sequence: sequence, CapturedAt: time.Duration(sequence) * 20 * time.Millisecond}); err != nil {
+				t.Fatal(err)
+			}
+			clear(pcm) // Capture must copy, not retain the host's buffer.
+			sequence++
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	feed(false, 100)
+	feed(true, 5)
+	call := object(t, receive(t, c, 2))
+	if call["wake_word"] != "energy-fixture" || call["max_probability"] != float64(255) || call["cutoff"] != float64(217) || call["preroll_bytes"] != float64(64000) {
+		t.Fatal(call)
+	}
+	// Flush all pre-roll and live samples before checking Stop's notification.
+	// The reader barrier makes timer arming observable without private hooks.
+	send(t, c, 0x12, []byte(`{"type":"timer_ringing"}`))
+	deadline := time.Now().Add(time.Second)
+	for !s.Engine.Snapshot().Alert {
+		if time.Now().After(deadline) {
+			t.Fatal("timer did not arm")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	feed(false, 100)
+	feed(true, 5)
+	for {
+		_ = c.SetReadDeadline(time.Now().Add(time.Second))
+		var head [3]byte
+		if _, err := io.ReadFull(c, head[:]); err != nil {
+			t.Fatal(err)
+		}
+		body := make([]byte, binary.BigEndian.Uint16(head[1:]))
+		if _, err := io.ReadFull(c, body); err != nil {
+			t.Fatal(err)
+		}
+		if head[0] == 0x03 {
+			continue
+		}
+		if head[0] != 0x04 || object(t, body)["reason"] != "cancelled" {
+			t.Fatal("stop started a new call instead of cancelling", head[0], string(body))
+		}
+		break
+	}
+	if result := object(t, receive(t, c, 0x09)); result["type"] != "stop_timer" {
+		t.Fatal("call end discarded timer dismissal", result)
 	}
 }
 

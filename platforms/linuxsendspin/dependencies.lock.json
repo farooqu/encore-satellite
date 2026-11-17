@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "sources": {
+    "sdk": {"url": "https://github.com/sendspin/sendspin-cpp.git", "commit": "a4a9b65fb356657e3a39a2ab70b4aae957bf53e0", "license": "Apache-2.0"},
+    "arduinojson": {"url": "https://github.com/bblanchon/ArduinoJson.git", "commit": "32520135092970120a5ac165cf45f48e658c421d", "license": "MIT"},
+    "ixwebsocket": {"url": "https://github.com/machinezone/IXWebSocket.git", "commit": "64fae7676bd8fe31f7cb4bcde7a6841892dad65e", "license": "BSD-3-Clause"},
+    "micro_flac": {"url": "https://github.com/esphome-libs/micro-flac.git", "commit": "f9c27d4d0166021db977d7fc37d205b21d81e9f2", "license": "Apache-2.0"},
+    "micro_ogg": {"url": "https://github.com/esphome-libs/micro-ogg-demuxer.git", "commit": "ee95ec6f6b633789ec31e0e44877f6cc7fe7cf67", "license": "Apache-2.0", "parent": "micro_flac/lib/micro-ogg-demuxer"},
+    "noise_c": {"url": "https://github.com/esphome-libs/noise-c.git", "commit": "a1e08809a1b8f65cd91765ba7d68a6d00648ad61", "license": "MIT; bundled crypto notices"}
+  },
+  "zig": {
+    "version": "0.14.1",
+    "url": "https://ziglang.org/download/0.14.1/zig-x86_64-linux-0.14.1.tar.xz",
+    "sha256": "24aeeec8af16c381934a6cd7d95c807a8cb2cf7df9fa40d359aa884195c4716c",
+    "directory": "zig-x86_64-linux-0.14.1",
+    "runtime_licenses": "MIT (musl, Zig); Apache-2.0 WITH LLVM-exception (libc++, libc++abi, libunwind/compiler runtime); per-file notices in source kit"
+  }
+}

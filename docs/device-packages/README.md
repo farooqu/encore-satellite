@@ -5,9 +5,12 @@ There is no profile loader. Android now has a local development APK build and
 host described in its target notes; neither target has a supported release.
 Both profiles remain planned/revision-zero release metadata. Passing validation
 below establishes metadata consistency only, not the APK or hardware behavior.
+[Dot development package](../../devices/echo-dot-2/README.md) separately implements
+a full Linux environment builder, hardware runtime and USB/recovery tooling,
+without qualified support.
 
 - [Echo Dot 2](../../devices/echo-dot-2/README.md): local hardware wiring,
-  calibration, base prerequisites and intended application bundle.
+  kernel/base services, calibration and Linux-environment bundle.
 - [Generic Android](../../devices/android-generic/README.md): conservative APK
   profile; Samsung Galaxy Tab A7 Lite is the intended first validation tablet.
 
@@ -50,7 +53,8 @@ Device owners maintain their own profiles, wiring/calibration, target compositio
 roots, packaging inputs and hardware acceptance records. Shared Go contracts and
 DSP belong in `core/`; reusable OS integration belongs in `platforms/echo/` or
 `platforms/android/`. The Android host is now implemented for development; the
-profile itself is not its runtime configuration. Backend adapters remain in `backends/`.
+profile itself is not its runtime configuration. Echo supplies Linux
+ALSA/evdev/privacy/playback primitives. Backend adapters remain in `backends/`.
 
 Composition roots explicitly select the shared engine, one platform host,
 their own configuration and exactly one voice adapter per installed package.
@@ -97,14 +101,14 @@ They do not require an Assist package now or authorize automatic migration.
   acceptance must not depend on Assist hardware qualification or switching tests;
   a later Assist variant needs its own acceptance evidence.
 
-The existing dual-backend virtual lab may retain switching as test instrumentation;
-it is not a production composition root or a package to ship. Common device
-controls must not require packaging a second voice backend. Their production
-transport remains to be established.
+The dual-backend virtual lab may retain switching as test instrumentation; it is
+not a production composition root or a package to ship. Common device controls
+must not require a second voice backend. The Dot uses a separate encrypted
+ESPHome common-control endpoint without advertising an Assist voice satellite.
 
-These requirements do not add runtime fields to `profile.json`, enable release
-support or invent build commands. Schema 1 remains identity and planned status
-only until an implemented consumer needs a richer contract.
+These requirements do not add runtime fields to `profile.json` or enable release
+support. Schema 1 remains identity and planned status only until an implemented
+consumer needs a richer contract.
 
 ## Audio and release boundaries
 
@@ -125,10 +129,13 @@ Device contributors cannot select release inclusion, signing trust or publicatio
 from a profile. Shared contract/registry changes require their respective owners'
 review.
 
-Application and maintained-base updates are separate: Dot's future application
-bundle sits above boot/kernel/drivers/recovery; Android's future signed APK
+The Dot bundle supplies its own kernel, initramfs, Linux userspace and runtime.
+Incremental app-slot updates require the same Linux-base identity; they cannot
+silently replace the shared kernel or recovery. Android's future signed APK
 contains its matching native host and Go engine, not a separately downloaded core.
-No installer, updater, signature implementation or production keys are supplied.
+The Dot's local development installer/updater is explicitly invoked over USB
+recovery with a trusted local build digest and an unsigned-development opt-in.
+There is no network updater, signature implementation or production trust root.
 
 ## Evidence, attribution and licensing
 
@@ -138,7 +145,8 @@ microwakeword, ESPHome, Home Assistant and Voice Incubator deserve acknowledgeme
 see [ACKNOWLEDGEMENTS.md](../../ACKNOWLEDGEMENTS.md) for exact provenance and
 included third-party notices. No runtime code, model, calibration, firmware or
 asset is declared by the planning profiles. Android's included frontend/executor
-and downloaded Sendspin libraries are identified in the acknowledgements. Source inspection is not fresh
+and downloaded Sendspin libraries are identified in the acknowledgements. Echo
+low-level code and Dot's wmtup retain their MIT notices. Source inspection is not fresh
 hardware validation and upstream compatibility claims are not Encore guarantees.
 
 The license for new Encore material is still **not selected**. Existing third-party

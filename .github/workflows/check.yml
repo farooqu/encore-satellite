@@ -72,5 +72,9 @@ jobs:
         run: make check
       - name: Build the virtual lab (not a device package)
         run: go build -o "$RUNNER_TEMP/encore-lab" ./cmd/encore-lab
+      - name: Install Dot boot and builder test tools
+        run: sudo apt-get update && sudo apt-get install -y busybox cmake ninja-build g++ dropbear-bin openssh-client iptables iproute2 iputils-ping
+      - name: Check and cross-build the experimental Dot package
+        run: make dot-check dot-build
       # Deliberately not make lab-test: it needs pinned HA, onboarding and
       # Amp-supervised service restart support. See release/README.md.

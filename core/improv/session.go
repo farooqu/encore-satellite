@@ -16,6 +16,9 @@ type Options struct {
 	Hardware  string
 	Authorize <-chan struct{}
 	Join      func(context.Context, WiFi) (string, error)
+	// Health runs after transport registration and periodically on the session
+	// loop, not an independent goroutine. An error terminates provisioning.
+	Health func() error
 }
 
 // Run handles bounded Improv RPCs, including fragmented ATT writes. update is
@@ -25,8 +28,22 @@ func Run(ctx context.Context, options Options, writes <-chan []byte, update func
 	if options.Join == nil || options.Authorize == nil {
 		return errors.New("improv: Join and physical authorization are required")
 	}
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
-	defer cancel()
+	// Waiting for a physically present user is not a provisioning failure.
+	// Authorization and individual joins remain bounded below.
+	health := time.NewTicker(time.Second)
+	defer health.Stop()
+	checkHealth := func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if options.Health != nil {
+			return options.Health()
+		}
+		return nil
+	}
+	if err := checkHealth(); err != nil {
+		return err
+	}
 	state := AuthorizationRequired
 	setState := func(s State) { state = s; update(StateUUID, []byte{byte(s)}) }
 	setError := func(e Error) { update(ErrorUUID, []byte{byte(e)}) }
@@ -41,6 +58,10 @@ func Run(ctx context.Context, options Options, writes <-chan []byte, update func
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-health.C:
+			if err := checkHealth(); err != nil {
+				return err
+			}
 		case <-authorization.C:
 			if state == Authorized {
 				setState(AuthorizationRequired)
@@ -97,7 +118,36 @@ func Run(ctx context.Context, options Options, writes <-chan []byte, update func
 				}
 				setState(Provisioning)
 				joinCtx, done := context.WithTimeout(ctx, 80*time.Second)
-				url, err := options.Join(joinCtx, wifi)
+				type joined struct {
+					url string
+					err error
+				}
+				result := make(chan joined, 1)
+				go func() {
+					url, err := options.Join(joinCtx, wifi)
+					result <- joined{url, err}
+				}()
+				var url string
+			joinWait:
+				for {
+					select {
+					case r := <-result:
+						url, err = r.url, r.err
+						break joinWait
+					case <-joinCtx.Done():
+						// Join must observe cancellation. Wait for its cleanup before
+						// accepting another candidate; do not heartbeat a stuck Join.
+						<-result
+						err = joinCtx.Err()
+						break joinWait
+					case <-health.C:
+						if healthErr := checkHealth(); healthErr != nil {
+							done()
+							<-result
+							return healthErr
+						}
+					}
+				}
 				if joinCtx.Err() != nil {
 					err = joinCtx.Err()
 				}

@@ -1,0 +1,6 @@
+#!/bin/sh
+# Install as an independent BusyBox init respawn service, not under voice run.
+set -eu
+umask 077
+while [ ! -e /run/encore/base-ready ]; do sleep 1; done
+exec /usr/local/bin/encore-satellite --network-manager

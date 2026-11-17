@@ -16,22 +16,45 @@ import (
 	"github.com/farooqu/encore-satellite/backends/internal/outbox"
 	"github.com/farooqu/encore-satellite/core/audio"
 	"github.com/farooqu/encore-satellite/core/session"
-	"github.com/farooqu/encore-satellite/core/wake"
 )
 
 type Server struct {
 	Engine             *session.Engine
 	Name, MAC, Version string
-	// EnableModels adds the protocol-2 mixednet model executor. Capture must
-	// then be supplied through Server.Capture, not directly to the engine.
+	// EnableModels requires the host to deliver privacy-gated audio via Capture.
+	// Without it HELLO makes no model-execution claim (e.g. manual-only labs).
 	EnableModels bool
-	modelMu      sync.Mutex
-	models       *modelSet
+	captureMu    sync.RWMutex
+	models       *modelSession
 }
 
 type link struct{ *outbox.Queue }
 
 func (*link) Backend() session.Backend { return session.Incubator }
+
+// Capture supplies both session pre-roll/live audio and local model inference.
+// The host must call it only inside its OS-level privacy boundary. DSP is queued
+// without blocking capture; models never retain the caller's sample buffer.
+func (s *Server) Capture(frame audio.Frame) error {
+	s.captureMu.RLock()
+	defer s.captureMu.RUnlock()
+	if err := s.Engine.Capture(frame); err != nil {
+		return err
+	}
+	if s.models != nil {
+		s.models.feed(frame)
+	}
+	return nil
+}
+
+func (s *Server) ModelCount() int {
+	s.captureMu.RLock()
+	defer s.captureMu.RUnlock()
+	if s.models == nil {
+		return 0
+	}
+	return s.models.count()
+}
 
 // Serve refuses competing clients. The caller owns mDNS advertisement and the
 // listener address; this adapter never opens a microphone or a LAN control API.
@@ -82,29 +105,34 @@ func (s *Server) serveConn(ctx context.Context, conn net.Conn) error {
 		return err
 	}
 	defer s.Engine.Disconnect(generation, "connection_closed")
-	models := &modelSet{}
-	if s.EnableModels {
-		s.modelMu.Lock()
-		s.models = models
-		s.modelMu.Unlock()
-		defer func() {
-			s.modelMu.Lock()
-			s.models = nil
-			s.modelMu.Unlock()
-		}()
-	}
 	stop := context.AfterFunc(ctx, func() { _ = l.Close() })
 	defer stop()
+	var models *modelSession
+	if s.EnableModels {
+		models = newModelSession(ctx, s.Engine, generation)
+		s.captureMu.Lock()
+		s.models = models
+		s.captureMu.Unlock()
+		defer func() {
+			s.captureMu.Lock()
+			s.models = nil
+			s.captureMu.Unlock()
+			models.close()
+		}()
+	}
 	var writeMu sync.Mutex
-	send := func(kind byte, data any) error {
+	write := func(kind byte, data []byte) error {
 		writeMu.Lock()
 		defer writeMu.Unlock()
+		_ = conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+		return writeFrame(conn, kind, data)
+	}
+	send := func(kind byte, data any) error {
 		b, err := json.Marshal(data)
 		if err != nil {
 			return err
 		}
-		_ = conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
-		return writeFrame(conn, kind, b)
+		return write(kind, b)
 	}
 	hello := map[string]any{
 		"protocol": 2, "name": s.Name, "mac": s.MAC, "model": "encore-core", "firmware": s.Version,
@@ -112,9 +140,10 @@ func (s *Server) serveConn(ctx context.Context, conn net.Conn) error {
 		"preroll_ms": audio.PreRollSamples * 1000 / audio.SampleRate,
 		"listen":     true, "aec": false, "monitor": false, "intercom": false,
 	}
-	if s.EnableModels {
-		hello["wake_format"], hello["model_slots"], hello["wake_models"] = "mixednet", modelSlots, 0
-		hello["feature_size"], hello["max_pool"], hello["stop_word"] = 40, true, true
+	if models != nil {
+		hello["wake_format"], hello["model_slots"] = "mixednet", modelSlots
+		hello["wake_models"], hello["feature_size"] = 0, 40
+		hello["max_pool"], hello["stop_word"] = true, true
 	}
 	if err := send(0x01, hello); err != nil {
 		return err
@@ -131,10 +160,7 @@ func (s *Server) serveConn(ctx context.Context, conn net.Conn) error {
 				for i, v := range c.Samples {
 					binary.LittleEndian.PutUint16(b[i*2:], uint16(v))
 				}
-				writeMu.Lock()
-				defer writeMu.Unlock()
-				_ = conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
-				return writeFrame(conn, 0x03, b)
+				return write(0x03, b)
 			case "cancel":
 				// Flush cancellation before retiring this voice generation.
 				// AUDIO_OUT_END cannot distinguish the ACK from an old stream.
@@ -160,18 +186,6 @@ func (s *Server) serveConn(ctx context.Context, conn net.Conn) error {
 			return err
 		}
 		switch kind {
-		case 0x20, 0x21, 0x22, 0x23:
-			if s.EnableModels {
-				if kind == 0x23 {
-					_ = s.Engine.Stop()
-				}
-				s.modelMu.Lock()
-				result := models.transfer(kind, data)
-				s.modelMu.Unlock()
-				if result != nil {
-					err = send(0x07, result)
-				}
-			}
 		case 0x10:
 			if len(data) == 0 || len(data)%2 != 0 {
 				return errors.New("incubator: malformed PCM16")
@@ -204,56 +218,14 @@ func (s *Server) serveConn(ctx context.Context, conn net.Conn) error {
 				return err
 			}
 			err = s.Engine.Handle(generation, session.Event{Kind: "hangup", Reason: event.Reason, Listen: event.Listen})
-			// Unknown optional types are ignored; monitoring/intercom stay unadvertised.
+		case 0x20, 0x21, 0x22, 0x23:
+			if models != nil {
+				err = models.handle(kind, data, send)
+			}
+			// Unknown optional types are ignored as protocol 2 requires.
 		}
 		if err != nil && !errors.Is(err, context.Canceled) {
 			return err
 		}
 	}
-}
-
-// Capture shares one privacy-gated PCM stream with pre-roll, voice and local
-// model execution. Models are connection-scoped, never resurrected on reconnect.
-func (s *Server) Capture(frame audio.Frame) error {
-	if err := s.Engine.Capture(frame); err != nil {
-		return err
-	}
-	s.modelMu.Lock()
-	defer s.modelMu.Unlock()
-	state := s.Engine.Snapshot()
-	if s.models == nil || state.Muted || !state.Connected {
-		return nil
-	}
-	for i := range s.models.models {
-		m := &s.models.models[i]
-		stop := m.header.ID == "stop" || m.header.Word == "stop"
-		armed := state.Alert || state.Phase == "speaking"
-		if stop && armed != m.armed {
-			m.detector.Reset()
-			m.armed = armed
-		}
-		if stop && !armed {
-			continue
-		}
-		if !stop && state.Phase != "idle" {
-			continue
-		}
-		p, peak, hit := m.detector.Feed(frame.Samples)
-		if hit {
-			if stop {
-				return s.Engine.Stop()
-			}
-			return s.Engine.Wake(wake.Detection{Word: m.header.Word, Probability: p, MaxProbability: peak, Cutoff: uint8(float32(m.header.Cutoff)*255 + 0.5)})
-		}
-	}
-	return nil
-}
-
-func (s *Server) ModelCount() int {
-	s.modelMu.Lock()
-	defer s.modelMu.Unlock()
-	if s.models == nil {
-		return 0
-	}
-	return len(s.models.models)
 }

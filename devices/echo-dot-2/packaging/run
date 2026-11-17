@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+while [ ! -e /run/encore/base-ready ]; do sleep 1; done
+while [ ! -e /run/encore/bluetooth-ready ]; do sleep 1; done
+exec /usr/local/bin/encore-satellite

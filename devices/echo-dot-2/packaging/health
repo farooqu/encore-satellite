@@ -1,0 +1,35 @@
+#!/bin/sh
+# Never commit solely because a process exists. The runtime writes ready only
+# after capture, playback and privacy/control initialization succeed.
+set -eu
+provisioning_live() {
+  [ ! -s /data/encore/wpa_supplicant.conf ] || return 1
+  [ -s /run/encore/provisioning-ready ] || return 1
+  read -r pid stamp extra < /run/encore/provisioning-ready 2>/dev/null || return 1
+  case "$pid:$stamp:$extra" in *[!0-9:]*|:*|*::*|*:0:*) return 1;; esac
+  [ -n "$stamp" ] && [ -z "$extra" ] && [ "$pid" -gt 0 ] || return 1
+  now=$(date +%s)
+  [ "$stamp" -le "$now" ] && [ "$((now-stamp))" -le 10 ] && kill -0 "$pid" 2>/dev/null
+}
+i=0
+while [ "$i" -lt 180 ]; do
+  # First-boot Wi-Fi entry is not a failed update. No slot is committed while
+  # waiting. Only a fresh heartbeat from registered, functioning Improv and
+  # Action input pauses the budget, never the Bluetooth supervisor marker.
+  if provisioning_live; then
+    sleep 1
+    continue
+  fi
+  if [ -e /run/encore/base-ready ] && [ -s /run/encore/ready ]; then
+    pid=$(cat /run/encore/ready)
+    sleep 30
+    if [ "$(cat /run/encore/ready 2>/dev/null)" = "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      exec /usr/local/sbin/slotctl commit
+    fi
+  fi
+  sleep 1
+  i=$((i+1))
+done
+# Spend the second trial attempt. The next failed trial falls back to good.
+slot=$(cat /run/encore/slot)
+case "$(cat /store/encore/slots/$slot.state)" in trial*) sync; reboot -f;; esac
