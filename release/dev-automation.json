@@ -6,7 +6,7 @@
   "distribution_review": "Umer approved the exact five bootstrap-bf44e17-v1 binary/source archives and initial CI candidate distribution on 2026-11-18: https://ampcode.com/threads/T-01a1eb12-5dda-7536-940c-23d12298e1ef . Correspondence/notices evidence and exact hashes: https://ampcode.com/artifacts/release-pipeline-runbook-e81cdbf9-14e7-48e2-85a1-344747a9c26e . The accepted exact-FPGA documented-risk policy is not legal clearance. Firmware publishing, feeds and device deployment remain disabled.",
   "inputs": {
     "dependency_sha256": {
-      "devices/android-generic/app/build.gradle.kts": "14a51d53204b2b2cf1b445311be77d52dbc6c3990ddd3578a8e59cfeb780f93f",
+      "devices/android-generic/app/build.gradle.kts": "3f6180d208e4756e0d3f9dcfb756edff361c70dad05f23b5e223109adb0e51dd",
       "devices/android-generic/build-android": "4d12cb2c27c38be06dd77efdda0d0db1d52f73ab9421e810c9fb4ec51552f8b1",
       "devices/android-generic/build.gradle.kts": "2bae47bcc30961c636d5252fbfebf5629b2e137a4e8e895eccaf8332ecc103b6",
       "devices/android-generic/gradle.properties": "b335ecfedb653afb11c0cedd0b8e419a61201f4d893aa734b550cdb36beae3b6",

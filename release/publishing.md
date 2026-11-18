@@ -126,6 +126,10 @@ This establishes repeat assembly from the retained inputs, not an independently
 reproducible Alpine/kernel/toolchain build. Existing base and native builders
 are not all independently byte-reproducible. Retain exact inputs and original
 provenance; never relabel a reused kernel/Sendspin artifact with a new origin.
+Android disables AGP's optional encrypted SDK-dependency inventory in the APK
+signing block because it changes randomly between clean builds. This does not
+remove dependencies, notices, source-kit inventory or APK signature verification;
+the exact Gradle recipe remains in the commit-bound Encore source archive.
 
 ## Main-driven dev operation
 
@@ -193,6 +197,14 @@ it; it does not recycle a revision. Automatic allocation/build jobs refuse Actio
 run attempts after the first; use inspected manual recovery, not "re-run failed
 jobs" to rebuild a consumed identity. A Pages failure after checkpoint push uses
 the exact-feed recovery in the manual activation section below.
+
+Failed assembly jobs retain only an explicit diagnostic allowlist for seven days:
+`evidence.json` and whichever of the two Biscuit ZIPs and Android APKs exist.
+The `failed-dev-assembly-*` / `failed-initial-assembly-*` Actions artifacts are
+not release candidates: inspect both attempts and the recorded SHA256 pairs,
+and do not sign metadata or activate a feed for a mismatched cohort. No keystore,
+Gradle cache or whole work directory is uploaded. Successful candidate retention
+remains a separate 30-day artifact with verified receipts and matching sources.
 
 ## Setup to enable automatic builds, not publishing (not performed)
 

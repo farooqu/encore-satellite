@@ -181,3 +181,16 @@ jobs:
           path: build/dev-candidate
           retention-days: 30
           if-no-files-found: error
+      # Explicit diagnostic allowlist: never upload the keystore, work directory
+      # wholesale, or Gradle state. Failed assemblies have no release receipt.
+      - name: Preserve failed assembly evidence (not a release candidate)
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: failed-dev-assembly-${{ needs.reserve.outputs.source }}
+          path: |
+            build/dev-work/evidence.json
+            build/dev-work/biscuit-*.zip
+            build/dev-work/android-*.apk
+          retention-days: 7
+          if-no-files-found: ignore

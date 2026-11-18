@@ -301,11 +301,7 @@ def build(output, aapt, apksigner, initial=None):
         shutil.copyfile(ROOT / "devices/android-generic/app/build/outputs/apk/release/app-release.apk", apk)
         artifacts[attempt] = {"biscuit": bundle, "android-generic": apk}
     hashes = {target: [p.digest(artifacts[attempt][target]) for attempt in (1, 2)] for target in TARGETS}
-    p.require(all(pair[0] == pair[1] for pair in hashes.values()), "non-reproducible cohort; do not sign/publish either target")
-    if initial:
-        for target, expected in initial["expected_artifact_sha256"].items():
-            p.require(expected is None or hashes[target][0] == expected,
-                      f"prior {target} candidate differs; preserve its identity and coordinate a new reservation")
+    print(json.dumps({"assembly_sha256": hashes}, sort_keys=True), flush=True)
     evidence = work / "evidence.json"
     evidence.write_bytes(p.canonical({"source": source, "distribution_review": policy["distribution_review"],
                                       "inputs": policy["inputs"], "assembly_sha256": hashes,
@@ -318,6 +314,11 @@ def build(output, aapt, apksigner, initial=None):
                                                     "runner_image": os.environ.get("ImageVersion", "not recorded")},
                                       "checks": ["make check biscuit-check", "testDebugUnitTest lintRelease"],
                                       "hardware_qualified": False}) + b"\n")
+    p.require(all(pair[0] == pair[1] for pair in hashes.values()), "non-reproducible cohort; do not sign/publish either target")
+    if initial:
+        for target, expected in initial["expected_artifact_sha256"].items():
+            p.require(expected is None or hashes[target][0] == expected,
+                      f"prior {target} candidate differs; preserve its identity and coordinate a new reservation")
     for target in TARGETS:
         spec = {"target": target, "reservation": reservations[target], "artifact": str(artifacts[1][target]),
                 "reproduced_artifact": str(artifacts[2][target]), "evidence": str(evidence),

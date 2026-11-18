@@ -29,6 +29,9 @@ gradle.taskGraph.whenReady {
 android {
     namespace = "com.encore.satellite"
     compileSdk = 36
+    // AGP encrypts this optional SDK inventory with fresh randomness per build.
+    // Corresponding dependencies remain in the retained source kit instead.
+    dependenciesInfo { includeInApk = false }
     defaultConfig {
         // Signed dev/stable releases share an identity separate from debug data.
         applicationId = "com.encore.satellite.incubator"
