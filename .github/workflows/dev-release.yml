@@ -52,7 +52,7 @@ jobs:
         if: steps.source.outputs.sha != ''
         run: |
           set -euo pipefail
-          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq 'add' > "$RUNNER_TEMP/releases.json"
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100" | jq 'add // []' > "$RUNNER_TEMP/releases.json"
           for workflow in check.yml android.yml; do
             gh api "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow/runs?head_sha=$SOURCE&event=push&per_page=100" > "$RUNNER_TEMP/$workflow.json"
           done
