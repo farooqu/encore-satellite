@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/farooqu/encore-satellite/core/improv"
@@ -240,45 +241,70 @@ func TestWiFiWrongSSIDAndStaleAddress(t *testing.T) {
 func TestWiFiTimeoutAndCancelRestore(t *testing.T) {
 	for _, scenario := range []string{"bad-password", "confirmation-timeout", "cancel", "cancel-after-join", "cancel-during-switch", "apply-failure"} {
 		t.Run(scenario, func(t *testing.T) {
-			m, a, old := testWiFiManager(t)
-			m.join, m.confirmation = 100*time.Millisecond, 100*time.Millisecond
-			if scenario == "bad-password" || scenario == "cancel-during-switch" {
-				a.autoJoin = false
-			}
-			if scenario == "apply-failure" {
-				a.failApply = true
-			}
-			startTestWiFiWorker(t, m)
-			s := mustStageWiFi(t, m)
-			if scenario == "cancel" {
-				if _, err := m.cancel(s.ID); err != nil {
-					t.Fatal(err)
+			// Keep real filesystem IPC, but don't let fsync or runner scheduling
+			// consume the deadlines whose behavior this scenario is testing.
+			synctest.Test(t, func(t *testing.T) {
+				m, a, old := testWiFiManager(t)
+				m.join, m.confirmation = 100*time.Millisecond, 100*time.Millisecond
+				if scenario == "bad-password" || scenario == "cancel-during-switch" {
+					a.autoJoin = false
 				}
-			}
-			if scenario == "cancel-after-join" || scenario == "cancel-during-switch" {
-				state := "awaiting_confirmation"
-				if scenario == "cancel-during-switch" {
-					state = "switching"
+				if scenario == "apply-failure" {
+					a.failApply = true
 				}
-				waitWiFiState(t, m, state)
-				if _, err := m.cancel(s.ID); err != nil {
-					t.Fatal(err)
+				startTestWiFiWorker(t, m)
+				s := mustStageWiFi(t, m)
+				if scenario == "bad-password" {
+					waitWiFiState(t, m, "switching")
+					synctest.Sleep(m.join / 2)
+					if current, err := m.status(); err != nil || current.State != "switching" {
+						t.Fatalf("join expired early: %+v %v", current, err)
+					}
 				}
-			}
-			if scenario == "confirmation-timeout" {
-				waitWiFiState(t, m, "awaiting_confirmation")
-			}
-			rolled := waitWiFiState(t, m, "rolled_back")
-			if rolled.Address != "192.168.1.20" || rolled.SSID != "last-good" {
-				t.Fatal("last-good network status not restored")
-			}
-			if strings.Contains(rolled.Error, "super-secret-password") {
-				t.Fatal("secret in adapter error")
-			}
-			if _, err := m.confirm(s.ID); err == nil {
-				t.Fatal("accepted expired confirmation")
-			}
-			assertSavedWiFi(t, m, old)
+				if scenario == "cancel" {
+					if _, err := m.cancel(s.ID); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if scenario == "cancel-after-join" || scenario == "cancel-during-switch" {
+					state := "awaiting_confirmation"
+					if scenario == "cancel-during-switch" {
+						state = "switching"
+					}
+					waitWiFiState(t, m, state)
+					if _, err := m.cancel(s.ID); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if scenario == "confirmation-timeout" {
+					waitWiFiState(t, m, "awaiting_confirmation")
+					synctest.Sleep(m.confirmation / 2)
+					if current, err := m.status(); err != nil || current.State != "awaiting_confirmation" {
+						t.Fatalf("confirmation expired early: %+v %v", current, err)
+					}
+				}
+				rolled := waitWiFiState(t, m, "rolled_back")
+				wantError := "transaction timed out"
+				switch scenario {
+				case "cancel", "cancel-after-join", "cancel-during-switch":
+					wantError = "cancelled"
+				case "apply-failure":
+					wantError = "candidate apply failed"
+				}
+				if rolled.Error != wantError {
+					t.Fatalf("rollback reason: got %q, want %q", rolled.Error, wantError)
+				}
+				if rolled.Address != "192.168.1.20" || rolled.SSID != "last-good" {
+					t.Fatal("last-good network status not restored")
+				}
+				if strings.Contains(rolled.Error, "super-secret-password") {
+					t.Fatal("secret in adapter error")
+				}
+				if _, err := m.confirm(s.ID); err == nil {
+					t.Fatal("accepted expired confirmation")
+				}
+				assertSavedWiFi(t, m, old)
+			})
 		})
 	}
 }
