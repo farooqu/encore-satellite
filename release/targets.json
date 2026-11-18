@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "core_version": "0.1.1-dev.2",
+  "core_version": "0.1.1-dev.3",
   "channels": [
     "dev",
     "stable"
@@ -30,7 +30,7 @@
         "platforms/linux/",
         "devices/biscuit/"
       ],
-      "package_revision": 19,
+      "package_revision": 20,
       "release_supported": false
     },
     {
@@ -42,7 +42,7 @@
         "devices/android-generic/"
       ],
       "intended_first_device": "Samsung Galaxy Tab A7 Lite",
-      "package_revision": 6,
+      "package_revision": 7,
       "release_supported": false
     }
   ]
