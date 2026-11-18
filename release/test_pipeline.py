@@ -283,6 +283,12 @@ class PipelineTests(unittest.TestCase):
             path.write_text(original)
 
     def test_offline_cohort_handoff_no_rebuild_and_publication_dry_run(self):
+        self.offline_cohort_handoff(initial=False)
+
+    def test_initial_split_reservation_handoff_no_rebuild(self):
+        self.offline_cohort_handoff(initial=True)
+
+    def offline_cohort_handoff(self, initial):
         import dev
         # Synthetic SDK output only; no real APK/owner signing keys are used.
         for name in dev.dependency_paths():
@@ -299,15 +305,19 @@ class PipelineTests(unittest.TestCase):
         self.git("add", ".")
         self.git("commit", "-qm", "synthetic main change")
         parent = self.git("rev-parse", "HEAD").strip()
-        version, reservation = "1.2.1-dev.1", "main-dev-" + parent
+        version = "1.2.0" if initial else "1.2.1-dev.1"
+        reservations = ({"biscuit": "first-incubator-dev-biscuit-18", "android-generic": "first-incubator-dev"}
+                        if initial else {target: "main-dev-" + parent for target in dev.TARGETS})
+        revisions = {"biscuit": 18, "android-generic": 5} if initial else {"biscuit": 19, "android-generic": 6}
         registry = json.loads((self.repo / "release/targets.json").read_text())
         registry["core_version"] = version
         for target in registry["targets"]:
             if target["id"] in dev.TARGETS:
-                target["package_revision"] += 1
+                target["package_revision"] = revisions[target["id"]]
         ledger = json.loads((self.repo / "release/ledger.json").read_text())
-        ledger["reservations"].append({"id": reservation, "core_version": version, "backend": "incubator",
-                                       "channel": "dev", "revisions": {"biscuit": 19, "android-generic": 6}, "source_commit": parent})
+        if not initial:
+            ledger["reservations"].append({"id": reservations["biscuit"], "core_version": version, "backend": "incubator",
+                                           "channel": "dev", "revisions": revisions, "source_commit": parent})
         (self.repo / "release/targets.json").write_text(json.dumps(registry))
         (self.repo / "release/ledger.json").write_text(json.dumps(ledger))
         changelog = self.repo / f"release/changelogs/{version}.md"
@@ -316,8 +326,8 @@ class PipelineTests(unittest.TestCase):
         self.git("add", ".")
         self.git("commit", "-qm", "Prepare cohort\n\nEncore-Dev-Source: " + parent)
         self.source = self.git("rev-parse", "HEAD").strip()
-        self.rewrite_bundle(source_commit=self.source, package_revision=19, core_version=version)
-        self.spec["reservation"] = reservation
+        self.rewrite_bundle(source_commit=self.source, package_revision=revisions["biscuit"], core_version=version)
+        self.spec["reservation"] = reservations["biscuit"]
         self.spec_path.write_text(json.dumps(self.spec))
         cohort = self.build / "cohort"
         self.cli("prepare", self.spec_path, "--output", cohort / "biscuit")
@@ -326,13 +336,14 @@ class PipelineTests(unittest.TestCase):
         shutil.copyfile(apk, self.build / "second.apk")
         aapt, signer = self.build / "aapt", self.build / "apksigner"
         cert = "e" * 64
-        badging = "package: name='com.encore.satellite.incubator' versionCode='6' versionName='" + version + "'\nsdkVersion:'26'\nnative-code: 'armeabi-v7a' 'arm64-v8a'\n"
+        badging = f"package: name='com.encore.satellite.incubator' versionCode='{revisions['android-generic']}' versionName='" + version + "'\nsdkVersion:'26'\nnative-code: 'armeabi-v7a' 'arm64-v8a'\n"
         manifest = 'A: android:name="com.encore.core_version"\n  A: android:value="' + version + '"\n'
         aapt.write_text("#!/usr/bin/env python3\nimport sys\nprint(" + repr(badging) + " if sys.argv[2] == 'badging' else " + repr(manifest) + ")\n")
         signer.write_text("#!/usr/bin/env python3\nprint('Signer #1 certificate SHA-256 digest: " + cert + "')\n")
         aapt.chmod(0o755)
         signer.chmod(0o755)
-        self.spec.update(target="android-generic", artifact=str(apk), reproduced_artifact=str(self.build / "second.apk"),
+        self.spec.update(target="android-generic", reservation=reservations["android-generic"],
+                         artifact=str(apk), reproduced_artifact=str(self.build / "second.apk"),
                          certificate_sha256=cert, sources={"dependencies": str(self.build / "alpine-source.tar.gz")})
         self.spec_path.write_text(json.dumps(self.spec))
         self.cli("prepare", self.spec_path, "--output", cohort / "android-generic", "--aapt", aapt, "--apksigner", signer)
@@ -366,7 +377,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(result.stdout.count('"mode": "dry-run"'), 2)
         self.assertIn("Immutable source changelog fixture", result.stdout)
-        for target, revision in (("biscuit", 19), ("android-generic", 6)):
+        for target, revision in revisions.items():
             self.assertIn(f"{target}-r{revision}", result.stdout)
             payload = pipeline.verify_jws(cohort / f"{target}-dev.jws", pipeline.FEED_TYPES[target], self.public)
             self.assertEqual((payload["channel"], payload["core_version"], payload["revision"]), ("dev", version, revision))
@@ -382,7 +393,7 @@ class PipelineTests(unittest.TestCase):
         self.assertNotIn('"commands"', refused.stdout)
         # The offline signer must also reject the entire unsigned cohort before
         # producing any signature, including hash/certificate/channel failures.
-        for failure in ("artifact", "handoff", "certificate", "extra", "stable"):
+        for failure in ("artifact", "handoff", "certificate", "extra", "reservation", *([] if initial else ["stable"])):
             shutil.rmtree(cohort)
             shutil.copytree(pristine, cohort)
             bad_args, bad_environment = list(args), dict(environment)
@@ -394,6 +405,14 @@ class PipelineTests(unittest.TestCase):
                 bad_environment["EXPECTED_CERTIFICATE"] = "f" * 64
             elif failure == "extra":
                 (cohort / "unreviewed-file").write_text("do not transfer unrecorded files")
+            elif failure == "reservation":
+                receipt_path = cohort / "android-generic/receipt.json"
+                receipt = json.loads(receipt_path.read_text())
+                receipt["reservation"] = "first-incubator-dev-biscuit-18"
+                receipt_path.write_bytes(pipeline.canonical(receipt) + b"\n")
+                handoff["receipts"]["android-generic"] = pipeline.digest(receipt_path)
+                (cohort / "handoff.json").write_bytes(pipeline.canonical(handoff) + b"\n")
+                bad_args[bad_args.index(handoff_sha)] = pipeline.digest(cohort / "handoff.json")
             else:
                 bad_args[bad_args.index("dev")] = "stable"
             refused = subprocess.run(bad_args, cwd=self.repo, env=bad_environment, capture_output=True, text=True)

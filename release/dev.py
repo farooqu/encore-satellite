@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tarfile
 import time
+import zlib
 
 import pipeline as p
 from check import ROOT, select, validate, validate_ledger
@@ -161,23 +162,25 @@ def apply(value):
     changelog.write_text(notes(value))
 
 
-def dependency_paths():
+def dependency_paths(root=None):
     # Bind pre-reviewed dependency source closure to the recipes/manifests that
     # select it. Native kernel/Sendspin provenance has additional real loaders.
+    root = root or ROOT
     return sorted({"go.mod", "go.sum", "devices/biscuit/packaging/base.sh",
                    "devices/biscuit/packaging/kernel.sh", "devices/biscuit/packaging/kernel-inputs.json",
                    "devices/biscuit/packaging/sendspin.sh", "platforms/linuxsendspin/build.py",
                    "platforms/linuxsendspin/dependencies.lock.json", "devices/android-generic/build-android",
-                   *[str(path.relative_to(ROOT)) for path in (ROOT / "devices/android-generic").rglob("*.gradle.kts")
-                     if "build" not in path.relative_to(ROOT).parts], "devices/android-generic/gradle.properties"})
+                   *[str(path.relative_to(root)) for path in (root / "devices/android-generic").rglob("*.gradle.kts")
+                     if "build" not in path.relative_to(root).parts], "devices/android-generic/gradle.properties"})
 
 
-def validate_inputs():
+def validate_inputs(source_root=None):
     policy = config()
     inputs = policy["inputs"]
     p.require(policy["builds_enabled"] and isinstance(policy["distribution_review"], str)
               and policy["distribution_review"].strip() and isinstance(inputs, dict), "approved dev distribution/input setup required")
-    p.require(inputs["dependency_sha256"] == {name: p.digest(ROOT / name) for name in dependency_paths()},
+    source_root = source_root or ROOT
+    p.require(inputs["dependency_sha256"] == {name: p.digest(source_root / name) for name in dependency_paths(source_root)},
               "dependency recipes changed; review/retain corresponding sources before releasing")
     p.require(set(inputs["files"]) == {"base", "kernel", "sendspin", "alpine", "android-dependencies"}, "complete retained input set required")
     names = []
@@ -192,6 +195,45 @@ def validate_inputs():
         names.append(item["name"])
     p.require(len(names) == len(set(names)), "retained input basenames must be unique")
     return policy
+
+
+def initial_plan(source_tree):
+    """Select existing reservations without altering their source or allocating."""
+    value = p.read_json(ROOT / "release/initial-dev.json")
+    p.require(value["schema"] == 1 and re.fullmatch(r"[0-9a-f]{40}", value["source"]), "pinned initial source required")
+    p.require(set(value["revisions"]) == set(value["reservations"]) == set(value["expected_artifact_sha256"]) == set(TARGETS),
+              "complete initial cohort required")
+    p.require(all(sha is None or re.fullmatch(r"[0-9a-f]{64}", sha)
+                  for sha in value["expected_artifact_sha256"].values()), "invalid prior candidate digest")
+    p.require(not git("status", "--porcelain", "--untracked-files=normal"), "clean committed tooling required")
+    source_tree = source_tree.resolve()
+    p.require(p.run("git", "-C", str(source_tree), "rev-parse", "--show-toplevel").decode().strip() == str(source_tree),
+              "initial source must be a checkout root")
+    p.require(p.run("git", "-C", str(source_tree), "rev-parse", "HEAD").decode().strip() == value["source"]
+              and not p.run("git", "-C", str(source_tree), "status", "--porcelain", "--untracked-files=normal").strip(),
+              "clean exact initial source checkout required")
+    p.run("git", "merge-base", "--is-ancestor", value["source"], "HEAD")
+    current_registry, current_ledger = inventory()
+    registry = validate(p.read_json(source_tree / "release/targets.json"))
+    ledger = validate_ledger(p.read_json(source_tree / "release/ledger.json"), registry)
+    validate_ledger(current_ledger, current_registry, previous=ledger)
+    p.require(registry["core_version"] == current_registry["core_version"] == value["core_version"], "initial core is stale")
+    for target in TARGETS:
+        for catalog in (registry, current_registry):
+            entry = next(t for t in catalog["targets"] if t["id"] == target)
+            p.require(entry["package_revision"] == value["revisions"][target], "initial revision is not current")
+        reservation = next(r for r in ledger["reservations"] if r["id"] == value["reservations"][target])
+        p.require(reservation["core_version"] == value["core_version"] and reservation["channel"] == "dev"
+                  and reservation["revisions"].get(target) == value["revisions"][target], "initial reservation mismatch")
+        p.require(not git("tag", "--list", f"{target}-r{value['revisions'][target]}"), "initial release tag already exists")
+    validate_inputs(source_tree)
+    value["builder_source"] = git("rev-parse", "HEAD")
+    value["previous"] = {target: None for target in TARGETS}
+    commits = git("rev-list", "--reverse", value["source"]).splitlines()
+    value["changes"] = {target: [{"source": commit, "subject": git("show", "-s", "--format=%s", commit)}
+                                 for commit in commits if not metadata_commit(commit)
+                                 and target in select(paths(commit), registry)["affected_targets"]] for target in TARGETS}
+    return value
 
 
 def fetch_inputs(output):
@@ -211,14 +253,21 @@ def fetch_inputs(output):
     return {role: output / item["name"] for role, item in policy["inputs"]["files"].items()}
 
 
-def build(output, aapt, apksigner):
+def build(output, aapt, apksigner, initial=None):
     """Assemble both targets twice from reviewed retained inputs; no uploading."""
     policy = validate_inputs()
     registry, ledger = inventory()
     source = git("rev-parse", "HEAD")
-    p.require(metadata_commit(source) and not git("status", "--porcelain", "--untracked-files=normal"), "clean automated reservation commit required")
-    reservation = ledger["reservations"][-1]
-    p.require(reservation["id"] == "main-dev-" + git("rev-parse", "HEAD^"), "unexpected dev reservation")
+    p.require(not git("status", "--porcelain", "--untracked-files=normal"), "clean committed source required")
+    if initial is None:
+        p.require(metadata_commit(source), "automated reservation commit required")
+        reservation = ledger["reservations"][-1]
+        p.require(reservation["id"] == "main-dev-" + git("rev-parse", "HEAD^"), "unexpected dev reservation")
+        reservations = {target: reservation["id"] for target in TARGETS}
+    else:
+        p.require(source == initial["source"], "initial source changed")
+        reservations = initial["reservations"]
+    revisions = {t["id"]: t["package_revision"] for t in registry["targets"] if t["id"] in TARGETS}
     p.require(not output.exists(), "candidate output must be new")
     work = ROOT / "build/dev-work"
     p.require(not work.exists(), "use a fresh release checkout for each assembly attempt")
@@ -241,32 +290,38 @@ def build(output, aapt, apksigner):
         subprocess.run([sys.executable, "devices/biscuit/packaging/package.py", "--base", str(inputs["base"]),
                         "--binary", "build/biscuit/encore-satellite", "--wmtup", "build/biscuit/wmtup", "--btbridge", "build/biscuit/btbridge",
                         "--kernel-artifact", str(work / "kernel"), "--sendspin-artifact", str(work / "sendspin"),
-                        "--revision", str(reservation["revisions"]["biscuit"]), "--output", str(bundle)], cwd=ROOT, check=True)
+                        "--revision", str(revisions["biscuit"]), "--output", str(bundle)], cwd=ROOT, check=True)
         # A clean Gradle rebuild and a regenerated Go AAR, not a copied APK.
         subprocess.run(["devices/android-generic/build-android", "clean", ":app:assembleRelease",
                         ":app:testReleaseUnitTest", ":app:lintRelease"], cwd=ROOT, check=True,
-                       env={**os.environ, "ENCORE_VERSION_CODE": str(reservation["revisions"]["android-generic"]),
+                       env={**os.environ, "ENCORE_VERSION_CODE": str(revisions["android-generic"]),
                             "ENCORE_VERSION_NAME": registry["core_version"]})
         apk = work / f"android-{attempt}.apk"
         shutil.copyfile(ROOT / "devices/android-generic/app/build/outputs/apk/release/app-release.apk", apk)
         artifacts[attempt] = {"biscuit": bundle, "android-generic": apk}
     hashes = {target: [p.digest(artifacts[attempt][target]) for attempt in (1, 2)] for target in TARGETS}
     p.require(all(pair[0] == pair[1] for pair in hashes.values()), "non-reproducible cohort; do not sign/publish either target")
+    if initial:
+        for target, expected in initial["expected_artifact_sha256"].items():
+            p.require(expected is None or hashes[target][0] == expected,
+                      f"prior {target} candidate differs; preserve its identity and coordinate a new reservation")
     evidence = work / "evidence.json"
     evidence.write_bytes(p.canonical({"source": source, "distribution_review": policy["distribution_review"],
                                       "inputs": policy["inputs"], "assembly_sha256": hashes,
+                                      "initial_plan": initial,
                                       "actions_run": os.environ.get("GITHUB_RUN_ID"),
                                       "android_update_trust": {"base_url": os.environ.get("ENCORE_UPDATE_BASE_URL"),
                                                                "public_key": os.environ.get("ENCORE_UPDATE_PUBLIC_KEY")},
                                       "toolchain": {"go": git_tool("go", "version"), "java": git_tool("java", "--version"),
+                                                    "python": sys.version, "zlib": zlib.ZLIB_RUNTIME_VERSION,
                                                     "runner_image": os.environ.get("ImageVersion", "not recorded")},
                                       "checks": ["make check biscuit-check", "testReleaseUnitTest lintRelease"],
                                       "hardware_qualified": False}) + b"\n")
     for target in TARGETS:
-        spec = {"target": target, "reservation": reservation["id"], "artifact": str(artifacts[1][target]),
+        spec = {"target": target, "reservation": reservations[target], "artifact": str(artifacts[1][target]),
                 "reproduced_artifact": str(artifacts[2][target]), "evidence": str(evidence),
                 "toolchain": git_tool("go", "version") + "; SDK36/NDK28.0.13004108/Java21; see evidence and pinned source recipes",
-                "recipe": "python3 release/dev.py build; .github/workflows/dev-release.yml at " + source,
+                "recipe": "python3 release/dev.py build; tooling source " + (initial["builder_source"] if initial else source),
                 "review": "approved-for-distribution", "certificate_sha256": os.environ.get("EXPECTED_CERTIFICATE"),
                 "sources": {"kernel": str(work / "kernel-source.tar.gz"), "sendspin": str(work / "sendspin-source.tar.gz"),
                             "alpine": str(work / "alpine-source.tar.gz")} if target == "biscuit" else
@@ -310,7 +365,9 @@ def cohort(directory, expected, public=None):
         else:
             p.verify(candidate, public[target], expected_receipt)
         receipts[target] = receipt
-    p.require(len({(r["core_version"], r["reservation"]) for r in receipts.values()}) == 1, "mixed core/reservation cohort")
+    # Each receipt already validates its own reservation against the same exact
+    # source inventory. The initial targets legitimately have separate entries.
+    p.require(len({r["core_version"] for r in receipts.values()}) == 1, "mixed core cohort")
     return receipts
 
 
@@ -354,6 +411,7 @@ def retain(directory, expected, public, execute):
 
 
 def main():
+    global ROOT
     parser = argparse.ArgumentParser(description=__doc__)
     subs = parser.add_subparsers(dest="command", required=True)
     planner = subs.add_parser("plan")
@@ -368,6 +426,12 @@ def main():
     builder.add_argument("--output", type=Path, required=True)
     builder.add_argument("--aapt", required=True)
     builder.add_argument("--apksigner", required=True)
+    builder.add_argument("--initial-source", type=Path, help="separate clean checkout of the pinned initial source")
+    initial = subs.add_parser("initial-plan")
+    initial.add_argument("--source-tree", type=Path, required=True)
+    initial.add_argument("--releases", type=Path, required=True)
+    initial.add_argument("--ci-runs", type=Path, nargs=2, required=True)
+    initial.add_argument("--output", type=Path, required=True)
     for name in ("sign", "retain"):
         sub = subs.add_parser(name)
         sub.add_argument("directory", type=Path)
@@ -402,6 +466,18 @@ def main():
         apply(p.read_json(args.plan))
     elif args.command == "dependency-hashes":
         print(json.dumps({name: p.digest(ROOT / name) for name in dependency_paths()}, indent=2))
+    elif args.command == "initial-plan":
+        value = initial_plan(args.source_tree)
+        p.require(ci_ready([p.read_json(path)["workflow_runs"] for path in args.ci_runs], value["source"]),
+                  "both latest exact-source main checks must pass")
+        for release in p.read_json(args.releases):
+            for target, revision in value["revisions"].items():
+                match = re.fullmatch(re.escape(target) + r"-r([1-9][0-9]*)", release["tag_name"])
+                p.require(not match or int(match[1]) < revision, "initial release/draft or newer revision already exists")
+        args.output.mkdir(parents=True, exist_ok=False)
+        (args.output / "plan.json").write_bytes(p.canonical(value) + b"\n")
+        (args.output / "changelog.md").write_text(notes(value))
+        print("Existing initial reservations validated; no allocation, build or publication")
     elif args.command in {"sign", "retain"}:
         public = {target: getattr(args, target.replace("-", "_") + "_public") for target in TARGETS}
         if args.command == "sign":
@@ -411,7 +487,12 @@ def main():
         else:
             retain(args.directory, args.handoff_sha256, public, args.execute)
     else:
-        build(args.output, args.aapt, args.apksigner)
+        value = initial_plan(args.initial_source) if args.initial_source else None
+        if value:
+            # Keep trusted tooling/policy in this checkout; compile, inspect and
+            # archive the separate untouched source. No overlays or cherry-picks.
+            ROOT = p.ROOT = args.initial_source.resolve()
+        build(args.output.resolve(), args.aapt, args.apksigner, value)
 
 
 if __name__ == "__main__":

@@ -31,6 +31,10 @@ signed APK and matching source kits/evidence. Publication remains **disabled**;
 metadata keys stay offline, and CI has no metadata signer/publisher job. A later
 approved orb/laptop session signs and publishes the retained bytes without
 rebuilding. Dev/stable activation stays explicit and separate.
+The protected manual `initial-release.yml` path uses the already reserved18/5
+pair and pinned integrated source, without allocating another version. Its
+separate setup gate keeps main-driven next-version allocation disabled during
+bootstrap; see [initial CI builds](publishing.md#initial-reserved-cohort-builds-in-ci).
 Manual workflows default to dry-run and also require explicit setup approval for
 writes. No live release channel is established and no automatic kernel upload
 is restored by adding this tooling.
@@ -48,7 +52,7 @@ is core `0.1.1-dev.1`, backend `incubator`, channel `dev`.
 
 | Target | Reserved package revision | State |
 | --- | --- | --- |
-| `biscuit` | 18 | Reserved; no final public binary/source selected |
+| `biscuit` | 18 | Local candidate consumed; CI must match the pinned source/bytes before release |
 | `android-generic` | 5 (APK versionCode) | Reserved; production-signed APK pending |
 
 The initial retired floors conservatively burn Biscuit revisions 1–15, including

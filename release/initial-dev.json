@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "source": "bf44e17be5eb5971711375a80c646a3f8dc042d4",
+  "core_version": "0.1.1-dev.1",
+  "revisions": {
+    "biscuit": 18,
+    "android-generic": 5
+  },
+  "reservations": {
+    "biscuit": "first-incubator-dev-biscuit-18",
+    "android-generic": "first-incubator-dev"
+  },
+  "expected_artifact_sha256": {
+    "biscuit": "b5f175809f46ed194413ee98bb7109bd1b9eb6e69f76838bdbb2213a467650f1",
+    "android-generic": null
+  }
+}

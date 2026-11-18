@@ -21,9 +21,75 @@ separate `biscuit-kernel.yml` automatic-upload hold is unchanged.
 The commands below are operator instructions, not a receipt that they were run.
 Configuration, external uploads, publication and feed activation each require
 the owner's concrete approval. No public source/cohort is frozen by this change.
-Keep Biscuit18, Android5 and core0.1.1-dev.1 reserved; coordinate any source freeze
-or new allocation with the active bring-up owner. Private17/diagnostic overlays
-are not main, public18, or hardware qualification.
+The initial candidate selection is recorded separately below; coordinate any
+new source freeze/allocation centrally. Private17/diagnostic overlays are not
+main, public18, or hardware qualification.
+
+## Initial reserved cohort builds in CI
+
+`initial-release.yml` builds the existing core `0.1.1-dev.1`, Biscuit18 and
+Android5 reservations without invoking `apply`, allocating19/6, or pushing main.
+`initial-dev.json` pins the integrated source commit and each target's existing
+ledger entry. This selection file is not another version authority: both the
+selected source inventory/ledger and current main inventory/append-only ledger
+must agree. Separate source and tooling checkouts keep the original package
+identity intact. The immutable source archive contains the selected source;
+evidence separately records the reviewed tooling commit and initial plan.
+
+Local Biscuit18 validation consumed that identity. Its SHA256 is pinned in
+`initial-dev.json`; CI must reproduce those bytes, not upload the local ZIP or
+silently replace it. A different result fails the whole cohort and requires
+review/new central reservations, never weakening the comparison or removing a
+pin to make a build pass. Android5 has not yet been built, so it has no prior
+artifact digest. No metadata key is loaded by this workflow.
+
+Before dispatch, obtain approval for the reviewed immutable input uploads,
+complete corresponding-source/distribution review in `dev-automation.json`,
+the main-only Umer-reviewed `dev-release-preparation` environment, and existing
+`android-signing` environment/trust/certificate settings described below.
+Set **`INITIAL_RELEASE_BUILD_SETUP_APPROVED=true`** only after that readback.
+Keep **`RELEASE_BUILD_SETUP_APPROVED` unset** until the initial cohort is
+retained: enabling it here could let a green main push allocate the next cohort
+before the initial build. Leave `publishing_enabled=false`,
+`metadata_signing=offline` and publication approval unset. None of this setup is
+performed by changing the workflow; an absent gate skips both jobs.
+
+Run these commands only after the workflow is landed and setup is approved.
+First validate without building or loading the APK keystore:
+
+```sh copy Copy Initial Preflight
+gh workflow run initial-release.yml --ref main -f build_candidate=false
+```
+
+Review that run's `initial-dev-plan-<tooling-sha>` artifact and changelog. The
+preflight requires both latest main-push checks for the exact selected source,
+clean ancestry/identity/recipe checks, and no existing initial release tag,
+draft or newer release. Then separately approve one build dispatch:
+
+```sh copy Copy Initial Build
+gh workflow run initial-release.yml --ref main -f build_candidate=true
+```
+
+The build uses the existing repeat-build/inspection/receipt machinery, under
+the protected APK-signing environment, for both targets. Download
+`initial-dev-candidate-<selected-source-sha>` and retain the independently
+reviewed handoff SHA256 from that run's summary. Changelogs are in the preflight
+artifact; release notes for this older source snapshot are generated from its
+exact Git history by the existing publisher. Use `dev.py sign` / `retain` below
+with this handoff just as for automated cohorts: each receipt verifies its own
+ledger entry, while source and core must match across targets. Metadata signing
+stays offline and publication/feed activation are still separate. The build job
+has read-only repository permission and only uploads 30-day Actions artifacts,
+which repository readers can download; this distribution needs setup approval.
+
+Rerunning a workflow attempt is disabled. A new build dispatch also refuses any
+earlier initial build job that started, including failed/cancelled builds;
+recover exact retained files or coordinate new reservations rather than
+rebuilding a possibly consumed identity. This conservative guard uses retained
+Actions run/job history, not just unexpired artifacts. Preserve that history;
+administrative deletion of runs is not a safe identity reset. Validation-only
+dispatches do not consume a CI build attempt. No host workflow has been run just
+because these commands are documented.
 
 ## What is retained
 

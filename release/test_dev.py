@@ -164,6 +164,66 @@ class DevTests(unittest.TestCase):
         self.commit("final core fixture")
         self.cli("plan", "--output", self.build / "final", success=False)
 
+    def test_initial_plan_uses_existing_split_reservations_and_exact_clean_source(self):
+        self.enable_fixture()
+        for target, revision in (("biscuit", 18), ("android-generic", 5)):
+            self.git("tag", "-d", f"{target}-r{revision}")
+        source_tree = self.build / "source"
+        self.git("worktree", "add", "--detach", str(source_tree), self.base)
+        descriptor = {"schema": 1, "source": self.base, "core_version": "0.1.1-dev.1",
+                      "revisions": {"biscuit": 18, "android-generic": 5},
+                      "reservations": {"biscuit": "first-incubator-dev-biscuit-18", "android-generic": "first-incubator-dev"},
+                      "expected_artifact_sha256": {"biscuit": "e" * 64, "android-generic": None}}
+        descriptor_path = self.repo / "release/initial-dev.json"
+        descriptor_path.write_text(json.dumps(descriptor))
+        self.commit("pin existing initial reservations")
+        good = {"head_sha": self.base, "event": "push", "head_branch": "main",
+                "head_repository": {"full_name": pipeline.REPOSITORY}, "run_number": 7,
+                "run_attempt": 1, "status": "completed", "conclusion": "success"}
+        releases = self.build / "initial-releases.json"
+        releases.write_text("[]")
+        runs = [self.build / f"initial-{name}.json" for name in ("foundation", "android")]
+        for path in runs:
+            path.write_text(json.dumps({"workflow_runs": [good]}))
+        output = self.build / "initial-plan"
+        args = ["initial-plan", "--source-tree", source_tree, "--releases", releases,
+                "--ci-runs", *runs, "--output", output]
+        self.cli(*args)
+        value = json.loads((output / "plan.json").read_text())
+        for key in descriptor:
+            self.assertEqual(value[key], descriptor[key])
+        self.assertEqual(value["builder_source"], self.git("rev-parse", "HEAD"))
+        self.assertNotEqual(value["builder_source"], value["source"])
+        self.assertIn("Revision: 18", (output / "changelog.md").read_text())
+        self.assertIn("Revision: 5", (output / "changelog.md").read_text())
+        self.assertEqual(json.loads((self.repo / "release/ledger.json").read_text()), self.ledger)
+        self.assertFalse(json.loads((self.repo / "release/dev-automation.json").read_text())["publishing_enabled"])
+        shutil.rmtree(output)
+        # Competing implementations could build new tooling source, accept a
+        # dirty selected tree, use a stale CI attempt, or reuse published bytes.
+        self.cli(*[self.repo if arg == source_tree else arg for arg in args], success=False)
+        changed = source_tree / "go.sum"
+        original = changed.read_bytes()
+        changed.write_bytes(original + b"\nchanged source")
+        self.cli(*args, success=False)
+        changed.write_bytes(original)
+        runs[1].write_text(json.dumps({"workflow_runs": [good, {**good, "run_attempt": 2, "conclusion": "failure"}]}))
+        self.cli(*args, success=False)
+        runs[1].write_text(json.dumps({"workflow_runs": [good]}))
+        releases.write_text(json.dumps([{"tag_name": "android-generic-r5", "draft": True}]))
+        self.cli(*args, success=False)
+        releases.write_text("[]")
+        descriptor["reservations"]["biscuit"] = "first-incubator-dev"
+        descriptor_path.write_text(json.dumps(descriptor))
+        self.commit("invalid initial reservation fixture")
+        self.cli(*args, success=False)
+        descriptor["reservations"]["biscuit"] = "first-incubator-dev-biscuit-18"
+        descriptor_path.write_text(json.dumps(descriptor))
+        self.commit("restore initial reservation fixture")
+        self.change("go.sum", "tooling-only dependency change must not relabel pinned sources")
+        self.cli(*args)
+        self.assertEqual(json.loads((output / "plan.json").read_text())["source"], self.base)
+
 
 if __name__ == "__main__":
     unittest.main()
