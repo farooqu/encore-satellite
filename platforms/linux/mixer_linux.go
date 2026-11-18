@@ -126,12 +126,26 @@ func (m *Mixer) Write(ctx context.Context, samples []int16) error {
 		return errors.New("linux: invalid voice block")
 	}
 	return m.voiceOp(ctx, func(g uint64) error {
-		if err := m.wait(ctx, g, func() bool { return len(m.voice)+len(samples)*3 <= voiceCapacity }); err != nil {
-			return err
+		for len(samples) > 0 {
+			// Convert at most one hardware lead while earlier voice is still
+			// queued. A maximum wire block must not wait for the queue to empty
+			// and leave fill padding its last partial block with silence.
+			n := min(len(samples), mixAhead/3)
+			// Serial owns the FIR snapshot while the hardware clock keeps
+			// running; Flush/recovery fence each bounded chunk's commit.
+			r := m.resample
+			m.mu.Unlock()
+			converted := r.append(make([]float64, 0, n*3), samples[:n])
+			m.mu.Lock()
+			if err := m.wait(ctx, g, func() bool { return len(m.voice)+len(converted) <= voiceCapacity }); err != nil {
+				return err
+			}
+			m.resample = r
+			m.voice = append(m.voice, converted...)
+			m.voicePending += len(converted)
+			m.tail = false
+			samples = samples[n:]
 		}
-		m.voice = m.resample.append(m.voice, samples)
-		m.voicePending += len(samples) * 3
-		m.tail = false
 		return nil
 	})
 }

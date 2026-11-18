@@ -14,5 +14,5 @@ Copyright (c) 2026 Yuri Gelfand, MIT.
 
 Encore changes: nonblocking PCM reads/writes/drain, cancellation and DROP
 fencing, GC-visible transfer pointers, explicit device assembly, fail-closed
-state parsing, center-only capture and minimal controls. No TECHO5 feature registry, models, DSP,
+state parsing, normalized seven-microphone capture and minimal controls. No TECHO5 feature registry, models, DSP,
 vendor coefficients, kernel code or binary data are included.

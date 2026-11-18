@@ -53,9 +53,14 @@ func (s *captureStub) Read(b []byte) (int, error) {
 	s.reads++
 	s.buffer = b
 	for i := 0; i < 2; i++ {
-		b[i*27+18] = 0xaa
-		b[i*27+19] = byte(0x34 + i)
-		b[i*27+20] = 0x12
+		for ch := range 9 {
+			// The seven microphones average to 400, then -800 PCM16;
+			// center-only capture and either reference give other values.
+			x := int32(100*(ch+1)*(1-3*i)) << 8
+			for j := range 3 {
+				b[i*27+ch*3+j] = byte(x >> uint(j*8))
+			}
+		}
 	}
 	if s.duringRead != nil {
 		s.duringRead()
@@ -119,7 +124,7 @@ func TestCapturePrivacyAtOSBoundaryAndAfterRead(t *testing.T) {
 					t.Fatalf("audio commands: %d", len(audioCommands))
 				}
 				got := audioCommands[0].Samples
-				if len(got) != 2 || got[0] != 0x1234 || got[1] != 0x1235 {
+				if len(got) != 2 || got[0] != 400 || got[1] != -800 {
 					t.Fatalf("capture PCM %v", got)
 				}
 			} else {

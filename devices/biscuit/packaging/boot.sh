@@ -37,7 +37,10 @@ if [ -s /data/encore/wpa_supplicant.conf ]; then
 else
   echo ctrl_interface=/run/wpa_supplicant > /run/encore/wpa_supplicant.conf
 fi
-wpa_supplicant -B -D nl80211 -i wlan0 -c /run/encore/wpa_supplicant.conf -f /run/wpa.log
+# Alpine omits -f support and prints usage with exit 0 for that option.
+# Capture startup output in the shell and require a working control socket.
+wpa_supplicant -B -D nl80211 -i wlan0 -c /run/encore/wpa_supplicant.conf > /run/wpa.log 2>&1
+test "$(wpa_cli -i wlan0 ping)" = PONG
 udhcpc -b -i wlan0 -s /etc/encore/dhcp.sh -p /run/udhcpc.pid
 # The runtime waits for a real hardware MAC; no generated LAN identity.
 touch /run/encore/base-ready

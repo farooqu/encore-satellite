@@ -33,6 +33,33 @@ class BootHealthTests(unittest.TestCase):
             source = source.replace("/" + directory + "/", str(self.root / directory) + "/")
         return source
 
+    def test_wifi_startup_requires_a_responding_control_socket(self):
+        self.script("tools/wpa_supplicant", '''
+# The shipped Alpine build prints usage and exits zero for unsupported -f.
+for arg in "$@"; do [ "$arg" != -f ] || { echo usage; exit 0; }; done
+case "$MODE" in
+  ready) touch "$ROOT/daemon-live";;
+  usage-zero) echo usage;;
+  failed) exit 1;;
+esac
+''')
+        self.script("tools/wpa_cli", '''
+if [ -e "$ROOT/daemon-live" ]; then echo PONG; else echo FAIL; exit 1; fi
+''')
+        self.script("tools/udhcpc", 'echo dhcp > "$ROOT/dhcp-started"\n')
+        source = (package.HERE / "boot.sh").read_text()
+        source = "set -eu\n" + source[source.index('if [ -s /data/encore/wpa_supplicant.conf ]; then'):]
+        script = self.script("wifi-boot-check", self.relocated(source))
+        for mode in ("ready", "usage-zero", "failed"):
+            with self.subTest(mode=mode):
+                for name in ("daemon-live", "dhcp-started", "run/encore/base-ready"):
+                    (self.root / name).unlink(missing_ok=True)
+                result = subprocess.run(["sh", str(script)], capture_output=True, text=True,
+                                        env={**self.env, "MODE": mode}, timeout=10)
+                self.assertEqual(result.returncode == 0, mode == "ready", result.stderr)
+                self.assertEqual((self.root / "run/encore/base-ready").exists(), mode == "ready")
+                self.assertEqual((self.root / "dhcp-started").exists(), mode == "ready")
+
     def test_misc_exact_command_and_failure_gate_before_rootfs_mount(self):
         busybox = shutil.which("busybox")
         self.assertIsNotNone(busybox, "BusyBox is required to check the initramfs applets")

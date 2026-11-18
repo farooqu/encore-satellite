@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"math"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -341,11 +342,15 @@ func TestMixerVoiceInterpolationRejectsImagingAndFailsClosed(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() { done <- m.Drain(ctx) }()
-	pump(p, 5500)
+	// The shared clock may already have queued idle silence before Write.
+	pump(p, 6500)
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
 	s := p.heardPCM()
+	for len(s) >= 2 && s[0] == 0 && s[1] == 0 {
+		s = s[2:]
+	}
 	var signal, image complex128
 	// Ignore filter startup/tail. DFT bins derived from the input, not the filter.
 	for i := 200; i < 4200; i++ {
@@ -487,37 +492,137 @@ func TestMixerDropDoesNotReplayDMARace(t *testing.T) {
 	}
 }
 
-func TestMixerCombinedSignalRespectsPhysicalCeiling(t *testing.T) {
-	for _, polarity := range []int16{32767, -32768} {
+func TestMixerConsecutiveVoiceBlocksHaveNoQueueGaps(t *testing.T) {
+	p := &mixerPCM{}
+	m := linux.NewMixer(p)
+	defer m.Close()
+	m.SetVolume(.5)
+	voice := make([]int16, 2048)
+	for i := range voice {
+		voice[i] = 12000
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		for range 3 {
+			if err := m.Write(ctx, voice); err != nil {
+				done <- err
+				return
+			}
+		}
+		done <- m.Drain(ctx)
+	}()
+	pump(p, 22000)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	samples := p.heardPCM()
+	for len(samples) > 0 && samples[0] == 0 {
+		samples = samples[1:]
+	}
+	for len(samples) > 0 && samples[len(samples)-1] == 0 {
+		samples = samples[:len(samples)-1]
+	}
+	if len(samples) < 36000 {
+		t.Fatalf("missing voice frames: %d samples", len(samples))
+	}
+	// Ignore the finite FIR startup and tail, but no interior block boundary.
+	for i, sample := range samples[200 : len(samples)-200] {
+		if sample != 6000 {
+			t.Fatalf("voice gap at stereo sample %d: got %d want 6000", i+200, sample)
+		}
+	}
+}
+
+func TestMixerVoiceIsNotDucked(t *testing.T) {
+	var previous []int16
+	for _, active := range []bool{false, true} {
 		p := &mixerPCM{}
 		m := linux.NewMixer(p)
-		m.SetVolume(.25)
-		m.SetVoiceActive(true)
-		m.MusicStart(1, nil)
-		ctx := context.Background()
-		if err := m.MusicWrite(ctx, 1, fillPCM(4800, polarity, polarity)); err != nil {
-			t.Fatal(err)
-		}
+		m.SetVolume(.5)
+		m.SetVoiceActive(active)
 		voice := make([]int16, 1600)
 		for i := range voice {
-			voice[i] = polarity
+			voice[i] = 12000
+			if i >= 800 {
+				voice[i] = -8000
+			}
 		}
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		if err := m.Write(ctx, voice); err != nil {
 			t.Fatal(err)
 		}
-		pump(p, 6000)
-		samples := p.heardPCM()
-		m.Close()
-		peak := 0
-		for _, sample := range samples {
-			v := int(sample)
-			if v < 0 {
-				v = -v
-			}
-			peak = max(peak, v)
+		done := make(chan error, 1)
+		go func() { done <- m.Drain(ctx) }()
+		pump(p, 7000)
+		if err := <-done; err != nil {
+			t.Fatal(err)
 		}
-		if peak != 8192 {
-			t.Fatalf("combined source/filter peak %d; absolute quarter-scale ceiling 8192", peak)
+		cancel()
+		m.Close()
+		samples := p.heardPCM()
+		for len(samples) > 0 && samples[0] == 0 {
+			samples = samples[1:]
+		}
+		for len(samples) > 0 && samples[len(samples)-1] == 0 {
+			samples = samples[:len(samples)-1]
+		}
+		positive, negative := 0, 0
+		for _, sample := range samples {
+			if sample == 6000 {
+				positive++
+			}
+			if sample == -4000 {
+				negative++
+			}
+		}
+		if positive < 1000 || negative < 1000 {
+			t.Fatalf("active=%v: missing half-gain voice plateaus: +6000=%d -4000=%d", active, positive, negative)
+		}
+		if active && !slices.Equal(previous, samples) {
+			t.Fatal("voice activity duck changed voice-only PCM")
+		}
+		previous = samples
+	}
+}
+
+func TestMixerCombinedSignalRespectsPhysicalCeiling(t *testing.T) {
+	for _, tc := range []struct {
+		gain float64
+		peak int
+	}{{.25, 8192}, {.5, 16384}} {
+		for _, polarity := range []int16{32767, -32768} {
+			p := &mixerPCM{}
+			m := linux.NewMixer(p)
+			m.SetVolume(tc.gain)
+			m.SetVoiceActive(true)
+			m.MusicStart(1, nil)
+			ctx := context.Background()
+			if err := m.MusicWrite(ctx, 1, fillPCM(4800, polarity, polarity)); err != nil {
+				t.Fatal(err)
+			}
+			voice := make([]int16, 1600)
+			for i := range voice {
+				voice[i] = polarity
+			}
+			if err := m.Write(ctx, voice); err != nil {
+				t.Fatal(err)
+			}
+			pump(p, 6000)
+			samples := p.heardPCM()
+			m.Close()
+			peak := 0
+			for _, sample := range samples {
+				v := int(sample)
+				if v < 0 {
+					v = -v
+				}
+				peak = max(peak, v)
+			}
+			if peak != tc.peak {
+				t.Fatalf("combined source/filter peak %d; gain %.2f ceiling %d", peak, tc.gain, tc.peak)
+			}
 		}
 	}
 }

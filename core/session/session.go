@@ -83,6 +83,7 @@ type Engine struct {
 	haveFrame                       bool
 	output                          context.Context
 	cancelOutput                    context.CancelFunc
+	localOutput                     context.Context
 	activityHandler                 func(bool)
 	voiceActive                     bool
 }
@@ -104,7 +105,7 @@ func (e *Engine) Snapshot() presentation.State {
 	s.Inhibited = e.link == nil || s.Muted || e.cancelling || e.discard
 	s.InputOpen = e.inputOpen && !s.Inhibited
 	s.Speaker = presentation.Speaker{}
-	if s.Inhibited {
+	if s.Inhibited && e.localOutput == nil {
 		return s
 	}
 	s.Active = e.active || e.outputOpen || e.announcing || s.Alert
@@ -194,7 +195,9 @@ func (e *Engine) Attach(link Link) (uint64, error) {
 		e.state.Phase = "muted"
 	}
 	e.state.Reason = ""
-	e.resetOutput()
+	if e.localOutput == nil {
+		e.resetOutput()
+	}
 	return e.generation, nil
 }
 
@@ -213,6 +216,7 @@ func (e *Engine) disconnect(reason string) {
 		e.link = nil
 	}
 	e.cancelOutput()
+	e.localOutput = nil
 	e.player.Flush()
 	e.pre.Clear()
 	e.active, e.discard, e.haveFrame = false, false, false
@@ -245,10 +249,11 @@ func (e *Engine) SetMuted(muted bool) {
 	}
 	e.state.Muted = muted
 	if muted {
-		active, alert := e.active || e.outputOpen || e.announcing, e.state.Alert
+		active, alert := e.active || (e.outputOpen && e.localOutput == nil) || e.announcing, e.state.Alert
 		wasCancelling := e.cancelling
 		e.cancelling = e.cancelling || active || e.discard
 		e.cancelOutput()
+		e.localOutput = nil
 		e.player.Flush()
 		e.pre.Clear()
 		e.haveFrame = false
@@ -459,14 +464,16 @@ func (e *Engine) StopFor(generation uint64) error {
 
 func (e *Engine) stop() error {
 	active, alert := e.active, e.state.Alert
+	localOnly := e.localOutput != nil && !e.active && !e.announcing
 	// A timer-only stream has an unambiguous dismissal. Calls and announcements
 	// do not: an ordinary end/HANGUP may already be buffered before Stop.
 	retire := e.state.Backend == string(Incubator) && !e.cancelling &&
-		(e.active || e.announcing || (e.outputOpen && !e.outputTimer))
+		(e.active || e.announcing || (e.outputOpen && !e.outputTimer && !localOnly))
 	e.cancelOutput()
+	e.localOutput = nil
 	e.player.Flush()
 	e.pre.Clear()
-	e.discard = e.discard || e.active || e.outputOpen
+	e.discard = e.discard || e.active || (e.outputOpen && !localOnly)
 	if e.state.Backend == string(Incubator) {
 		e.discard = e.discard || e.announcing
 	}
@@ -639,7 +646,7 @@ func (e *Engine) Handle(generation uint64, event Event) error {
 			e.inputOpen = false
 		}
 	case "output_start":
-		if e.active || e.state.Backend == string(Incubator) {
+		if e.localOutput == nil && (e.active || e.state.Backend == string(Incubator)) {
 			e.streamExpected, e.streamEnded = true, false
 			e.openOutput()
 			e.outputReceived = false
@@ -673,6 +680,10 @@ func (e *Engine) Output(generation uint64, samples []int16) error {
 	if generation != e.generation || e.link == nil {
 		e.mu.Unlock()
 		return ErrStale
+	}
+	if e.localOutput != nil {
+		e.mu.Unlock()
+		return nil
 	}
 	if e.state.Muted || e.cancelling {
 		e.mu.Unlock()
@@ -726,6 +737,10 @@ func (e *Engine) EndOutput(generation uint64) error {
 	if generation != e.generation || e.link == nil {
 		e.mu.Unlock()
 		return ErrStale
+	}
+	if e.localOutput != nil {
+		e.mu.Unlock()
+		return nil
 	}
 	if e.streamExpected || e.state.Backend == string(Incubator) {
 		e.streamEnded = true
@@ -814,6 +829,7 @@ func (e *Engine) resetOutput() {
 	if e.cancelOutput != nil {
 		e.cancelOutput()
 	}
+	e.localOutput = nil
 	e.output, e.cancelOutput = context.WithCancel(context.Background())
 }
 

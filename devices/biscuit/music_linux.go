@@ -182,13 +182,14 @@ func (m *musicService) Run(ctx context.Context) {
 // This endpoint is independent of the package's Incubator voice transport.
 type biscuitControls struct {
 	*bluetooth.Proxy
-	music       *musicService
-	management  *management
-	updates     *linuxUpdates
-	ring        *ringSettings
-	mu          sync.Mutex
-	stateMu     sync.Mutex
-	subscribers map[*esphome.Conn]struct{}
+	music         *musicService
+	management    *management
+	updates       *linuxUpdates
+	ring          *ringSettings
+	announcements *announcementPlayer
+	mu            sync.Mutex
+	stateMu       sync.Mutex
+	subscribers   map[*esphome.Conn]struct{}
 }
 
 var (
@@ -203,6 +204,11 @@ var (
 func (d *biscuitControls) Handle(ctx context.Context, c *esphome.Conn, msg proto.Message) error {
 	switch v := msg.(type) {
 	case *api.ListEntitiesRequest:
+		if d.announcements != nil {
+			if err := d.announcements.list(c); err != nil {
+				return err
+			}
+		}
 		if d.ring != nil {
 			if err := d.ring.list(c); err != nil {
 				return err
@@ -242,6 +248,10 @@ func (d *biscuitControls) Handle(ctx context.Context, c *esphome.Conn, msg proto
 		d.mu.Unlock()
 		if err := d.state(c); err != nil {
 			return err
+		}
+	case *api.MediaPlayerCommandRequest:
+		if d.announcements != nil && v.Key == announcementKey && v.DeviceId == 0 {
+			return d.announcements.command(c, v)
 		}
 	case *api.SelectCommandRequest:
 		if d.updates != nil && v.Key == updateChannelKey {
@@ -340,6 +350,11 @@ func (d *biscuitControls) state(c *esphome.Conn) error {
 			return err
 		}
 	}
+	if d.announcements != nil {
+		if err := c.Send(d.announcements.state()); err != nil {
+			return err
+		}
+	}
 	if d.ring != nil {
 		for _, state := range d.ring.states() {
 			if err := c.Send(state); err != nil {
@@ -382,6 +397,9 @@ func (d *biscuitControls) broadcast() error {
 	return nil
 }
 func (d *biscuitControls) ConnClosed(c *esphome.Conn) {
+	if d.announcements != nil {
+		d.announcements.closed(c)
+	}
 	d.mu.Lock()
 	delete(d.subscribers, c)
 	d.mu.Unlock()
@@ -401,6 +419,19 @@ func (d *biscuitControls) Run(ctx context.Context) {
 			}
 		}
 	})
+	if d.announcements != nil {
+		workers.Go(func() { d.announcements.run(ctx) })
+		workers.Go(func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-d.announcements.changed:
+					_ = d.broadcast()
+				}
+			}
+		})
+	}
 	if d.management != nil {
 		workers.Go(func() { d.watchManagement(ctx) })
 	}

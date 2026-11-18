@@ -155,7 +155,7 @@ func Run(parent context.Context, c Config) error {
 	if err != nil {
 		return err
 	}
-	controls := &biscuitControls{Proxy: proxy, music: newMusic(c, saved, player), management: admin, ring: ringPolicy}
+	controls := &biscuitControls{Proxy: proxy, music: newMusic(c, saved, player), management: admin, ring: ringPolicy, announcements: newAnnouncementPlayer(engine, player)}
 	controls.updates, err = newLinuxUpdates("/data/encore/update-state.json", "/etc/encore-package.json")
 	if err != nil {
 		return err

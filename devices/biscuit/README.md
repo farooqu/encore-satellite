@@ -47,8 +47,11 @@ does not need this rename for physical preflight; no device migration is perform
 - Static Go Linux ARMv7 executable explicitly assembling the shared engine,
   Linux host primitives, Biscuit wiring and the native Incubator backend only.
 - Source-backed ALSA capture: card 0/device 24, 16 kHz packed24, nine channels.
-  Channel 6 (center microphone) becomes bounded mono PCM16. Channels 7/8 are
-  playback references and are **not** mislabeled as microphones or a second stream.
+  Microphone channels 0–6 are equally averaged into bounded mono PCM16; playback
+  references 7/8 are excluded. Signed 24-bit values are summed before one division
+  by 7×256, truncating toward zero. This is plain normalized averaging, without
+  steering, AEC, additional gain or buffered history; real-array pickup remains
+  unqualified.
 - Source-backed speaker routing, conservative software volume, 16→48 kHz stereo
   output to card 0/device 23, filtered voice interpolation and source-scoped drain.
 - Optional official Sendspin SDK companion with authenticated Music Assistant
@@ -78,12 +81,40 @@ route is not an acoustic result; playback level and every physical control still
 need testing on an Encore unit. The deliberately quiet untuned output is not a
 calibrated safe-output guarantee.
 
+## Home Assistant TTS announcements
+
+The encrypted ESPHome endpoint exposes one enabled `Announcements` media-player
+entity on the same device/MAC as its other controls. Voice Incubator can select
+this as the satellite's own speech target, instead of falling back solely because
+no ESPHome media player exists. This does not choose or configure a TTS provider.
+
+The entity advertises only URL playback, announcements and Stop. Home Assistant's
+ESPHome ffmpeg proxy converts the selected provider's audio to the advertised
+PCM16, 16 kHz mono WAV; Encore streams it in at most 20 ms chunks through the
+existing voice mixer, including physical drain. Both fixed-size WAV and ffmpeg's
+unknown-length pipe header are supported. There is no local Piper, MP3 decoder,
+playlist, pause/resume or separate volume policy; Sendspin music remains separate.
+Direct URLs must already contain this WAV format. URLs must use HTTP(S), headers
+are bounded to 64 KiB and each response to three minutes; signed URLs and speech
+content are not logged. HTTPS uses normal certificate verification.
+
+Only one announcement fetch runs at a time, with one replaceable pending request.
+Stop, hardware privacy, owning HA connection loss and shutdown cancel fetching
+and flush output. Physical Action also stops an active announcement. Native wire
+audio cannot interleave with URL playback. Incubator receives protocol-2 device
+events `announcing` after the first accepted PCM and `announced` only after a
+successful physical drain. HA receives ordinary playing/idle states, not the
+unmapped protocol ANNOUNCING state. Failed or cancelled playback never claims
+completion. A source implementation and off-device tests are not evidence that
+the selected household TTS provider has played on the Dot; device activation,
+HA rediscovery and acoustic acceptance remain separate.
+
 ## App-pushed wake models
 
 The Dot advertises `wake_format=mixednet`, six model slots, max-pooling and a
 permanently resident spoken Stop model. Voice Incubator lowers microWakeWord
-TFLite models into MNB1 blobs and pushes them over protocol 2; the Dot does not
-download arbitrary URLs or run a TFLite interpreter. The pure-Go frontend and
+TFLite models into MNB1 blobs and pushes them over protocol 2; the model loader
+does not download arbitrary URLs or run a TFLite interpreter. The pure-Go frontend and
 executor are ported from pinned Techo5; their licenses/provenance are retained in
 `core/wake/mixednet`, `core/wake/mwwfront` and `licenses/`, and included in the
 rootfs notices.
@@ -95,7 +126,7 @@ the existing model. Six residents normally allow five wakes plus Stop. Models
 are volatile per app connection and are re-pushed after reconnect; no trained
 wake model ships in the runtime.
 
-Privacy-gated 16 kHz center-microphone PCM feeds a bounded asynchronous detector
+Privacy-gated 16 kHz averaged-microphone PCM feeds a bounded asynchronous detector
 worker. Inference never runs under the capture/privacy or session lock. Reported
 capture gaps reset detector history; mute/disconnect revoke the connection generation,
 clear audio and discard its models. Idle wakes carry their model identity,

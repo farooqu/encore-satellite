@@ -19,7 +19,9 @@ import (
 // Scanner uses BlueZ to own discovery and a receive-only HCI socket to retain
 // exact AD bytes (not a lossy reconstruction of Device1's cached properties).
 // BlueZ discovery is active scanning; do NOT advertise StateAndMode for this
-// scanner. It never writes raw scan commands behind bluetoothd's back.
+// scanner. On kernels without discovery filters, ordinary discovery may also
+// include BR/EDR inquiry and controller duplicate filtering remains enabled.
+// It never writes raw scan commands behind bluetoothd's back.
 type Scanner struct {
 	mu      sync.Mutex
 	conn    *dbus.Conn
@@ -68,7 +70,13 @@ func (s *Scanner) Scan(ctx context.Context, active bool, ready func() error, fou
 	o := object(s.conn, s.adapter)
 	filter := map[string]dbus.Variant{"Transport": dbus.MakeVariant("le"), "DuplicateData": dbus.MakeVariant(true)}
 	if err := o.CallWithContext(ctx, adapterIfc+".SetDiscoveryFilter", 0, filter).Err; err != nil {
-		return err
+		// BlueZ rejects all discovery filters with management API < 1.8.
+		// Fall back only for that capability error; raw capture and actual
+		// discovery must still succeed before reporting readiness.
+		var de dbus.Error
+		if !errors.As(err, &de) || de.Name != "org.bluez.Error.NotSupported" {
+			return fmt.Errorf("bluez: discovery filter: %w", err)
+		}
 	}
 	started := false
 	defer func() {
@@ -83,7 +91,7 @@ func (s *Scanner) Scan(ctx context.Context, active bool, ready func() error, fou
 			// An interrupted call may have reached bluetoothd. Closing this
 			// private bus connection releases its discovery session too.
 			_ = o.Call(adapterIfc+".StopDiscovery", 0).Err
-			return err
+			return fmt.Errorf("bluez: start discovery: %w", err)
 		}
 		started = true
 		return ready()

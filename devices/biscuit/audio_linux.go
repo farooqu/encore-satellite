@@ -4,7 +4,6 @@ package biscuit
 
 import (
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"math"
@@ -101,15 +100,23 @@ func (s *speaker) applyVolume() {
 	}
 }
 
-// CenterPCM converts packed signed 24-bit channel 6 only, discarding the low
-// eight bits. Channels 7/8 are references, never microphone or AEC streams.
-func CenterPCM(b []byte) ([]int16, error) {
+// AveragePCM equally averages signed little-endian packed24 microphones 0–6,
+// excluding playback references 7/8. One division by 7*256 produces PCM16,
+// truncating toward zero without dropping each microphone's low bits first.
+// There is no steering, AEC, gain adjustment or buffered history.
+func AveragePCM(b []byte) ([]int16, error) {
 	if len(b) == 0 || len(b)%27 != 0 || len(b)/27 > audio.MaxSamples {
 		return nil, errors.New("dot: invalid nine-channel packed24 block")
 	}
 	out := make([]int16, len(b)/27)
 	for i := range out {
-		out[i] = int16(binary.LittleEndian.Uint16(b[i*27+19:]))
+		var sum int32 // Seven full-scale signed 24-bit values fit in int32.
+		for mic := range 7 {
+			p := b[i*27+mic*3:]
+			v := int32(uint32(p[0]) | uint32(p[1])<<8 | uint32(p[2])<<16)
+			sum += v << 8 >> 8
+		}
+		out[i] = int16(sum / (7 * 256))
 	}
 	return out, nil
 }
@@ -336,7 +343,7 @@ func capture(ctx context.Context, pcm capturePCM, loss func() (bool, error), gat
 			n = 0
 		}
 		if n > 0 && readErr == nil {
-			samples, err := CenterPCM(b[:n])
+			samples, err := AveragePCM(b[:n])
 			if err != nil {
 				return err
 			}

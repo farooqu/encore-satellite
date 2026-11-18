@@ -157,7 +157,7 @@ func buttons(ctx context.Context, d *input.Device, gate *linux.Privacy, engine *
 		case 138:
 			_, _ = gate.Check(func() {
 				s := engine.Snapshot()
-				if s.Phase == "idle" && !s.Alert {
+				if s.Phase == "idle" && !s.Active && !s.Alert {
 					_ = engine.StartManual()
 				} else {
 					player.StopMusic()

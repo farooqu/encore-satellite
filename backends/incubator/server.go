@@ -191,6 +191,8 @@ func (s *Server) serveConn(ctx context.Context, conn net.Conn) error {
 				return send(0x04, map[string]string{"reason": c.Reason})
 			case "drained":
 				return send(0x06, map[string]any{})
+			case "announcing", "announced":
+				return send(0x09, map[string]string{"type": c.Kind})
 			case "stop_alert":
 				return send(0x09, map[string]string{"type": "stop_timer"})
 			}
