@@ -17,6 +17,11 @@ class DevTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.repo = Path(self.temp.name)
         shutil.copytree(pipeline.ROOT / "release", self.repo / "release", ignore=shutil.ignore_patterns("__pycache__"))
+        # Exercise unapproved setup independently of the deployed input policy.
+        (self.repo / "release/dev-automation.json").write_text(json.dumps({
+            "schema": 1, "builds_enabled": True, "publishing_enabled": False,
+            "metadata_signing": "offline", "distribution_review": None, "inputs": None,
+        }))
         for name in dev.dependency_paths():
             path = self.repo / name
             path.parent.mkdir(parents=True, exist_ok=True)

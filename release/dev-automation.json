@@ -3,6 +3,54 @@
   "builds_enabled": true,
   "publishing_enabled": false,
   "metadata_signing": "offline",
-  "distribution_review": null,
-  "inputs": null
+  "distribution_review": "Umer approved the exact five bootstrap-bf44e17-v1 binary/source archives and initial CI candidate distribution on 2026-11-18: https://ampcode.com/threads/T-01a1eb12-5dda-7536-940c-23d12298e1ef . Correspondence/notices evidence and exact hashes: https://ampcode.com/artifacts/release-pipeline-runbook-e81cdbf9-14e7-48e2-85a1-344747a9c26e . The accepted exact-FPGA documented-risk policy is not legal clearance. Firmware publishing, feeds and device deployment remain disabled.",
+  "inputs": {
+    "dependency_sha256": {
+      "devices/android-generic/app/build.gradle.kts": "14a51d53204b2b2cf1b445311be77d52dbc6c3990ddd3578a8e59cfeb780f93f",
+      "devices/android-generic/build-android": "4d12cb2c27c38be06dd77efdda0d0db1d52f73ab9421e810c9fb4ec51552f8b1",
+      "devices/android-generic/build.gradle.kts": "2bae47bcc30961c636d5252fbfebf5629b2e137a4e8e895eccaf8332ecc103b6",
+      "devices/android-generic/gradle.properties": "b335ecfedb653afb11c0cedd0b8e419a61201f4d893aa734b550cdb36beae3b6",
+      "devices/android-generic/settings.gradle.kts": "bc6c23dceb30b38643aa59de15da609e3a64b8b2469a97890de9ac65abab1e87",
+      "devices/biscuit/packaging/base.sh": "3a476c5c2794d39d8899651efffd51b9ffb5303600de47806326a1982cab76a9",
+      "devices/biscuit/packaging/kernel-inputs.json": "2dab476a97ae82657e00cd254d4cf18bdba1840cd54efe5bb1c80d6475911e10",
+      "devices/biscuit/packaging/kernel.sh": "a95e2d598fcf6f7213a69c24f18ed1076bd4357d51c837d006d3dff2585f548e",
+      "devices/biscuit/packaging/sendspin.sh": "f181049adbf80ef5a9704453e36b27e30450e992e8aa69402124868330702171",
+      "go.mod": "b2daa4365bf6fb25c76230819d75349e20aa3bb8978a63bd8f1a0e74c0d64434",
+      "go.sum": "46f7da0715fbe9d301e6a643bdb56bf1908b2e7fc7c1671783f595005f76c9da",
+      "platforms/linuxsendspin/build.py": "024056caca14ed257cc8b7556994418f72d33263d80a35464e8f289c7397f2b8",
+      "platforms/linuxsendspin/dependencies.lock.json": "473ebd087fd9840f1d9b09280058b7ff175b9b9b7171a049e4466d40e12194a9"
+    },
+    "files": {
+      "base": {
+        "name": "base.tar.gz",
+        "size": 10554158,
+        "sha256": "f30189f449ca4393dffa99464436af5f9a8f69d2adf31638a9ab69663f424747",
+        "url": "https://github.com/farooqu/encore-satellite/releases/download/bootstrap-bf44e17-v1/base.tar.gz"
+      },
+      "kernel": {
+        "name": "kernel-inputs.tar.gz",
+        "size": 23029958,
+        "sha256": "c32a15cd2259b55e4c7b3a250e399a7c37373f16c91877227fcdc9ef73709a6c",
+        "url": "https://github.com/farooqu/encore-satellite/releases/download/bootstrap-bf44e17-v1/kernel-inputs.tar.gz"
+      },
+      "sendspin": {
+        "name": "sendspin-inputs.tar.gz",
+        "size": 34716848,
+        "sha256": "c34ec9045af5f74e46bcb669bb5ecdd5558a4d582e9e63e50a0230562bc4b6b0",
+        "url": "https://github.com/farooqu/encore-satellite/releases/download/bootstrap-bf44e17-v1/sendspin-inputs.tar.gz"
+      },
+      "alpine": {
+        "name": "biscuit-alpine-go-sources.tar.gz",
+        "size": 264240102,
+        "sha256": "3fe84f16f5f43eca559ade7e4766cd1e2166e929496f5528237fbb870008020e",
+        "url": "https://github.com/farooqu/encore-satellite/releases/download/bootstrap-bf44e17-v1/biscuit-alpine-go-sources.tar.gz"
+      },
+      "android-dependencies": {
+        "name": "android-dependency-go-sources.tar.gz",
+        "size": 146669291,
+        "sha256": "f171e062ecfc3d3c1c96c295cb3ecf1c4ce57989397e5242cd185a6c5688b7f5",
+        "url": "https://github.com/farooqu/encore-satellite/releases/download/bootstrap-bf44e17-v1/android-dependency-go-sources.tar.gz"
+      }
+    }
+  }
 }
