@@ -9,6 +9,7 @@ import unittest
 
 import dev
 import pipeline
+from test_fixtures import inventory
 
 
 class DevTests(unittest.TestCase):
@@ -17,6 +18,9 @@ class DevTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.repo = Path(self.temp.name)
         shutil.copytree(pipeline.ROOT / "release", self.repo / "release", ignore=shutil.ignore_patterns("__pycache__"))
+        for name, data in zip(("targets.json", "ledger.json"), inventory()):
+            (self.repo / "release" / name).write_text(json.dumps(data))
+        shutil.rmtree(self.repo / "release/changelogs", ignore_errors=True)
         # Exercise unapproved setup independently of the deployed input policy.
         (self.repo / "release/dev-automation.json").write_text(json.dumps({
             "schema": 1, "builds_enabled": True, "publishing_enabled": False,

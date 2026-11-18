@@ -10,6 +10,7 @@ import tempfile
 import unittest
 
 import check
+from test_fixtures import inventory
 
 
 class InventoryTests(unittest.TestCase):
@@ -58,8 +59,7 @@ class InventoryTests(unittest.TestCase):
 
 class LedgerTests(unittest.TestCase):
     def setUp(self):
-        self.registry = json.loads((check.ROOT / "release/targets.json").read_text())
-        self.ledger = json.loads((check.ROOT / "release/ledger.json").read_text())
+        self.registry, self.ledger = inventory()
 
     def test_append_reserves_each_target_independently(self):
         previous = copy.deepcopy(self.ledger)

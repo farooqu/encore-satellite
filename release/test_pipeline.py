@@ -16,6 +16,7 @@ import unittest
 import zipfile
 
 import pipeline
+from test_fixtures import inventory
 
 
 class PipelineTests(unittest.TestCase):
@@ -31,9 +32,9 @@ class PipelineTests(unittest.TestCase):
         (self.repo / ".gitignore").write_text("/build/\n__pycache__/\n")
         # A non-prerelease fixture can exercise both channels without changing
         # the real ledger or pretending the first dev reservation is stable.
-        for name in ("targets.json", "ledger.json"):
-            path = self.repo / "release" / name
-            path.write_text(path.read_text().replace("0.1.1-dev.1", "1.2.0"))
+        for name, data in zip(("targets.json", "ledger.json"), inventory("1.2.0")):
+            (self.repo / "release" / name).write_text(json.dumps(data))
+        shutil.rmtree(self.repo / "release/changelogs", ignore_errors=True)
         self.git("init", "-q")
         self.git("config", "user.email", "test@example.invalid")
         self.git("config", "user.name", "Pipeline test")
