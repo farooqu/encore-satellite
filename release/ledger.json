@@ -54,6 +54,17 @@
         "biscuit": 20
       },
       "source_commit": "12a977caa70030666f5cb303e6291a0a7b9c8d51"
+    },
+    {
+      "id": "main-dev-053cd7f51c2f7f9a1f89bf88f170849a29c4a0d0",
+      "core_version": "0.1.1-dev.4",
+      "backend": "incubator",
+      "channel": "dev",
+      "revisions": {
+        "android-generic": 8,
+        "biscuit": 21
+      },
+      "source_commit": "053cd7f51c2f7f9a1f89bf88f170849a29c4a0d0"
     }
   ]
 }
