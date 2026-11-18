@@ -45,8 +45,8 @@ listing:
 		case *api.ListEntitiesNumberResponse:
 			if v.ObjectId == "speaker_volume" {
 				volume = v.Key
-				if v.MinValue != 0 || v.MaxValue != 25 || math.Abs(float64(v.Step)-100.0/120) > .00001 || v.UnitOfMeasurement != "%" {
-					t.Fatal("native volume range is not actual capped gain", v)
+				if v.MinValue != 0 || v.MaxValue != 100 || math.Abs(float64(v.Step)-100.0/120) > .00001 || v.UnitOfMeasurement != "%" {
+					t.Fatal("native volume range must cover silence to software unity", v)
 				}
 			}
 		case *api.ListEntitiesSwitchResponse:
@@ -79,7 +79,10 @@ listing:
 		}
 	}
 	peer.send(&api.SubscribeStatesRequest{})
-	state(25, false)
+	state(50, false)
+	peer.send(&api.NumberCommandRequest{Key: volume, State: 75})
+	state(75, false)
+	buttonWait(t, "API capped gain at startup instead of permitting 75%", func() bool { return sample() == 9000 })
 	peer.send(&api.NumberCommandRequest{Key: volume, State: 12.5})
 	state(12.5, false)
 	buttonWait(t, "API did not change native PCM with Sendspin disabled", func() bool { return sample() == 1500 })
@@ -119,13 +122,13 @@ listing:
 	keys(113, 1)
 	keys(113, 0)
 	buttonWait(t, "physical privacy did not inhibit music", func() bool { return e.Snapshot().Muted && sample() == 0 })
-	peer.send(&api.NumberCommandRequest{Key: volume, State: 25})
-	state(25, false)
+	peer.send(&api.NumberCommandRequest{Key: volume, State: 100})
+	state(100, false)
 	peer.send(&api.SwitchCommandRequest{Key: mute, State: false})
-	state(25, false)
+	state(100, false)
 	keys(115, 1)
 	keys(115, 0)
-	state(25, false)
+	state(100, false)
 	if !e.Snapshot().Muted || sample() != 0 {
 		t.Fatal("output controls released microphone privacy")
 	}
@@ -138,18 +141,18 @@ listing:
 
 func TestNativeVolumeRangeAndConcurrentGainState(t *testing.T) {
 	p, sample := buttonMusic(t)
-	for _, invalid := range []float32{-0.001, 25.001, float32(math.NaN()), float32(math.Inf(1)), float32(math.Inf(-1))} {
+	for _, invalid := range []float32{-0.001, 100.001, float32(math.NaN()), float32(math.Inf(1)), float32(math.Inf(-1))} {
 		if err := p.setOutputVolume(invalid); err == nil {
 			t.Fatalf("accepted invalid volume %v", invalid)
 		}
-		if volume, muted := p.outputState(); volume != 25 || muted {
+		if volume, muted := p.outputState(); volume != 50 || muted {
 			t.Fatal("rejected request changed state", volume, muted)
 		}
 	}
 	for _, tc := range []struct {
 		request, percent float32
 		sample           int16
-	}{{0, 0, 0}, {12.9, 12.5, 1500}, {12.95, 100.0 * 16 / 120, 1600}, {25, 25, 3000}} {
+	}{{0, 0, 0}, {12.9, 12.5, 1500}, {12.95, 100.0 * 16 / 120, 1600}, {25, 25, 3000}, {50, 50, 6000}, {100.0 * 61 / 120, 100.0 * 61 / 120, 6100}, {75, 75, 9000}, {99.9, 100, 12000}, {100, 100, 12000}} {
 		if err := p.setOutputVolume(tc.request); err != nil {
 			t.Fatal(err)
 		}

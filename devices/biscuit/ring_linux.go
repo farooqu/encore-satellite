@@ -29,11 +29,11 @@ func ringBrightness(s presentation.State, options RingOptions) int {
 	return cap
 }
 
-// The arc shows 0..100% of the allowed range, not uncapped hardware gain:
-// a full ring is 30/120 (25% actual gain). A dim track makes zero visible.
+// The arc shows actual master software gain: full ring is 120/120 (unity),
+// independently of the 50% startup level. A dim track makes zero visible.
 func volumeRingFrame(s presentation.State, v volumeFeedback, options RingOptions) [36]byte {
 	var frame [36]byte
-	filled := float64(min(30, max(0, v.steps))) * 12 / 30
+	filled := float64(min(speakerMaxSteps, max(0, v.steps))) * 12 / speakerMaxSteps
 	if v.muted {
 		filled = 0
 	}

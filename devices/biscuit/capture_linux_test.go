@@ -372,7 +372,7 @@ func TestNativeVolumeAndMuteApplyToVoicePCM(t *testing.T) {
 		percent float32
 		muted   bool
 		want    int16
-	}{{"half-cap", 12.5, false, 500}, {"output-muted", 25, true, 0}, {"cap", 25, false, 1000}} {
+	}{{"quarter", 25, false, 1000}, {"startup-level", 50, false, 2000}, {"output-muted", 100, true, 0}, {"unity", 100, false, 4000}} {
 		t.Run(tc.name, func(t *testing.T) {
 			pcm := &speakerPCM{}
 			s := newSpeaker(pcm)
@@ -395,12 +395,19 @@ func TestNativeVolumeAndMuteApplyToVoicePCM(t *testing.T) {
 			}
 			pcm.mu.Lock()
 			defer pcm.mu.Unlock()
-			// Ignore resampler edges; the steady middle must have the exact
-			// master gain in both channels, including output-mute silence.
-			if len(pcm.written) < 800*4 {
+			// The pump can emit idle silence before Write queues voice. Find
+			// the signal, then ignore resampler edges and check its steady
+			// middle, not a scheduling-dependent absolute recording offset.
+			start := 0
+			if !tc.muted {
+				for start < len(pcm.written) && binary.LittleEndian.Uint16(pcm.written[start:]) == 0 {
+					start += 4
+				}
+			}
+			if len(pcm.written) < start+800*4 {
 				t.Fatal("missing rendered voice PCM")
 			}
-			for i := 300 * 4; i < 800*4; i += 2 {
+			for i := start + 300*4; i < start+800*4; i += 2 {
 				if got := int16(binary.LittleEndian.Uint16(pcm.written[i:])); got != tc.want {
 					t.Fatalf("voice PCM got %d want %d", got, tc.want)
 				}
@@ -409,10 +416,13 @@ func TestNativeVolumeAndMuteApplyToVoicePCM(t *testing.T) {
 	}
 }
 
-func TestSpeakerFormatAndConservativeVolume(t *testing.T) {
+func TestSpeakerFormatAndIndependentStartupMaximum(t *testing.T) {
 	p := &speakerPCM{}
 	s := newSpeaker(p)
 	defer s.Close()
+	if volume, muted := s.outputState(); volume != 50 || muted {
+		t.Fatal("startup must select 50% independently of the maximum", volume, muted)
+	}
 	s.MusicStart(1, nil)
 	if err := s.MusicWrite(context.Background(), 1, []byte{0xff, 0x7f, 0, 0x80}); err != nil {
 		t.Fatal(err)
@@ -421,18 +431,18 @@ func TestSpeakerFormatAndConservativeVolume(t *testing.T) {
 	p.mu.Lock()
 	initial := false
 	for i := 0; i < len(p.written); i += 4 {
-		if int16(binary.LittleEndian.Uint16(p.written[i:])) == 8192 && int16(binary.LittleEndian.Uint16(p.written[i+2:])) == -8192 {
+		if int16(binary.LittleEndian.Uint16(p.written[i:])) == 16384 && int16(binary.LittleEndian.Uint16(p.written[i+2:])) == -16384 {
 			initial = true
 		}
 	}
 	p.written = nil
 	p.mu.Unlock()
 	if !initial {
-		t.Fatal("missing initial 25% stereo PCM16 gain")
+		t.Fatal("missing initial 50% stereo PCM16 gain")
 	}
 	s.adjust(100)
-	if volume, _ := s.outputState(); volume != 25 {
-		t.Fatal("volume exceeded cap")
+	if volume, _ := s.outputState(); volume != 100 {
+		t.Fatal("keys must reach unity, independently of startup", volume)
 	}
 	if err := s.MusicWrite(context.Background(), 1, []byte{0xff, 0x7f, 0, 0x80}); err != nil {
 		t.Fatal(err)
@@ -441,15 +451,15 @@ func TestSpeakerFormatAndConservativeVolume(t *testing.T) {
 	p.mu.Lock()
 	found := false
 	for i := 0; i < len(p.written); i += 4 {
-		if int16(binary.LittleEndian.Uint16(p.written[i:])) == 8192 && int16(binary.LittleEndian.Uint16(p.written[i+2:])) == -8192 {
+		if int16(binary.LittleEndian.Uint16(p.written[i:])) == 32767 && int16(binary.LittleEndian.Uint16(p.written[i+2:])) == -32768 {
 			found = true
 		}
 	}
 	p.mu.Unlock()
 	if !found {
-		t.Fatal("missing conservative quarter-scale stereo PCM16")
+		t.Fatal("unity must preserve both signed full-scale PCM16 polarities without wrap")
 	}
-	s.adjust(-100)
+	s.adjust(-200)
 	if volume, _ := s.outputState(); volume != 0 {
 		t.Fatal("volume below zero")
 	}

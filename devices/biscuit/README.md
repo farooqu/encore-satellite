@@ -122,14 +122,28 @@ The Dot 2 mappings follow the pinned Techo5 wiring, not generic PC key guesses:
 | Action | 138 | Start manual Incubator voice when idle; stop a ringing timer or active voice and local music otherwise. |
 | Mute | 113 | Immediately inhibit capture/activation and silence voice/music, then follow the authoritative hardware privacy state. |
 
-The untuned master range remains 0..30, initially 30 (25%), with gain `step/120`
-applied to voice and music. It is deliberately conservative, not acoustic calibration.
+The untuned master range is 0..120 (silence..unity), independently starting at
+60 (50%), with gain `step/120` applied to voice and music. The maximum is the
+Linux mixer's existing no-additional-master-amplification ceiling, not a measured
+speaker safety limit. It clamps the combined voice/music signal to PCM16 before
+master attenuation, so unity cannot cause integer wrap, but simultaneous sources
+can still saturate even below unity. Startup is not the maximum.
 Volume release stops repeating. Repeated/duplicate downs do not retrigger Action
 or mute. No multi-assistant long-press selection or factory-reset gesture is added.
 
+Hardware gain is unchanged: `HP Driver Gain Volume=6` (0 dB), matching the pinned
+[TECHO5 Dot speaker path](https://github.com/farooqu/techo5/blob/2b091439765d5f881de4b89255b8cf0637d80cba/echod/internal/hardware/speaker/paths_dot.go).
+[LibreEcho's Biscuit profile](https://github.com/aslater3/LibreEcho-Platform/blob/37fc39aa6092491bcb5f12b77a8151179ffd122b/tools/mt8163-arm32/libreecho_platform_targets.py)
+also selects raw 6, with its own DSP, pre-gain and compressor/limiters.
+[Kiosk Satellite's Dot HAL](https://github.com/jxlarrea/lineageos-echo-kiosk-satellite/blob/229f994624a4cb91809ded1f0720cfcfdc8673d9/sources/device/amazon/biscuit/audio/audio_hw.c)
+instead defaults to +3 dB (raw 9), chosen by ear, and reports distortion at +6 dB.
+Those processing chains and subjective reports do not qualify Encore's untuned
+output. No analog boost, vendor DSP or speaker protection is added here; 100%
+means native software unity, not Amazon-equivalent loudness or acoustic safety.
+
 The existing encrypted ESPHome endpoint exposes **Speaker volume**
 (`speaker_volume`, Number) and **Speaker mute** (`speaker_mute`, Switch).
-Volume is actual master software-gain percent, 0..25%, not a rescaled 0..100%
+Volume is actual master software-gain percent, 0..100%, not a rescaled partial range
 or a Sendspin-only setting. Requests round to the physical keys' 1/120 gain
 steps (about 0.8333 percentage points); nonfinite/out-of-range values are rejected.
 State subscriptions report the applied level and receive physical-key updates.
@@ -141,16 +155,16 @@ Changing the Number keeps that mute; either physical volume key adjusts the
 same level and releases speaker mute. Neither control changes microphone
 privacy or releases the music Stop/privacy latch. A level of zero is silence
 independently of the mute switch. Level/mute are session-only (no flash writes):
-restart selects 25% and speaker-unmuted, without bypassing microphone privacy.
-The 25% startup is selected for the next supervised trial, not an acoustic safety
+restart selects 50% and speaker-unmuted, without bypassing microphone privacy.
+The 50% startup is selected for the next supervised trial, not an acoustic safety
 qualification. On-device HA discovery, key/state synchronization, privacy and
 audibility still need a separately approved hardware trial. This feature does
 not diagnose or fix playback underflows and claims no other board support.
 
 Volume changes from either physical keys (including held repeats) or HA show a
 steady white arc over a dim blue track for 1.2 seconds after the latest change.
-The arc represents **0..100% of the allowed range**: full ring means 30 steps,
-which is still only 25% actual master gain. Zero/output mute shows an empty dim
+The arc represents **actual master software gain**: full ring means 120 steps
+(100%, unity); 60 steps (50%) fills half the ring. Zero/output mute shows an empty dim
 track; startup does not flash a volume indication. Brightness/night limits still
 apply. Privacy, alerts, unavailable status and Stop take priority, and feedback
 hidden by those states is discarded rather than replayed afterward.

@@ -103,7 +103,7 @@ func buttonMusic(t *testing.T) (*speaker, func() int16) {
 		}
 		return int16(binary.LittleEndian.Uint16(p.written[len(p.written)-4:]))
 	}
-	buttonWait(t, "initial volume was not 25%", func() bool { return sample() == 3000 })
+	buttonWait(t, "initial volume was not 50%", func() bool { return sample() == 6000 })
 	return s, sample
 }
 
@@ -112,9 +112,9 @@ func TestButtonsVolumeTapHoldReleaseAndLimits(t *testing.T) {
 	e := session.New(s)
 	key := buttonEvents(t, linux.NewPrivacy(func() (bool, error) { return false, nil }), e, s)
 	key(114, 1)
-	buttonWait(t, "minus did not lower speaker gain", func() bool { return sample() == 2900 })
+	buttonWait(t, "minus did not lower speaker gain", func() bool { return sample() == 5900 })
 	// This keypad reports only down/up; software must repeat while held.
-	buttonWait(t, "held minus did not repeat", func() bool { return sample() <= 2700 })
+	buttonWait(t, "held minus did not repeat", func() bool { return sample() <= 5700 })
 	key(114, 0)
 	time.Sleep(30 * time.Millisecond)
 	stopped := sample()
@@ -126,12 +126,12 @@ func TestButtonsVolumeTapHoldReleaseAndLimits(t *testing.T) {
 	buttonWait(t, "plus did not raise speaker gain", func() bool { return sample() == stopped+100 })
 	buttonWait(t, "held plus did not repeat", func() bool { return sample() >= stopped+300 })
 	key(115, 0)
-	for i := 0; i < 40; i++ {
+	for i := 0; i < 140; i++ {
 		key(115, 1)
 		key(115, 0)
 	}
-	buttonWait(t, "plus exceeded or missed conservative cap", func() bool { return sample() == 3000 })
-	for i := 0; i < 40; i++ {
+	buttonWait(t, "plus exceeded or missed software unity", func() bool { return sample() == 12000 })
+	for i := 0; i < 140; i++ {
 		key(114, 1)
 		key(114, 0)
 	}
@@ -187,7 +187,7 @@ func TestButtonsActionStopsAlertBeforeStartingVoice(t *testing.T) {
 	if e.Snapshot().Phase != "listening" {
 		t.Fatal("held Action retriggered voice cancellation")
 	}
-	buttonWait(t, "Action voice did not duck music", func() bool { return sample() == 600 })
+	buttonWait(t, "Action voice did not duck music", func() bool { return sample() == 1200 })
 	key(138, 0)
 	key(138, 1)
 	buttonWait(t, "second Action did not stop voice/music", func() bool { return e.Snapshot().Phase == "recovering" && sample() == 0 })
@@ -245,6 +245,9 @@ func TestVolumeCuePhysicalPressNotHeldRepeatOrHA(t *testing.T) {
 	if !s.volumeFeedback().at.IsZero() {
 		t.Fatal("startup flashed volume feedback")
 	}
+	if err := s.setOutputVolume(100); err != nil {
+		t.Fatal(err)
+	}
 	e := session.New(s)
 	e.SetActivityHandler(s.SetVoiceActive)
 	key := buttonEvents(t, linux.NewPrivacy(func() (bool, error) { return false, nil }), e, s)
@@ -257,8 +260,8 @@ func TestVolumeCuePhysicalPressNotHeldRepeatOrHA(t *testing.T) {
 			if v != 0 {
 				count++
 			}
-			if v < -1100 || v > 1100 {
-				t.Fatal("cue exceeded conservative capped level", v)
+			if v < -4400 || v > 4400 {
+				t.Fatal("cue exceeded bounded level at software unity", v)
 			}
 		}
 		return count
@@ -311,7 +314,7 @@ func TestVolumeRingFeedbackRangeExpiryAndPriority(t *testing.T) {
 	now := time.Now()
 	ready := presentation.State{Connected: true, CaptureReady: true, WakeReady: true, Night: "off", Phase: "idle"}
 	options := RingOptions{Brightness: 100}
-	feedback := volumeFeedback{steps: 15, at: now}
+	feedback := volumeFeedback{steps: 60, at: now}
 	var frame [36]byte
 	r := &ringRenderer{volume: func() volumeFeedback { return feedback }, write: func(b []byte) error {
 		_, err := hex.Decode(frame[:], b[:72])
@@ -362,7 +365,7 @@ func TestVolumeRingFeedbackRangeExpiryAndPriority(t *testing.T) {
 	}
 	for _, night := range []string{"off", "on", "unknown"} {
 		for _, brightness := range []int{1, 19, 100} {
-			for _, steps := range []int32{0, 1, 7, 15, 29, 30} {
+			for _, steps := range []int32{0, 1, 7, 60, 119, 120} {
 				for _, muted := range []bool{false, true} {
 					now = now.Add(2 * time.Second)
 					feedback = volumeFeedback{steps: steps, muted: muted, at: now}
@@ -376,7 +379,7 @@ func TestVolumeRingFeedbackRangeExpiryAndPriority(t *testing.T) {
 						if (steps == 0 || muted) && [3]byte{a, b, c} != [3]byte{0, 0, 1} {
 							t.Fatal("zero/mute did not show empty track")
 						}
-						if steps == 30 && !muted && brightness == 100 && a == 0 {
+						if steps == 120 && !muted && brightness == 100 && a == 0 {
 							t.Fatal("maximum did not fill the whole ring")
 						}
 					}

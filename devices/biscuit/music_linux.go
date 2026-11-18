@@ -214,7 +214,7 @@ func (d *biscuitControls) Handle(ctx context.Context, c *esphome.Conn, msg proto
 			}
 		}
 		for _, ent := range []proto.Message{
-			&api.ListEntitiesNumberResponse{Key: speakerVolumeKey, ObjectId: "speaker_volume", Name: "Speaker volume", Icon: "mdi:volume-high", MinValue: 0, MaxValue: 25, Step: 1.0 / 120 * 100, UnitOfMeasurement: "%"},
+			&api.ListEntitiesNumberResponse{Key: speakerVolumeKey, ObjectId: "speaker_volume", Name: "Speaker volume", Icon: "mdi:volume-high", MinValue: 0, MaxValue: speakerMaxPercent, Step: 1.0 / 120 * 100, UnitOfMeasurement: "%"},
 			&api.ListEntitiesSwitchResponse{Key: speakerMuteKey, ObjectId: "speaker_mute", Name: "Speaker mute", Icon: "mdi:volume-off"},
 			&api.ListEntitiesSwitchResponse{Key: musicKey, ObjectId: "sendspin", Name: "Sendspin music", Icon: "mdi:music", EntityCategory: esphome.CategoryConfig},
 			&api.ListEntitiesTextResponse{Key: musicURLKey, ObjectId: "sendspin_url", Name: "Sendspin server", Icon: "mdi:server", EntityCategory: esphome.CategoryConfig, MinLength: 0, MaxLength: 255},

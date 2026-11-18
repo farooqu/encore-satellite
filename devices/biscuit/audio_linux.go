@@ -21,6 +21,12 @@ import (
 
 const privacyState = "/sys/devices/soc/10010000.keypad/amz_privacy/privacy_state"
 
+const (
+	speakerStartupSteps = 60
+	speakerMaxSteps     = 120
+	speakerMaxPercent   = speakerMaxSteps * 100.0 / 120
+)
+
 type speaker struct {
 	*linux.Mixer
 	volumeMu      sync.Mutex
@@ -31,18 +37,19 @@ type speaker struct {
 }
 
 func newSpeaker(pcm linux.TimedPCM) *speaker {
-	s := &speaker{Mixer: linux.NewMixer(pcm), volume: 30, volumeChanged: make(chan struct{}, 1)}
-	s.Mixer.SetVolume(30.0 / 120)
+	s := &speaker{Mixer: linux.NewMixer(pcm), volume: speakerStartupSteps, volumeChanged: make(chan struct{}, 1)}
+	s.Mixer.SetVolume(float64(speakerStartupSteps) / 120)
 	return s
 }
 
-// Untuned 0..30 physical software range: silence..quarter scale, initially 25%.
+// Untuned 0..120 software range: silence..unity, independently starting at 50%.
+// Unity is the mixer's no-amplification ceiling, not a qualified acoustic limit.
 // State and real mixer gain change under one lock, never CAS followed by a
 // potentially reordered gain write. Network delivery stays off the key path.
 func (s *speaker) adjust(delta int32) {
 	s.volumeMu.Lock()
 	defer s.volumeMu.Unlock()
-	s.volume = int32(min(30, max(0, int64(s.volume)+int64(delta))))
+	s.volume = int32(min(speakerMaxSteps, max(0, int64(s.volume)+int64(delta))))
 	s.outputMuted = false
 	s.applyVolume()
 }
@@ -60,8 +67,8 @@ func (s *speaker) volumeFeedback() volumeFeedback {
 }
 
 func (s *speaker) setOutputVolume(percent float32) error {
-	if math.IsNaN(float64(percent)) || percent < 0 || percent > 25 {
-		return errors.New("dot: speaker volume must be from 0 to 25 percent")
+	if math.IsNaN(float64(percent)) || percent < 0 || percent > speakerMaxPercent {
+		return fmt.Errorf("dot: speaker volume must be from 0 to %g percent", float64(speakerMaxPercent))
 	}
 	s.volumeMu.Lock()
 	defer s.volumeMu.Unlock()
