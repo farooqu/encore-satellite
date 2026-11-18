@@ -215,15 +215,34 @@ Encrypted ESPHome controls expose **Ring brightness** (`ring_brightness`, intege
 1..100%) and **Ring reduced motion** (`ring_reduced_motion`). They persist before
 applying in private `/data/encore/ring.json`, separately from strict `config.json`
 so older good-slot binaries can ignore them safely. Missing policy defaults to
-100% of the software ceiling and ordinary motion. Invalid policy fails startup;
+100% daytime brightness and ordinary motion. Invalid policy fails startup;
 an invalid command or failed save leaves live settings unchanged.
 
-`led_current=3` is unchanged. The software ceiling is 32 per channel and 48 summed
-channels per segment (576 across the ring), **not a calibrated current or comfort
-guarantee**. Night **on or unknown** caps channels at 8 and stops decorative
-motion; reduced motion freezes the processing crest and steadies output/alerts.
-Brightness cannot black out privacy: red retains a floor of 8. Real-input energy
-can still change the mint ring under reduced motion. The 50 ms frame tick,
+Daytime brightness follows the stock Biscuit Fire OS 6.5.7.4 NS6574/7623
+`rgbTable.default` user indices 1..100: quarter/third/half/full resistor-limited
+current in bands 1..25/26..50/51..75/76..100, with the stock PWM multipliers.
+At 100%, `led_current=0` and a full-intensity channel reaches PWM 223
+(`floor(255 * 0.875)`), not the unused extra table entry 101's PWM 255.
+The numeric curve was checked against the owner-held OTA (SHA-256
+`64ab6d2dd85f8093abdd62c275d229c7e9fdd68e4d46892b48bdbd1d100d46d8`),
+config SHA-256 `95272a4a7e67ec468e7a2f34a4a8d71ceb136d3ed82becda723df65974062d4a`;
+no proprietary firmware/config files are distributed here.
+
+This matches the stock **brightness drive curve**, not Amazon's animations,
+perceived luminance, or thermal protection. Existing color ratios, squared
+envelopes and the 1.5-channel segment budget remain; volume white rounds each
+channel to half the PWM ceiling. Confirmed night **on** still uses quarter
+current and caps channels at 8. Unknown/missing night state instead caps the
+selected brightness at **50% of the stock curve** (current selector 2, PWM 192
+at that endpoint), while respecting lower user settings. Both confirmed night
+and unknown stop decorative motion; reduced motion does so independently.
+Brightness cannot black out privacy: red retains a floor of 8. Changing current
+blanks the old frame before applying the new drive to avoid a transient flash;
+failed writes propagate without marking the requested output applied.
+Stock LED thermal clamping is **not reproduced**; board current/temperature and
+comfort remain unqualified, and this local change requires a separately approved
+hardware trial before activation. Real-input energy can still change the mint
+ring under reduced motion. The 50 ms frame tick,
 2.4 s rotation, 1.8 s output pulse, 3.2 s alert swell, scalar easing and microphone
 visual gain are initial software tuning, not hardware-qualified values.
 

@@ -8,8 +8,8 @@ import (
 	"github.com/farooqu/encore-satellite/core/presentation"
 )
 
-// RingOptions is visual policy only. Brightness is 1..100 percent of a
-// conservative software ceiling, not calibrated perceived/electrical brightness.
+// RingOptions selects the stock daytime current/PWM brightness curve, not
+// calibrated perceived brightness. Unknown night caps brightness at 50%.
 type RingOptions struct {
 	Brightness    int  `json:"brightness"`
 	ReducedMotion bool `json:"reduced_motion"`
@@ -21,12 +21,36 @@ type volumeFeedback struct {
 	at    time.Time
 }
 
-func ringBrightness(s presentation.State, options RingOptions) int {
-	cap := max(1, 32*min(100, max(1, options.Brightness))/100)
-	if s.Night != "off" {
-		cap = min(cap, 8) // Unknown is never silently treated as day.
+// Stock Biscuit Fire OS NS6574/7623 rgbTable.default indices 1..100, expressed
+// in thousandths. HAL scaleDutyCycle truncates RGB*pwm; current selectors
+// 3/2/1/0 mean quarter/third/half/full resistor-limited current. Index 101
+// (PWM 1.0) is outside the stock user range and is deliberately not exposed.
+var ringStockPWM = [...]int{
+	137, 149, 161, 173, 184, 196, 204, 216, 227, 239,
+	251, 263, 275, 282, 294, 306, 318, 329, 341, 353,
+	361, 373, 384, 396, 408,
+	325, 345, 361, 380, 396, 416, 431, 451, 467, 486,
+	502, 522, 537, 557, 576, 592, 612, 627, 647, 663,
+	682, 698, 718, 733, 753,
+	514, 533, 553, 569, 588, 608, 624, 643, 663, 678,
+	698, 718, 733, 753, 773, 788, 808, 827, 843, 863,
+	882, 898, 918, 937, 957,
+	494, 510, 525, 541, 557, 573, 588, 604, 620, 635,
+	651, 667, 682, 698, 714, 729, 745, 761, 776, 792,
+	808, 824, 839, 855, 875,
+}
+
+func ringDrive(s presentation.State, options RingOptions) (current byte, cap int) {
+	brightness := min(100, max(1, options.Brightness))
+	if s.Night == "on" {
+		// Keep both current and PWM bounded: full current with PWM 8 would
+		// quadruple the previous confirmed-night output.
+		return 3, min(8, max(1, 32*brightness/100))
 	}
-	return cap
+	if s.Night != "off" {
+		brightness = min(brightness, 50)
+	}
+	return byte((100 - brightness) / 25), 255 * ringStockPWM[brightness-1] / 1000
 }
 
 // The arc shows actual master software gain: full ring is 120/120 (unity),
@@ -37,7 +61,7 @@ func volumeRingFrame(s presentation.State, v volumeFeedback, options RingOptions
 	if v.muted {
 		filled = 0
 	}
-	cap := ringBrightness(s, options)
+	_, cap := ringDrive(s, options)
 	for i := range 12 {
 		level := byte(math.Round(float64(cap) / 2 * min(1, max(0, filled-float64(i)))))
 		frame[i*3], frame[i*3+1], frame[i*3+2] = level, level, max(1, level)
@@ -78,16 +102,17 @@ func ringMode(s presentation.State) string {
 
 // RingFrame composes the Dot 2's 12 RGB segments deterministically. Level is a
 // bounded, already-smoothed actual microphone envelope (0..1), not direction.
-// Every active segment stays lit. No channel exceeds 32 and no segment sum
-// exceeds 48 (576 for the whole ring), including arbitrary profile RGB.
-// These are software bounds, NOT a measured current/gamma or comfort guarantee.
+// Every active segment stays lit. Channels are bounded by the stock brightness
+// PWM (223 at 100%); segment sums stay within 1.5 times that bound. The existing
+// color/envelope budget is retained, not a reproduction of Amazon animations
+// or its thermal policy, nor a measured current/gamma or comfort guarantee.
 func RingFrame(s presentation.State, level float64, elapsed time.Duration, options RingOptions) [36]byte {
 	var frame [36]byte
 	mode := ringMode(s)
 	if mode == "idle" {
 		return frame
 	}
-	cap := ringBrightness(s, options)
+	_, cap := ringDrive(s, options)
 	still := options.ReducedMotion || s.Night != "off"
 	if mode == "privacy" {
 		for i := range 12 {
@@ -159,6 +184,9 @@ func RingFrame(s presentation.State, level float64, elapsed time.Duration, optio
 // calls it. Runtime supplies monotonic time; unchanged payloads are coalesced.
 type ringRenderer struct {
 	write             func([]byte) error
+	setCurrent        func(byte) error
+	current           byte
+	currentWritten    bool
 	volume            func() volumeFeedback
 	volumeDismissed   time.Time
 	last              [36]byte
@@ -196,6 +224,23 @@ func (r *ringRenderer) update(s presentation.State, mic captureReading, now time
 		} else if v.at.After(r.volumeDismissed) && !now.Before(v.at) && now.Sub(v.at) < 1200*time.Millisecond {
 			frame = volumeRingFrame(s, v, options)
 		}
+	}
+	current, _ := ringDrive(s, options)
+	if r.setCurrent != nil && (!r.currentWritten || current != r.current) {
+		// Sysfs has no atomic current+PWM transaction. Blank before changing
+		// current so an old high-PWM frame cannot flash at the new current.
+		blank := make([]byte, 73)
+		hex.Encode(blank[:72], make([]byte, 36))
+		blank[72] = '\n'
+		if err := r.write(blank); err != nil {
+			return err
+		}
+		r.last, r.written = [36]byte{}, true
+		r.currentWritten = false
+		if err := r.setCurrent(current); err != nil {
+			return err
+		}
+		r.current, r.currentWritten = current, true
 	}
 	if r.written && frame == r.last {
 		return nil

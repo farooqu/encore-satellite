@@ -330,7 +330,7 @@ func TestVolumeRingFeedbackRangeExpiryAndPriority(t *testing.T) {
 	for i := range 12 {
 		want := [3]byte{0, 0, 1}
 		if i < 6 {
-			want = [3]byte{16, 16, 16}
+			want = [3]byte{112, 112, 112}
 		}
 		if got := [3]byte(frame[i*3 : i*3+3]); got != want {
 			t.Fatalf("half range segment %d got %v want %v", i, got, want)
@@ -364,7 +364,7 @@ func TestVolumeRingFeedbackRangeExpiryAndPriority(t *testing.T) {
 		}
 	}
 	for _, night := range []string{"off", "on", "unknown"} {
-		for _, brightness := range []int{1, 19, 100} {
+		for _, brightness := range []int{1, 19, 25, 26, 50, 51, 75, 76, 100} {
 			for _, steps := range []int32{0, 1, 7, 60, 119, 120} {
 				for _, muted := range []bool{false, true} {
 					now = now.Add(2 * time.Second)
@@ -373,7 +373,7 @@ func TestVolumeRingFeedbackRangeExpiryAndPriority(t *testing.T) {
 					draw(ready, now)
 					for i := range 12 {
 						a, b, c := frame[i*3], frame[i*3+1], frame[i*3+2]
-						if a > 32 || b > 32 || c > 32 || int(a)+int(b)+int(c) > 48 || (night != "off" && max(a, b, c) > 8) {
+						if a > 244 || b > 244 || c > 244 || int(a)+int(b)+int(c) > 366 || (night == "on" && max(a, b, c) > 8) || (night == "unknown" && max(a, b, c) > 192) {
 							t.Fatal("volume frame exceeded LED caps", frame)
 						}
 						if (steps == 0 || muted) && [3]byte{a, b, c} != [3]byte{0, 0, 1} {
@@ -484,7 +484,7 @@ func TestRingFramesDistinguishInputWorkQueuedPlaybackAndPriority(t *testing.T) {
 
 func TestRingFramesBoundEverySegmentAndDoNotInventReadiness(t *testing.T) {
 	for _, night := range []string{"off", "on", "unknown"} {
-		for _, brightness := range []int{1, 19, 100} {
+		for _, brightness := range []int{1, 19, 25, 26, 50, 51, 75, 76, 100} {
 			for _, output := range []string{"", "queued", "playing", "draining", "failed"} {
 				for milliseconds := 0; milliseconds < 3200; milliseconds += 50 {
 					s := presentation.State{Connected: true, CaptureReady: true, Active: true, Phase: "working", Night: night, Output: presentation.Output{State: output}, Speaker: presentation.Speaker{RGB: [3]byte{255, 255, 255}, ColorKnown: true}}
@@ -492,12 +492,12 @@ func TestRingFramesBoundEverySegmentAndDoNotInventReadiness(t *testing.T) {
 					for i := range 12 {
 						sum := 0
 						for _, channel := range frame[i*3 : i*3+3] {
-							if channel > 32 || (night != "off" && channel > 8) {
+							if channel > 244 || (night == "on" && channel > 8) || (night == "unknown" && channel > 192) {
 								t.Fatal("channel exceeded software/night cap", frame)
 							}
 							sum += int(channel)
 						}
-						if sum == 0 || sum > 48 {
+						if sum == 0 || sum > 366 {
 							t.Fatal("active segment dark or over budget", frame)
 						}
 					}
@@ -518,6 +518,125 @@ func TestRingFramesBoundEverySegmentAndDoNotInventReadiness(t *testing.T) {
 		if f == [36]byte{} || f[0] <= f[1] || f[1] < f[2] || f != RingFrame(s, 0, 2*time.Second, options) {
 			t.Fatal("unavailable state looked ready or retained live motion", s, f)
 		}
+	}
+}
+
+func TestRingStockBrightnessAndCurrentTransitions(t *testing.T) {
+	var frame [36]byte
+	var current byte
+	writes, changes := 0, 0
+	r := &ringRenderer{
+		write: func(b []byte) error {
+			writes++
+			_, err := hex.Decode(frame[:], b[:72])
+			return err
+		},
+		setCurrent: func(value byte) error {
+			if frame != [36]byte{} {
+				t.Fatal("changed current with an old PWM frame still lit", frame)
+			}
+			changes++
+			current = value
+			return nil
+		},
+	}
+	// Privacy red is an unattenuated source color, independent of animation
+	// envelopes. Expectations come from the OEM table, including both sides
+	// of each current-band transition, not from the implementation's table.
+	s := presentation.State{Muted: true, Night: "off"}
+	for _, tc := range []struct {
+		brightness int
+		current    byte
+		pwm        byte
+	}{
+		{1, 3, 34}, {10, 3, 60}, {25, 3, 104}, {26, 2, 82},
+		{50, 2, 192}, {51, 1, 131}, {75, 1, 244}, {76, 0, 125}, {100, 0, 223},
+	} {
+		options := RingOptions{Brightness: tc.brightness}
+		if err := r.update(s, captureReading{}, time.Now(), options); err != nil {
+			t.Fatal(err)
+		}
+		for i := range 12 {
+			if current != tc.current || [3]byte(frame[i*3:i*3+3]) != [3]byte{tc.pwm, 0, 0} {
+				t.Fatalf("brightness %d: current %d frame %v", tc.brightness, current, frame)
+			}
+		}
+		beforeWrites, beforeChanges := writes, changes
+		if err := r.update(s, captureReading{}, time.Now(), options); err != nil || writes != beforeWrites || changes != beforeChanges {
+			t.Fatal("unchanged current/frame was not coalesced", err)
+		}
+	}
+	for _, tc := range []struct {
+		night      string
+		brightness int
+		current    byte
+		pwm        byte
+	}{
+		{"on", 100, 3, 8},
+		{"unknown", 100, 2, 192},
+		{"unknown", 25, 3, 104},
+		{"unknown", 50, 2, 192},
+		{"unknown", 51, 2, 192},
+		{"", 100, 2, 192},
+		{"off", 100, 0, 223},
+	} {
+		s.Night = tc.night
+		if err := r.update(s, captureReading{}, time.Now(), RingOptions{Brightness: tc.brightness}); err != nil || current != tc.current || frame[0] != tc.pwm {
+			t.Fatal("night transition did not apply brightness policy", tc, current, frame, err)
+		}
+	}
+}
+
+func TestRingDriveWriteFailureDoesNotAdvanceOutput(t *testing.T) {
+	for _, failure := range []string{"blank", "current", "frame"} {
+		t.Run(failure, func(t *testing.T) {
+			var frame [36]byte
+			current := byte(3)
+			fail := false
+			boom := errors.New("driver write failed")
+			r := &ringRenderer{
+				write: func(b []byte) error {
+					var next [36]byte
+					if _, err := hex.Decode(next[:], b[:72]); err != nil {
+						return err
+					}
+					if fail && ((failure == "blank" && next == [36]byte{}) || (failure == "frame" && next != [36]byte{})) {
+						return boom
+					}
+					frame = next
+					return nil
+				},
+				setCurrent: func(value byte) error {
+					if frame != [36]byte{} {
+						t.Fatal("current change while lit")
+					}
+					if fail && failure == "current" {
+						return boom
+					}
+					current = value
+					return nil
+				},
+			}
+			s := presentation.State{Muted: true, Night: "on"}
+			options := RingOptions{Brightness: 100}
+			if err := r.update(s, captureReading{}, time.Now(), options); err != nil {
+				t.Fatal(err)
+			}
+			s.Night, fail = "off", true
+			if err := r.update(s, captureReading{}, time.Now(), options); !errors.Is(err, boom) {
+				t.Fatal("lost driver error", err)
+			}
+			if failure == "blank" && (current != 3 || frame[0] != 8) {
+				t.Fatal("failed blank still changed drive", current, frame)
+			}
+			if failure != "blank" && frame != [36]byte{} {
+				t.Fatal("failed transition left LEDs lit", current, frame)
+			}
+			fail = false
+			if err := r.update(s, captureReading{}, time.Now(), options); err != nil || current != 0 || frame[0] != 223 {
+				t.Fatal("retry did not apply complete stock output", current, frame, err)
+			}
+		})
 	}
 }
 

@@ -81,9 +81,6 @@ func Run(parent context.Context, c Config) error {
 	if err = os.WriteFile(ringPath+"boot_animation", []byte("0"), 0644); err != nil {
 		return err
 	}
-	if err = os.WriteFile(ringPath+"led_current", []byte("3"), 0644); err != nil {
-		return err
-	}
 	engine := session.New(player)
 	engine.SetActivityHandler(player.SetVoiceActive)
 	player.SetMusicPrivacy(muted)
@@ -98,6 +95,8 @@ func Run(parent context.Context, c Config) error {
 	}
 	ring := &ringRenderer{volume: player.volumeFeedback, write: func(frame []byte) error {
 		return os.WriteFile(ringPath+"frame", frame, 0644)
+	}, setCurrent: func(current byte) error {
+		return os.WriteFile(ringPath+"led_current", []byte{'0' + current}, 0644)
 	}}
 	if err = ring.update(engine.Snapshot(), captureReading{}, time.Now(), ringPolicy.snapshot()); err != nil {
 		return err

@@ -41,7 +41,7 @@ func TestPublicRingPrivacyHasHighestPriority(t *testing.T) {
 	for _, phase := range []string{"idle", "listening", "working", "speaking", "error", "disconnected"} {
 		frame := biscuit.RingFrame(presentation.State{Muted: true, Alert: true, Phase: phase, Night: "off"}, 1, 0, biscuit.RingOptions{Brightness: 100})
 		for i := range 12 {
-			if got := [3]byte{frame[i*3], frame[i*3+1], frame[i*3+2]}; got != [3]byte{32, 0, 0} {
+			if got := [3]byte{frame[i*3], frame[i*3+1], frame[i*3+2]}; got != [3]byte{223, 0, 0} {
 				t.Fatalf("privacy lost to %s: %v", phase, frame)
 			}
 		}
