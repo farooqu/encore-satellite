@@ -58,6 +58,16 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+      - name: Validate the centrally reserved candidate identity
+        run: |
+          python3 release/check.py
+          python3 - <<'PY'
+          import json, os
+          registry = json.load(open('release/targets.json'))
+          target = next(t for t in registry['targets'] if t['id'] == 'android-generic')
+          assert str(target['package_revision']) == os.environ['ENCORE_VERSION_CODE'], 'reserve the revision centrally before signing'
+          assert os.environ['ENCORE_VERSION_NAME'].strip(), 'explicit APK versionName required'
+          PY
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: '1.27.4'

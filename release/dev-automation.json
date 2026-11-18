@@ -1,0 +1,8 @@
+{
+  "schema": 1,
+  "builds_enabled": true,
+  "publishing_enabled": false,
+  "metadata_signing": "offline",
+  "distribution_review": null,
+  "inputs": null
+}

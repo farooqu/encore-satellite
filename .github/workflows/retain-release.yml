@@ -1,0 +1,96 @@
+name: Retain an approved release (manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      staging_tag:
+        description: Draft release containing ONLY prepared assets, receipt.json and receipt.jws
+        required: true
+        type: string
+      target:
+        description: Expected target (selects the pinned metadata root)
+        required: true
+        type: choice
+        options: [biscuit, android-generic]
+      receipt_sha256:
+        description: Independently reviewed receipt.json SHA256
+        required: true
+        type: string
+      publish:
+        description: Publish immutable release assets; false verifies and prints a dry-run only
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-publication
+  cancel-in-progress: false
+
+jobs:
+  retain:
+    if: github.ref == 'refs/heads/main'
+    environment: release-publication
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      STAGING_TAG: ${{ inputs.staging_tag }}
+      TARGET: ${{ inputs.target }}
+      RECEIPT_SHA256: ${{ inputs.receipt_sha256 }}
+      PUBLISH: ${{ inputs.publish }}
+      SETUP_APPROVED: ${{ vars.RELEASE_SETUP_APPROVED }}
+      BISCUIT_PUBLIC_KEY: ${{ vars.BISCUIT_METADATA_PUBLIC_KEY_PEM }}
+      ANDROID_PUBLIC_KEY: ${{ vars.ANDROID_METADATA_PUBLIC_KEY_PEM }}
+      EXPECTED_CERTIFICATE: ${{ vars.ANDROID_CERTIFICATE_SHA256 }}
+    steps:
+      - name: Refuse publication before owner-approved setup
+        run: |
+          if test "$PUBLISH" = true && test "$SETUP_APPROVED" != true; then
+            echo '::error::Publishing is disabled until RELEASE_SETUP_APPROVED is explicitly configured.'
+            exit 1
+          fi
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Confirm checked-in publication approval
+        if: inputs.publish
+        run: python3 -c "import json; assert json.load(open('release/dev-automation.json'))['publishing_enabled'] is True, 'Publishing is disabled in checked-in policy'"
+      - name: Download and verify the exact staged candidate
+        run: |
+          set -euo pipefail
+          case "$TARGET" in
+            biscuit) public_key="$BISCUIT_PUBLIC_KEY" ;;
+            android-generic) public_key="$ANDROID_PUBLIC_KEY" ;;
+            *) exit 1 ;;
+          esac
+          test -n "$public_key"
+          printf '%s\n' "$public_key" > "$RUNNER_TEMP/root.pem"
+          # REST's by-tag endpoint finds published releases, not staging drafts.
+          gh release view "$STAGING_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq '.isDraft' | grep -Fx true
+          gh release download "$STAGING_TAG" --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/candidate"
+          export CANDIDATE="$RUNNER_TEMP/candidate"
+          python3 - <<'PY'
+          import json, os, subprocess
+          from pathlib import Path
+          r = json.loads((Path(os.environ['CANDIDATE']) / 'receipt.json').read_text())
+          assert r['target'] == os.environ['TARGET'], 'unexpected target/root'
+          if r['target'] == 'android-generic':
+              assert r['compatibility']['certificate_sha256'] == os.environ['EXPECTED_CERTIFICATE'], 'unexpected APK signer'
+          subprocess.run(['git', 'merge-base', '--is-ancestor', r['source'], 'HEAD'], check=True)
+          PY
+          python3 release/check.py --base origin/main --head HEAD
+          python3 release/pipeline.py verify "$CANDIDATE" --public-key "$RUNNER_TEMP/root.pem" --receipt-sha256 "$RECEIPT_SHA256"
+      - name: Plan or explicitly publish immutable assets (never feeds)
+        env:
+          IMMUTABILITY_READ_TOKEN: ${{ secrets.IMMUTABILITY_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          args=()
+          if test "$PUBLISH" = true; then args+=(--execute); fi
+          python3 release/pipeline.py publish "$RUNNER_TEMP/candidate" \
+            --public-key "$RUNNER_TEMP/root.pem" --receipt-sha256 "$RECEIPT_SHA256" "${args[@]}"

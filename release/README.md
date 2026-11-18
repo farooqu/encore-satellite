@@ -5,7 +5,7 @@ The shared core for the first reserved dev cohort is `0.1.1-dev.1`, strictly new
 than the private `0.1.0-dev.0` baseline. Biscuit and generic Android are
 **experimental**, not stable or hardware-qualified. Their reserved revisions are
 18 and 5 respectively. `lab-linux-amd64` remains a revision-zero test fixture.
-Every target keeps `release_supported=false`: automatic release package selection
+Every target keeps `release_supported=false`: foundation package selection
 remains disabled. Reserving versions does not build, sign, publish or qualify them.
 
 Android now has a development APK and a gated signing/update foundation; see
@@ -22,7 +22,18 @@ approval. The exact audio FPGA binary has an owner-approved good-faith exception
 for dev and production releases, not a resolved license; see the
 [kernel source obligations](../devices/biscuit/packaging/KERNEL-SOURCE.md).
 Durable corresponding-source retention and signing remain release gates.
-This directory does not establish a release channel.
+The [publishing runbook](publishing.md) covers main-driven dev automation,
+offline preparation, signed receipts, immutable binary/source releases and
+explicit stable promotion/renewal. `dev-release.yml` plans versions/changelogs
+after green main checks. Separately approved build setup appends central
+reservations and prepares both experimental targets, twice, with an already
+signed APK and matching source kits/evidence. Publication remains **disabled**;
+metadata keys stay offline, and CI has no metadata signer/publisher job. A later
+approved orb/laptop session signs and publishes the retained bytes without
+rebuilding. Dev/stable activation stays explicit and separate.
+Manual workflows default to dry-run and also require explicit setup approval for
+writes. No live release channel is established and no automatic kernel upload
+is restored by adding this tooling.
 No production signing, uploading or publishing is performed by the foundation
 workflow; the separate Android workflow only signs manually approved candidates.
 Encore-owned code and documentation use the [MIT License](../LICENSE); keep

@@ -1,0 +1,128 @@
+name: Select or renew a channel feed (manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Retained artifact target
+        type: choice
+        options: [biscuit, android-generic]
+        required: true
+      revision:
+        description: Retained artifact revision, never a rebuild
+        type: string
+        required: true
+      channel:
+        description: Explicit channel (stable rejects prerelease cores)
+        type: choice
+        options: [dev, stable]
+        required: true
+      staging_tag:
+        description: Draft release holding the offline-signed dev.jws or stable.jws
+        type: string
+        required: true
+      receipt_sha256:
+        description: Independently reviewed retained receipt.json SHA256
+        type: string
+        required: true
+      activate:
+        description: Push feed checkpoints and deploy Pages; false validates locally only
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-publication
+  cancel-in-progress: false
+
+jobs:
+  select:
+    if: github.ref == 'refs/heads/main'
+    environment: release-feeds
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TARGET: ${{ inputs.target }}
+      REVISION: ${{ inputs.revision }}
+      CHANNEL: ${{ inputs.channel }}
+      STAGING_TAG: ${{ inputs.staging_tag }}
+      RECEIPT_SHA256: ${{ inputs.receipt_sha256 }}
+      BISCUIT_PUBLIC_KEY: ${{ vars.BISCUIT_METADATA_PUBLIC_KEY_PEM }}
+      ANDROID_PUBLIC_KEY: ${{ vars.ANDROID_METADATA_PUBLIC_KEY_PEM }}
+      EXPECTED_CERTIFICATE: ${{ vars.ANDROID_CERTIFICATE_SHA256 }}
+      SETUP_APPROVED: ${{ vars.RELEASE_SETUP_APPROVED }}
+    steps:
+      - name: Refuse feed activation before owner-approved setup
+        if: inputs.activate
+        run: |
+          if test "$SETUP_APPROVED" != true; then
+            echo '::error::Activation is disabled until RELEASE_SETUP_APPROVED is explicitly configured.'
+            exit 1
+          fi
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Confirm checked-in publication approval
+        if: inputs.activate
+        run: python3 -c "import json; assert json.load(open('release/dev-automation.json'))['publishing_enabled'] is True, 'Publishing is disabled in checked-in policy'"
+      - name: Verify immutable release and offline-signed channel selection
+        run: |
+          set -euo pipefail
+          [[ "$REVISION" =~ ^[1-9][0-9]*$ ]]
+          case "$TARGET" in
+            biscuit) public_key="$BISCUIT_PUBLIC_KEY" ;;
+            android-generic) public_key="$ANDROID_PUBLIC_KEY" ;;
+            *) exit 1 ;;
+          esac
+          test -n "$public_key"
+          printf '%s\n' "$public_key" > "$RUNNER_TEMP/root.pem"
+          tag="$TARGET-r$REVISION"
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" --jq '.immutable == true and .draft == false' | grep -Fx true
+          gh release download "$tag" --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/candidate"
+          # Draft lookup must use the CLI's draft-aware release discovery.
+          gh release view "$STAGING_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq '.isDraft' | grep -Fx true
+          gh release download "$STAGING_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$CHANNEL.jws" --dir "$RUNNER_TEMP/feed"
+          export CANDIDATE="$RUNNER_TEMP/candidate"
+          python3 - <<'PY'
+          import json, os, subprocess
+          from pathlib import Path
+          r = json.loads((Path(os.environ['CANDIDATE']) / 'receipt.json').read_text())
+          assert (r['target'], str(r['revision'])) == (os.environ['TARGET'], os.environ['REVISION']), 'release identity mismatch'
+          if r['target'] == 'android-generic':
+              assert r['compatibility']['certificate_sha256'] == os.environ['EXPECTED_CERTIFICATE'], 'unexpected APK signer'
+          subprocess.run(['git', 'merge-base', '--is-ancestor', r['source'], 'HEAD'], check=True)
+          PY
+          # This branch must be deliberately bootstrapped; a missing checkpoint
+          # branch is an error, not permission to discard old feeds/history.
+          git worktree add --detach build/feed-site origin/release-feeds
+          python3 release/pipeline.py stage-feed "$CANDIDATE" \
+            --public-key "$RUNNER_TEMP/root.pem" --receipt-sha256 "$RECEIPT_SHA256" \
+            --channel "$CHANNEL" --feed "$RUNNER_TEMP/feed/$CHANNEL.jws" --site build/feed-site
+      - name: Explicitly save feed checkpoints and stage Pages
+        if: inputs.activate
+        run: |
+          set -euo pipefail
+          git -C build/feed-site config user.name github-actions[bot]
+          git -C build/feed-site config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git -C build/feed-site add --all
+          if ! git -C build/feed-site diff --cached --quiet; then
+            git -C build/feed-site commit -m "Select $TARGET revision $REVISION on $CHANNEL"
+          fi
+          # No force push; another writer causes failure instead of lost feeds.
+          git -C build/feed-site -c 'credential.helper=!gh auth git-credential' push origin HEAD:refs/heads/release-feeds
+          mkdir "$RUNNER_TEMP/pages"
+          git -C build/feed-site archive HEAD | tar -x -C "$RUNNER_TEMP/pages"
+      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
+        if: inputs.activate
+        with:
+          path: ${{ runner.temp }}/pages
+      - uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
+        if: inputs.activate

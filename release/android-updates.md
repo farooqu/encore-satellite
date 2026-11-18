@@ -89,8 +89,17 @@ still work, but report update trust as unprovisioned.
 Reserve each target's package revision centrally across all channels/variants;
 it is the Android versionCode (3…2100000000), not an algorithm derived from
 SemVer. Never reuse a revision for different bytes, even after failed/withdrawn
-publication. A durable immutable revision ledger/cohort approval and retention
-store are still publication gates, not enforced by the candidate workflow.
+publication. The candidate workflow validates the existing ledger/inventory and
+requires its current reserved versionCode before loading the keystore. It does
+not lock competing local builds or deliver durable corresponding sources.
+Use the separate [retention and channel pipeline](publishing.md) for signed
+immutable receipts/source assets, publication and feed selection. Its main-driven
+dev path is implemented with separate build and publication approvals. Approved
+build setup reserves both experimental targets centrally and clean-builds/tests
+both, twice, including the APK signature and exact source kits. Metadata keys
+stay offline; final signing/publication consumes those bytes without rebuilding.
+Publishing is disabled, and both dev/stable feed activation stay manual;
+cohort/source review and concrete owner approval remain gates.
 
 ## Feed contract and trust lifecycle
 
