@@ -66,7 +66,7 @@ func newLinuxUpdates(selectionPath, manifestPath string) (*linuxUpdates, error) 
 	if err = json.Unmarshal(b, &u.client.Installed); err != nil {
 		return nil, err
 	}
-	u.state = api.UpdateStateResponse{Key: linuxUpdateKey, Title: "Encore Linux", MissingState: true, ReleaseSummary: "Check for updates; signed update trust must be provisioned locally"}
+	u.state = api.UpdateStateResponse{Key: linuxUpdateKey, Title: "Encore Echo Dot", MissingState: true, ReleaseSummary: "Check for updates; signed update trust must be provisioned locally"}
 	u.state.CurrentVersion = updateVersion(u.client.Installed.CoreVersion, u.client.Installed.Revision)
 	var saved updateSelection
 	b, err = os.ReadFile(selectionPath)

@@ -212,7 +212,7 @@ func Run(parent context.Context, c Config) error {
 		}
 	})
 	start(func() error {
-		info := esphome.Info{Name: c.Name, FriendlyName: c.Name, MACAddress: mac.String(), Manufacturer: "Encore", Model: "Echo Dot 2", Version: "0.1.0-dev.0", ProjectName: "encore.satellite"}
+		info := esphome.Info{Name: c.Name, FriendlyName: c.Name, MACAddress: mac.String(), Manufacturer: "Encore Satellite", Model: "Echo Dot (2nd gen)", Version: "0.1.0-dev.0", ProjectName: "encore.satellite"}
 		return controls.Serve(ctx, listener, info, key)
 	})
 	voice := &incubator.Server{Engine: engine, Name: c.Name, MAC: mac.String(), Version: "0.1.0-dev.0", EnableModels: true}

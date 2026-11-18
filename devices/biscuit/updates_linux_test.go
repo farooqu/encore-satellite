@@ -108,11 +108,21 @@ func TestLinuxUpdateAndRingControlsEncryptedAPI(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
-	go func() { done <- d.Serve(ctx, l, esphome.Info{Name: c.Name}, key) }()
+	go func() {
+		done <- d.Serve(ctx, l, esphome.Info{Name: c.Name, FriendlyName: "Office speaker", MACAddress: "02:13:24:35:46:57", Manufacturer: "Encore Satellite", Model: "Echo Dot (2nd gen)", ProjectName: "encore.satellite"}, key)
+	}()
 	t.Cleanup(func() { cancel(); l.Close(); <-done })
 	peer := newManagementPeer(t, l.Addr().String(), key)
 	peer.send(&api.HelloRequest{ClientInfo: "linux-update-test", ApiVersionMajor: 1, ApiVersionMinor: 12})
 	peer.receive()
+	peer.send(&api.DeviceInfoRequest{})
+	device, ok := peer.receive().(*api.DeviceInfoResponse)
+	if !ok || device.Name != "update-test" || device.FriendlyName != "Office speaker" || device.MacAddress != "02:13:24:35:46:57" || device.ProjectName != "encore.satellite" {
+		t.Fatal("product metadata replaced per-unit identity", device)
+	}
+	if device.Manufacturer != "Encore Satellite" || device.Model != "Echo Dot (2nd gen)" {
+		t.Fatal("incorrect product metadata", device)
+	}
 	peer.send(&api.ListEntitiesRequest{})
 	var channel, check, update, brightness, motion uint32
 listing:
@@ -143,6 +153,10 @@ listing:
 		case *api.ListEntitiesUpdateResponse:
 			if v.ObjectId == "linux_update" {
 				update = v.Key
+				// Pin the pre-rename wire key, not a value derived by the implementation.
+				if v.Name != "Linux update" || v.Key != 4164145515 {
+					t.Fatal("product title changed update entity identity", v)
+				}
 			}
 		case *api.ListEntitiesDoneResponse:
 			break listing
@@ -221,6 +235,9 @@ listing:
 		peer.send(&api.UpdateCommandRequest{Key: update, Command: command})
 		for {
 			if v, ok := peer.receive().(*api.UpdateStateResponse); ok && !v.InProgress && strings.Contains(v.ReleaseSummary, "Provision local") {
+				if v.Title != "Encore Echo Dot" || v.Key != update {
+					t.Fatal("incorrect product title or update association", v)
+				}
 				if !v.MissingState || v.LatestVersion != "" {
 					t.Fatal("untrusted feed reported up-to-date", v)
 				}
