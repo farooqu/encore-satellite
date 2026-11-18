@@ -292,8 +292,9 @@ def build(output, aapt, apksigner, initial=None):
                         "--kernel-artifact", str(work / "kernel"), "--sendspin-artifact", str(work / "sendspin"),
                         "--revision", str(revisions["biscuit"]), "--output", str(bundle)], cwd=ROOT, check=True)
         # A clean Gradle rebuild and a regenerated Go AAR, not a copied APK.
+        # The pinned Android plugin exposes unit tests for the debug variant.
         subprocess.run(["devices/android-generic/build-android", "clean", ":app:assembleRelease",
-                        ":app:testReleaseUnitTest", ":app:lintRelease"], cwd=ROOT, check=True,
+                        ":app:testDebugUnitTest", ":app:lintRelease"], cwd=ROOT, check=True,
                        env={**os.environ, "ENCORE_VERSION_CODE": str(revisions["android-generic"]),
                             "ENCORE_VERSION_NAME": registry["core_version"]})
         apk = work / f"android-{attempt}.apk"
@@ -315,7 +316,7 @@ def build(output, aapt, apksigner, initial=None):
                                       "toolchain": {"go": git_tool("go", "version"), "java": git_tool("java", "--version"),
                                                     "python": sys.version, "zlib": zlib.ZLIB_RUNTIME_VERSION,
                                                     "runner_image": os.environ.get("ImageVersion", "not recorded")},
-                                      "checks": ["make check biscuit-check", "testReleaseUnitTest lintRelease"],
+                                      "checks": ["make check biscuit-check", "testDebugUnitTest lintRelease"],
                                       "hardware_qualified": False}) + b"\n")
     for target in TARGETS:
         spec = {"target": target, "reservation": reservations[target], "artifact": str(artifacts[1][target]),
