@@ -30,7 +30,11 @@ func main() {
 	if err = biscuit.PrepareNetwork(ctx, c); err != nil {
 		log.Fatal(err)
 	}
-	if err = biscuit.Run(ctx, c); err != nil {
+	if len(os.Args) == 2 && os.Args[1] == "--provision-only" {
+		return
+	}
+	requireMutedStart := len(os.Args) == 2 && os.Args[1] == "--require-muted-start"
+	if err = biscuit.Run(ctx, c, requireMutedStart); err != nil {
 		log.Fatal(err)
 	}
 }

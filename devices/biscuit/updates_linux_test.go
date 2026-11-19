@@ -97,7 +97,7 @@ func TestLinuxUpdateAndRingControlsEncryptedAPI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	d := &biscuitControls{Proxy: bluetooth.New(managementRadio{}, bluetooth.Options{}), music: newMusic(c, s, p), updates: u, ring: ring}
+	d := &biscuitControls{Proxy: bluetooth.New(managementRadio{}, bluetooth.Options{}), player: p, music: newMusic(c, s, p), updates: u, ring: ring}
 	key, err := esphome.GeneratePSK()
 	if err != nil {
 		t.Fatal(err)

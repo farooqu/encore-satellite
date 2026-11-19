@@ -25,13 +25,12 @@ func TestButtonDiscoveryRequiresBoardHardwareGroups(t *testing.T) {
 		name, gpioName, gpioPhys, keypadName string
 		action, wantOK                       bool
 	}{
-		{"stock Biscuit", "keys", "gpio-keys/input0", "mtk-kpd", false, !kernel61},
-		{"driver name", "gpio-keys", "", "mtk-kpd", false, !kernel61},
+		{"legacy keypad", "keys", "gpio-keys/input0", "mtk-kpd", true, false},
 		{"generic keys without identity", "keys", "", "mtk-kpd", false, false},
 		{"unrelated keys", "keys", "usb/input0", "mtk-kpd", false, false},
 		{"wrong physical input", "keys", "gpio-keys/input1", "mtk-kpd", false, false},
 		{"missing keypad", "keys", "gpio-keys/input0", "", false, false},
-		{"6.1 board groups", "keys", "", "mtk-pmic-keys", true, kernel61},
+		{"6.1 board groups", "keys", "", "mtk-pmic-keys", true, true},
 		{"6.1 missing Action", "keys", "", "mtk-pmic-keys", false, false},
 		{"6.1 missing PMIC", "keys", "", "", true, false},
 		{"6.1 missing volume", "volume-keys", "", "mtk-pmic-keys", true, false},

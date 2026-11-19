@@ -21,7 +21,7 @@ import (
 func TestNativeVolumeEncryptedAPIAndPhysicalKeys(t *testing.T) {
 	p, sample := buttonMusic(t)
 	c := Config{Schema: 1, Name: "volume-test"}
-	d := &biscuitControls{Proxy: bluetooth.New(managementRadio{}, bluetooth.Options{}), music: newMusic(c, &settings{config: c}, p)}
+	d := &biscuitControls{Proxy: bluetooth.New(managementRadio{}, bluetooth.Options{}), player: p, music: newMusic(c, &settings{config: c}, p)}
 	key, err := esphome.GeneratePSK()
 	if err != nil {
 		t.Fatal(err)

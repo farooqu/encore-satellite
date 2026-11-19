@@ -1,12 +1,12 @@
 #!/bin/busybox.static sh
-# One attempt per service per boot; init respawn cannot create a restart storm.
+# One attempt per service per boot, except the retrying Wi-Fi manager.
 # All peripheral children have detached stdio and their own process group.
 set -eu
 BB=/bin/busybox.static
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 umask 077
 name=${1:-}
-case "$name" in base|radio|wifi|dhcp|bluetooth|network|app) ;; *) exit 2;; esac
+case "$name" in base|radio|wifi|dhcp|bluetooth|network|app|enrollment|health) ;; *) exit 2;; esac
 dir=/run/encore/services/$name
 child=
 sleeper=
@@ -21,6 +21,12 @@ stop() {
   # Never wait for an uninterruptible device worker here.
   exit 0
 }
+delay() {
+  "$BB" sleep "$1" 9>&- &
+  sleeper=$!
+  wait "$sleeper" || :
+  sleeper=
+}
 wait_for() {
   i=0
   until "$@"; do
@@ -28,13 +34,25 @@ wait_for() {
     "$BB" sleep 1
   done
 }
+wait_for_request() {
+  until test -f "/run/encore/$1"; do "$BB" sleep 1; done
+}
+privacy_muted() {
+  value=$(cat /sys/devices/platform/amz_privacy/privacy_state) && test "$value" = 1
+}
 run() {
   case "$name" in
     base) exec /etc/encore/boot.sh;;
   esac
   wait_for test -e /run/encore/base-ready
+  # /run is born empty on every boot. Once base is ready, starter services
+  # stay parked indefinitely until the USB operator requests enrollment.
+  if test -e /etc/encore/held-start; then wait_for_request enable-enrollment; fi
   case "$name" in
-    radio) exec /usr/local/bin/wmtup -patches /store/encore/firmware -power;;
+    radio)
+      fw=/store/encore/firmware
+      if test -e /etc/encore/held-start; then fw=/run/encore/firmware; fi
+      exec /usr/local/bin/wmtup -patches "$fw" -power;;
     wifi)
       wait_for test -e /sys/class/net/wlan0
       # Only the current installation's saved config; never replace a live owner.
@@ -55,7 +73,25 @@ run() {
       wait_for test -e /sys/class/net/wlan0
       exec /usr/local/sbin/encore-bluetooth;;
     network) exec /usr/local/sbin/encore-network;;
+    enrollment)
+      wait_for test -s /run/encore/bluetooth-ready
+      /usr/local/bin/encore-satellite --provision-only
+      touch /run/encore/enrollment-ready;;
+    health)
+      wait_for_request app-started
+      exec /usr/local/sbin/encore-health supervised;;
     app)
+      if test -e /etc/encore/held-start; then
+        wait_for_request enrollment-ready
+        wait_for_request enable-app
+        test -s /run/encore/bluetooth-ready
+        wait_for test -s /run/udhcpc.pid
+        privacy_muted || { echo 'App activation refused: physical privacy must be muted'; return 1; }
+        /usr/local/sbin/slotctl arm
+        privacy_muted || { echo 'App activation refused: physical privacy changed'; return 1; }
+        touch /run/encore/app-started
+        exec /usr/local/sbin/encore-run --require-muted-start
+      fi
       wait_for test -s /run/udhcpc.pid
       exec /usr/local/sbin/encore-run;;
   esac
@@ -73,19 +109,19 @@ $BB flock -n 9 || exit 1
 trap stop TERM INT
 echo "$$" > "$dir/supervisor.pid"
 if "$BB" mkdir "$dir/attempted" 2>/dev/null; then
-  # Reexec this script inside setsid: no shell/TTY inherited from an operator.
-  # Base mounts /tmp, so logs use /run until that dependency is established.
-  "$BB" setsid "$BB" sh "$0" "$name" worker 9>&- </dev/null >"$dir/output.log" 2>&1 &
-  child=$!
-  echo "$child" > "$dir/child.pid"
-  status=0
-  wait "$child" || status=$?
-  child=
-  echo "$status" > "$dir/exit-status"
+  while :; do
+    # Reexec inside setsid with detached stdio. Keep only the latest bounded log.
+    "$BB" setsid "$BB" sh "$0" "$name" worker 9>&- </dev/null >"$dir/output.log" 2>&1 &
+    child=$!
+    echo "$child" > "$dir/child.pid"
+    status=0
+    wait "$child" || status=$?
+    child=
+    echo "$status" > "$dir/exit-status"
+    # A failed network worker can leave a candidate marker. Its next owner
+    # retries last-good recovery before accepting another request.
+    test "$name" = network && test "$status" != 0 || break
+    delay 5
+  done
 fi
-while :; do
-  "$BB" sleep 3600 9>&- &
-  sleeper=$!
-  wait "$sleeper" || :
-  sleeper=
-done
+while :; do delay 3600; done

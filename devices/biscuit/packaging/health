@@ -39,5 +39,7 @@ while [ "$i" -lt 180 ]; do
   i=$((i+1))
 done
 # Spend the second trial attempt. The next failed trial falls back to good.
+# The private starter never reboots behind the USB operator's back.
+[ "${1:-}" != supervised ] || exit 1
 slot=$(cat /run/encore/slot)
 case "$(cat /store/encore/slots/$slot.state)" in trial*) sync; reboot -f;; esac

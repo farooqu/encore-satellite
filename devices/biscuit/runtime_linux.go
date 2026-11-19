@@ -26,10 +26,15 @@ import (
 	"github.com/farooqu/encore-satellite/platforms/linuxble/bluez"
 )
 
+func packagedExecutable(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0111 != 0
+}
+
 // Run opens the real host before exposing this package's sole Incubator backend. It does
 // not provision the base, start Wi-Fi, execute shell commands or run HTTP control.
 // ReadyPath is ephemeral startup readiness, NOT a hardware qualification result.
-func Run(parent context.Context, c Config) error {
+func Run(parent context.Context, c Config, requireMutedStart bool) error {
 	_ = os.Remove(ReadyPath)
 	defer os.Remove(ReadyPath)
 	if err := syscall.Sethostname([]byte(c.Name)); err != nil {
@@ -41,6 +46,9 @@ func Run(parent context.Context, c Config) error {
 	muted, err := gate.Check(nil)
 	if err != nil {
 		return errors.New("dot: authoritative privacy driver is required")
+	}
+	if requireMutedStart && !muted {
+		return errors.New("dot: the supervised starter requires physical privacy muted before opening audio")
 	}
 	mixer, err := alsa.OpenMixer(0)
 	if err != nil {
@@ -94,15 +102,8 @@ func Run(parent context.Context, c Config) error {
 		return err
 	}
 	ring := &ringRenderer{volume: player.volumeFeedback, write: func(frame []byte) error {
-		if kernel61 {
-			return os.WriteFile(ringPath+"scaled_frame", scaledRingFrame(frame), 0644)
-		}
-		return os.WriteFile(ringPath+"frame", frame, 0644)
-	}, setCurrent: func(current byte) error {
-		if kernel61 {
-			return nil // The trial latches quarter current with every scaled frame.
-		}
-		return os.WriteFile(ringPath+"led_current", []byte{'0' + current}, 0644)
+		// The kernel latches quarter current with every scaled frame.
+		return os.WriteFile(ringPath+"scaled_frame", scaledRingFrame(frame), 0644)
 	}}
 	if err = ring.update(engine.Snapshot(), captureReading{}, time.Now(), ringPolicy.snapshot()); err != nil {
 		return err
@@ -157,18 +158,17 @@ func Run(parent context.Context, c Config) error {
 			return bluez.OpenCentral(value, lost)
 		},
 	})
-	admin, err := newManagement()
+	var ssh *sshManager
+	if packagedExecutable("/usr/local/sbin/encore-ssh") {
+		ssh = newSSHManager()
+	}
+	admin, err := newManagement(ssh)
 	if err != nil {
 		return err
 	}
-	controls := &biscuitControls{Proxy: proxy, music: newMusic(c, saved, player), management: admin, ring: ringPolicy, announcements: newAnnouncementPlayer(engine, player)}
-	// The 6.1 RAM-root trial must never enter the persistent release updater,
-	// advertise its actions, or require a release-slot identity to start.
-	if !kernel61 {
-		controls.updates, err = newLinuxUpdates("/data/encore/update-state.json", "/etc/encore-package.json")
-		if err != nil {
-			return err
-		}
+	controls := &biscuitControls{Proxy: proxy, player: player, management: admin, ring: ringPolicy, announcements: newAnnouncementPlayer(engine, player)}
+	if packagedExecutable(musicExecutable) {
+		controls.music = newMusic(c, saved, player)
 	}
 	key, err := noiseKey(KeyPath)
 	if err != nil {

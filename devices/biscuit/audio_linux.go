@@ -123,19 +123,11 @@ func configureMixer(m interface {
 	SetEnum(string, string) error
 	SetInt(string, uint32) error
 }) error {
-	if kernel61 {
-		// Select before OpenPlayback: prepare loads the coefficients. Never
-		// inherit Radar's two-way crossover on Biscuit's single speaker.
-		if err := m.SetEnum("Ext_Speaker_Amp_Switch", "Off"); err != nil {
-			return err
-		}
-		if err := m.SetEnum("Speaker Codec Profile", "Flat"); err != nil {
-			return err
-		}
-	}
-	// Speaker-only route. No headphone switching, vendor DSP or boosted gain.
+	// Select Flat before OpenPlayback loads the coefficients; Biscuit has
+	// one speaker, not the Radar crossover the codec defaults to.
 	for _, c := range []struct{ name, value string }{
-		{"Ext_Speaker_Amp_Switch", "Off"}, {"Audio_DacMux_Setting", "On"},
+		{"Ext_Speaker_Amp_Switch", "Off"}, {"Speaker Codec Profile", "Flat"},
+		{"Audio_DacMux_Setting", "On"},
 		{"Ignore Ramp Up", "Off"},
 	} {
 		if err := m.SetEnum(c.name, c.value); err != nil {

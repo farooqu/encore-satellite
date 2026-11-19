@@ -5,18 +5,14 @@ on:
   pull_request:
     paths:
       - '.github/workflows/biscuit-kernel.yml'
-      - 'devices/biscuit/packaging/kernel*'
-      - 'devices/biscuit/packaging/KERNEL-SOURCE.md'
-      - 'devices/biscuit/packaging/package.py'
-      - 'tools/check_ble_kernel.py'
+      - 'devices/biscuit/packaging/kernel61/**'
+      - 'Makefile'
   push:
     branches: [main]
     paths:
       - '.github/workflows/biscuit-kernel.yml'
-      - 'devices/biscuit/packaging/kernel*'
-      - 'devices/biscuit/packaging/KERNEL-SOURCE.md'
-      - 'devices/biscuit/packaging/package.py'
-      - 'tools/check_ble_kernel.py'
+      - 'devices/biscuit/packaging/kernel61/**'
+      - 'Makefile'
 
 permissions:
   contents: read
@@ -26,16 +22,14 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     container:
-      image: ubuntu:24.04@sha256:73b999393d07f2bf65a40373778a44dc9a6d54ad7718d29247d8ff9413c4d6a8
-    env:
-      ENCORE_KERNEL_BUILD_IMAGE: ubuntu:24.04@sha256:73b999393d07f2bf65a40373778a44dc9a6d54ad7718d29247d8ff9413c4d6a8
+      image: debian:13.7-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
     steps:
       - name: Install kernel build tools
         run: |
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            ca-certificates git make gcc libc6-dev libssl-dev bc patch curl xz-utils bzip2 \
-            perl python3 flex bison util-linux
+            ca-certificates git make gcc gcc-aarch64-linux-gnu libc6-dev libssl-dev libelf-dev \
+            bc patch curl perl python3 flex bison
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
@@ -43,13 +37,18 @@ jobs:
       # Build outputs are never restored from an unqualified binary cache.
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
-          path: .amp/in/orb-backup/biscuit-kernel/dl
-          key: biscuit-kernel-sources-${{ hashFiles('devices/biscuit/packaging/kernel-inputs.json') }}
-      - name: Build and verify the kernel and source kit
+          path: .amp/in/orb-backup/biscuit61/linux-source.tar.gz
+          key: biscuit-kernel-source-2d763595ea9299add581aad7bac95749b82b0705ff9c992ddf1ed16d52747087
+      - name: Build and verify Linux 6.1 for AArch64
         run: |
-          # Checkout's container action and this shell can use different HOME paths.
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          make biscuit-kernel
+          set -eu
+          source=.amp/in/orb-backup/biscuit61/linux-source.tar.gz
+          if [ ! -f "$source" ]; then
+            mkdir -p "$(dirname "$source")"
+            curl --fail --silent --show-error --location --output "$source" \
+              https://api.github.com/repos/aslater3/LibreEcho-Linux/tarball/5bc811d3cd7091e8d70f9faa0bc12c5cf4e77ae0
+          fi
+          make biscuit-kernel BISCUIT_KERNEL_SOURCE="$source" BISCUIT_KERNEL_JOBS=4
       # The exact FPGA has an owner-approved dev/production policy exception,
       # not legal clearance or publication approval; see FPGA-PROVENANCE.txt.
       # Keep kernel/source-kit uploads disabled pending concrete approval.

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"math"
-	"strings"
 	"time"
 
 	"github.com/farooqu/encore-satellite/core/session"
@@ -39,16 +38,12 @@ func openButtons() ([]*input.Device, error) {
 }
 
 // buttonDevices takes ownership of the discovered nodes, closing unrelated
-// devices and refusing a base that does not expose both key groups.
+// devices and refusing a base without PMIC mute, volume and Action groups.
 func buttonDevices(devices []*input.Device) ([]*input.Device, error) {
 	var kept []*input.Device
 	var found uint8
-	want := uint8(3)
-	if kernel61 {
-		want = 7 // PMIC mute, volume GPIOs and separate Action GPIO.
-	}
 	for _, d := range devices {
-		group := buttonGroup(d.Name, d.Phys)
+		group := buttonGroup(d.Name)
 		if group != 0 {
 			kept = append(kept, d)
 			found |= group
@@ -56,7 +51,7 @@ func buttonDevices(devices []*input.Device) ([]*input.Device, error) {
 			_ = d.Close()
 		}
 	}
-	if found != want {
+	if found != 7 {
 		for _, d := range kept {
 			_ = d.Close()
 		}
@@ -65,24 +60,15 @@ func buttonDevices(devices []*input.Device) ([]*input.Device, error) {
 	return kept, nil
 }
 
-func buttonGroup(name, phys string) uint8 {
-	if kernel61 {
-		// gpio_keys uses the platform node name, not its compatible string.
-		switch name {
-		case "mtk-pmic-keys":
-			return 1
-		case "keys":
-			return 2
-		case "action_key":
-			return 4
-		}
-		return 0
-	}
-	if strings.Contains(name, "mtk-kpd") {
+func buttonGroup(name string) uint8 {
+	// gpio_keys uses the platform node name, not its compatible string.
+	switch name {
+	case "mtk-pmic-keys":
 		return 1
-	}
-	if strings.Contains(name, "gpio-keys") || (name == "keys" && phys == "gpio-keys/input0") {
+	case "keys":
 		return 2
+	case "action_key":
+		return 4
 	}
 	return 0
 }

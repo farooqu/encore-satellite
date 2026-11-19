@@ -15,7 +15,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from kernel61 import assemble
+from kernel61 import arm64_assemble, assemble
 
 HERE = Path(__file__).resolve().parent
 BACKUP = HERE.parents[3] / ".amp/in/orb-backup"
@@ -190,6 +190,66 @@ exec "$BUSYBOX" "$@"
                     self.assertNotIn("-t ext4", events)
                     self.assertNotIn("size=128m", events)
                 self.assertNotIn("UNEXPECTED_SLEEP", events)
+
+    def test_starter_uses_verified_fallback_without_spending_attempts(self):
+        raw = io.BytesIO()
+        with tarfile.open(fileobj=raw, mode="w:gz") as tar:
+            identity = (arm64_assemble.STARTER_FORMAT + "\n").encode()
+            member = tarfile.TarInfo("etc/encore-base")
+            member.size = len(identity)
+            tar.addfile(member, io.BytesIO(identity))
+        archive = raw.getvalue()
+        ramdisk = arm64_assemble.initramfs(b"", hashlib.sha256(archive).hexdigest(), b"", starter=True)
+        subprocess.run([self.busybox, "cpio", "-i", "init"], input=gzip.decompress(ramdisk),
+                       cwd=self.root, capture_output=True, check=True)
+        bb = self.script("bb", '''
+case "$1" in
+mount|umount|mdev|sync) exit 0;;
+switch_root) echo SWITCH_ROOT; exit 0;;
+mv) [ "$FAIL_RENAME" = 0 ] || exit 1;;
+esac
+exec "$BUSYBOX" "$@"
+''')
+        source = (self.root / "init").read_text().replace("/bin/busybox.static", str(bb))
+        a, b = source.index("rescue() {"), source.index("$BB mount -t proc")
+        source = source[:a] + 'rescue() { echo "RESCUE $*"; exit 1; }\n' + source[b:]
+        source = source.replace("[ ! -b /dev/", "[ ! -f /dev/")
+        for directory in ("dev", "proc", "sys", "run", "newroot", "store"):
+            source = source.replace("/" + directory, str(self.root / directory))
+        check = self.script("starter-check", source)
+        store = self.root / "store/encore"
+        booted = self.root / "run/encore/slot"
+        (store / "format").write_text(arm64_assemble.STARTER_FORMAT + "\n")
+        for slot in ("a", "b"):
+            (store / "slots" / slot).mkdir(parents=True)
+        for active, states, bad, fail_rename, expected in (
+            ("a", ("held", "good"), "", False, "a"),
+            ("a", ("held", "held"), "a", False, "b"),
+            ("b", ("held", "trial 0"), "", False, "a"),
+            ("a", ("bad", "held"), "b", False, None),
+            ("a", ("held", "held"), "ab", False, None),
+            ("a", ("trial 0", "held"), "", True, None),
+        ):
+            with self.subTest(active=active, states=states, bad=bad, fail_rename=fail_rename):
+                booted.unlink(missing_ok=True)
+                (store / "active").write_text(active + "\n")
+                for slot, state in zip(("a", "b"), states):
+                    (store / "slots" / f"{slot}.state").write_text(state + "\n")
+                    (store / "slots" / slot / "rootfs.tar.gz").write_bytes(
+                        archive + b"damaged" if slot in bad else archive)
+                result = subprocess.run(["sh", str(check)], capture_output=True, text=True, timeout=10,
+                                        env={**os.environ, "BUSYBOX": self.busybox,
+                                             "FAIL_RENAME": str(int(fail_rename))})
+                self.assertEqual(result.returncode, 0 if expected else 1, result.stdout + result.stderr)
+                self.assertEqual("SWITCH_ROOT" in result.stdout, expected is not None, result.stdout)
+                if expected:
+                    self.assertEqual(booted.read_text().strip(), expected)
+                else:
+                    self.assertFalse(booted.exists())
+                    self.assertIn("RESCUE", result.stdout)
+                self.assertEqual((store / "active").read_text().strip(), expected or active)
+                self.assertEqual(tuple((store / "slots" / f"{slot}.state").read_text().strip()
+                                       for slot in ("a", "b")), states)
 
     def test_usb_rescue_restarts_only_its_own_gadget_with_one_console_owner(self):
         bb = self.script("usb-bb", '''

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Explicit, USB/recovery-only development install/update. Never downloads code."""
+"""Fresh Biscuit Linux 6.1/AArch64 development install over recovery USB."""
 
 import argparse
 import base64
@@ -242,21 +242,46 @@ def update_eligibility(adb, manifest, store):
 
 def install(args):
     # Validate before even read-only device operations, including dry-run.
+    starter = args.command in ("install-arm64", "transition-arm64")
     ssh_install_config(args)
-    manifest, files = load_bundle(args.bundle, args.sha256)
+    if starter:
+        from kernel61 import starter_install
+        manifest, rootfs, image = starter_install.load_bundle(args.bundle, args.sha256)
+    else:
+        manifest, files = load_bundle(args.bundle, args.sha256)
     fresh = args.command == "install"
     adb = ADB(args.serial)
     # Recovery stages the bundled Linux environment, not its own kernel/BlueZ.
     preflight(adb)
-    recovery, image = None, None
+    recovery = None
+    if not starter:
+        image = None
     if fresh:
         recovery = adb.shell("cat /dev/block/mmcblk0p12")
         image = boot_image(recovery, files["initramfs.gz"], files["kernel.zImage-dtb"])
-    name = device_name(args.serial, args.name) if fresh else None
+    name = device_name(args.serial, args.name) if fresh or starter else None
     print(f"{args.command}: Echo Dot 2, development revision {manifest['package_revision']}"
           + (f", name {name}" if name else ", preserve Encore identity/Wi-Fi/pairing"))
-    print("No Fire OS release or saved Wi-Fi check; no bootloader, boot_a/b, system or factory partition writes.")
+    print("No bootloader, boot_a/b, system or factory partition writes; no saved Wi-Fi imported.")
+    if starter:
+        # Also runs on apply, before mounting anything writable or making backups.
+        starter_install.check_stock_firmware(adb)
     if not args.apply:
+        if starter:
+            for mount, number in (("/cache", 15), ("/data", 16)):
+                source = adb.shell(f"awk '$2 == \"{mount}\" && $3 == \"ext4\" {{print $1}}' /proc/mounts").decode().strip()
+                if not source or adb.shell(f"readlink -f {shlex.quote(source)}").strip() != f"/dev/block/mmcblk0p{number}".encode():
+                    print(f"{mount}: p{number} not already mounted; capacity and state inventory unchecked")
+                    continue
+                free = int(adb.shell(f"df -Pk {mount} | awk 'END {{print $4}}'"))
+                state = adb.shell(f"if test -L {mount}/encore; then echo symlink; "
+                                  f"elif test -d {mount}/encore; then echo directory; "
+                                  f"elif test -e {mount}/encore; then echo unexpected; else echo absent; fi").decode().strip()
+                print(f"{mount}: {free} KiB free; existing Encore state: {state}")
+                if args.command == "install-arm64" and state != "absent":
+                    raise ValueError(f"fresh install requires {mount}/encore to be absent")
+            print("No persistent device writes performed. Apply rechecks firmware, capacity, state and recovery backup.")
+            return
         if not fresh:
             # Do not mount even read-only: ext4 can replay its journal. Only
             # inspect an already-mounted, verified cache filesystem.
@@ -278,16 +303,28 @@ def install(args):
     # TWRP remains in RAM. Mount only the two filesystems we own directories on.
     for mount, number in (("/cache", 15), ("/data", 16)):
         adb.shell(f"mountpoint -q {mount} || mount {mount}; "
-                  f"source=$(awk '$2 == \"{mount}\" && $3 == \"ext4\" {{print $1}}' /proc/mounts); "
+                  f"source=$(awk '$2 == \"{mount}\" && $3 == \"ext4\" && $4 ~ /^rw(,|$)/ {{print $1}}' /proc/mounts); "
                   f"test \"$(readlink -f \"$source\")\" = /dev/block/mmcblk0p{number}")
     store = "/cache/encore"
     # Serialize the preconditions too: another PC must not change active after
     # we select an inactive target but before we acquire the write lock.
-    adb.shell(f"mkdir -p {store}; mkdir {store}/.install-lock")
+    if args.command == "install-arm64":
+        # A lock outside the target directory lets the installer require that
+        # the installation directory is absent, including after interruption.
+        lock = "/cache/.encore-install-lock"
+        store_check = f"test ! -e {store}; test ! -L {store}"
+    else:
+        lock = f"{store}/.install-lock"
+        store_check = f"test -d {store}; test ! -L {store}" if starter else f"mkdir -p {store}"
+    adb.shell(f"{store_check}; umask 077; mkdir {lock}")
     try:
-        apply_locked(args, adb, manifest, files, store, name, recovery, image)
+        if starter:
+            starter_install.install_locked(adb, args, manifest, rootfs, image, name)
+        else:
+            adb.shell(f"test ! -e {store}/.arm64-transition")
+            apply_locked(args, adb, manifest, files, store, name, recovery, image)
     finally:
-        adb.shell(f"rmdir {store}/.install-lock")
+        adb.shell(f"rmdir {lock}")
 
 
 def apply_locked(args, adb, manifest, files, store, name, recovery, image):
@@ -406,22 +443,16 @@ def apply_locked(args, adb, manifest, files, store, name, recovery, image):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    commands = parser.add_subparsers(dest="command", required=True)
-    for command in ("install", "update"):
-        p = commands.add_parser(command)
-        p.add_argument("--serial", required=True, help="exact adb device serial (no implicit device selection)")
-        p.add_argument("--bundle", type=Path, required=True)
-        p.add_argument("--sha256", required=True, help="out-of-band hash from your trusted local build")
-        p.add_argument("--apply", action="store_true", help="perform device writes; default is read-only preflight")
-        p.add_argument("--allow-development", action="store_true", help="acknowledge unsigned local development build")
-        if command == "install":
-            p.add_argument("--name", help="DNS device name; default encore-biscuit-<serial hash>")
-            p.add_argument("--ssh-public-key-file", type=Path,
-                           help="one Ed25519 or RSA 3072..8192 OpenSSH public key (no options/private key); comment discarded")
-            p.add_argument("--ssh-enable", action="store_true", help="explicitly enable key-only SSH; requires --ssh-public-key-file")
-            p.add_argument("--wifi-ssid", help="use prompted WPA2 credentials over USB instead of default first-boot Improv BLE")
-            p.add_argument("--firmware-dir", type=Path, help="this unit's firmware if not readable in recovery")
-            p.add_argument("--backup-dir", type=Path, required=True, help="new private directory for TWRP/misc backups")
+    p = parser.add_subparsers(required=True).add_parser("install", help="fresh Linux 6.1/AArch64 installation")
+    p.set_defaults(command="install-arm64")
+    p.add_argument("--serial", required=True, help="exact adb device serial (no implicit device selection)")
+    p.add_argument("--bundle", type=Path, required=True)
+    p.add_argument("--sha256", required=True, help="out-of-band hash from your trusted local build")
+    p.add_argument("--apply", action="store_true", help="perform device writes; default is read-only preflight")
+    p.add_argument("--allow-development", action="store_true", help="acknowledge unsigned local development build")
+    p.add_argument("--name", help="new DNS device name; no old configuration is imported")
+    p.add_argument("--twrp-sha256", required=True, help="SHA256 of the independently verified full original recovery partition")
+    p.add_argument("--backup-dir", type=Path, required=True, help="new private local directory for recovery and pairing key")
     args = parser.parse_args()
     try:
         install(args)

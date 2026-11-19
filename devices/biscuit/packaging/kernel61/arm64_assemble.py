@@ -29,9 +29,10 @@ TEMPLATE_SHA256 = "a948a28b3871674b1adabd4a9f47b5d0e6f877f5af8acf6faba6f0a37cb50
 FPGA_SHA256 = "77a558bacdaaf9e343f02f2d74f27a5f2bb2dc8b6d66cc2499b60ed14ef62fe6"
 STORE_ROOTFS = "/store/encore/arm64-probe/rootfs.tar.gz"
 RUNTIME_ROOTFS = "/store/encore/arm64-runtime/rootfs.tar.gz"
+STARTER_FORMAT = "encore-biscuit-arm64-starter-v1"
 
 
-def boot_image(template, image, dtb, ramdisk):
+def boot_image(template, image, dtb, ramdisk, *, compressed_image=None):
     if sha(template) != TEMPLATE_SHA256:
         raise ValueError("not the audited same-unit recovery header")
     header = image_header(image)
@@ -42,7 +43,7 @@ def boot_image(template, image, dtb, ramdisk):
     if (dtb[:4] != b"\xd0\x0d\xfe\xed" or len(dtb) < 40 or
             struct.unpack_from(">I", dtb, 4)[0] != len(dtb) or len(dtb) > 65536):
         raise ValueError("expected one bounded complete appended DTB")
-    payload = gzip.compress(image, mtime=0) + dtb.ljust(65536, b"\0")
+    payload = (gzip.compress(image, mtime=0) if compressed_image is None else compressed_image) + dtb.ljust(65536, b"\0")
     ks, ka, rs, ra, second, sa, tags, page, version, word44 = struct.unpack_from("<10I", template, 8)
     if (len(template) != page or page != 2048 or ka != 0x40008000 or
             ra != 0x46000000 or tags != 0x48000000 or second or version):
@@ -94,10 +95,52 @@ def repack(data, replacements):
     return gzip.compress(buf.getvalue(), mtime=0)
 
 
-def initramfs(busybox, rootfs_hash, microphone_firmware, store_rootfs=STORE_ROOTFS):
+def initramfs(busybox, rootfs_hash, microphone_firmware, store_rootfs=STORE_ROOTFS, *, starter=False):
     init = (HERE / "init").read_text().replace("@RESCUE_ONLY@", "0").replace(
         "@ROOTFS_SHA256@", rootfs_hash).replace(
         "/store/encore/kernel61-trial/rootfs.tar.gz", store_rootfs)
+    if starter:
+        # Only a published transition may mount the store writable. Use an
+        # ordinary mount to replay ext4's journal, then recheck the selector.
+        start = init.index("archive=" + store_rootfs + "\n")
+        end = init.index("# Bounded RAM use", start)
+        init = init[:start] + f'''\
+[ "$($BB cat /store/encore/format)" = {STARTER_FORMAT} ] || rescue install-unpublished
+$BB umount /store || rescue store-unmount
+$BB mount -t ext4 -o noatime,nosuid,nodev,noexec /dev/mmcblk0p15 /store || rescue store-writable
+[ "$($BB cat /store/encore/format)" = {STARTER_FORMAT} ] || rescue install-unpublished
+active=$($BB cat /store/encore/active) || rescue slot-selector
+case "$active" in
+  a) other=b;;
+  b) other=a;;
+  *) rescue slot-selector;;
+esac
+selected=
+for slot in "$active" "$other"; do
+  case "$($BB cat /store/encore/slots/$slot.state 2>/dev/null)" in
+    held|good|'trial 1') ;;
+    *) continue;;
+  esac
+  archive=/store/encore/slots/$slot/rootfs.tar.gz
+  [ -f "$archive" ] && [ ! -L "$archive" ] || continue
+  if printf '%s  %s\\n' '{rootfs_hash}' "$archive" | $BB sha256sum -c -; then
+    selected=$slot
+    break
+  fi
+done
+[ -n "$selected" ] || rescue no-verified-slot
+''' + init[end:]
+        # Keep arm/commit bound to the slot whose verified rootfs was unpacked.
+        # A fallback changes the selector, not either slot's health or attempts.
+        init = init.replace("moved=\n", '''\
+if [ "$selected" != "$active" ]; then
+  next=$($BB mktemp /store/encore/.active.XXXXXX) || rescue slot-selector-write
+  printf '%s\\n' "$selected" > "$next" && $BB sync &&
+    $BB mv -fT "$next" /store/encore/active && $BB sync || rescue slot-selector-write
+fi
+printf '%s\\n' "$selected" > /run/encore/slot || rescue booted-slot
+moved=
+''', 1).replace("encore-biscuit-kernel61-trial-v1", STARTER_FORMAT)
     files = [(name, stat.S_IFDIR | 0o755, b"") for name in
              ("bin", "sbin", "usr", "usr/local", "usr/local/sbin", "dev", "dev/pts",
               "proc", "sys", "run", "store", "newroot", "lib", "lib/firmware")]
@@ -207,7 +250,7 @@ def main():
     helpers = {}
     packages = [("wmtup", "devices/biscuit/cmd/wmtup"), ("btbridge", "cmd/btbridge")]
     for name, package in packages:
-        subprocess.run(["go", "build", "-trimpath", "-tags=biscuit_kernel61", "-o", str(output / name), "./" + package],
+        subprocess.run(["go", "build", "-trimpath", "-o", str(output / name), "./" + package],
                        cwd=ROOT, env=env, check=True)
         data = (output / name).read_bytes()
         native_elf(data, static=True)

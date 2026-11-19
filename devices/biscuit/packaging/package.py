@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Build the Dot Linux environment, including the project-built kernel."""
 
-import argparse
 import gzip
 import hashlib
 import io
@@ -309,16 +308,4 @@ def build(base, binary, wmtup, btbridge, revision, output, kernel_directory, sen
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--base", type=Path, required=True)
-    parser.add_argument("--binary", type=Path, required=True)
-    parser.add_argument("--wmtup", type=Path, required=True)
-    parser.add_argument("--btbridge", type=Path, required=True)
-    parser.add_argument("--kernel-artifact", type=Path, required=True, help="verified project kernel artifact directory")
-    parser.add_argument("--sendspin-artifact", type=Path, required=True, help="locked static ARMv7 companion artifact directory")
-    parser.add_argument("--revision", type=int, required=True)
-    parser.add_argument("--output", type=Path, required=True)
-    args = parser.parse_args()
-    if args.revision < 1:
-        parser.error("development package revision must be positive")
-    build(args.base, args.binary, args.wmtup, args.btbridge, args.revision, args.output, args.kernel_artifact, args.sendspin_artifact)
+    raise SystemExit("The ARMv7 package is retired; use make biscuit-package for Linux 6.1/AArch64")

@@ -60,6 +60,7 @@ func TestAnnouncementsEncryptedAPIHTTPPCMAndIncubatorLifecycle(t *testing.T) {
 	config := Config{Schema: 1, Name: "announcement-test"}
 	d := &biscuitControls{
 		Proxy:         bluetooth.New(managementRadio{}, bluetooth.Options{}),
+		player:        player,
 		music:         newMusic(config, &settings{path: filepath.Join(t.TempDir(), "config.json"), config: config}, player),
 		announcements: newAnnouncementPlayer(engine, player),
 	}

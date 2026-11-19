@@ -7,9 +7,11 @@ put() { printf '%s\n' "$2" > "$1.new"; sync; mv -f "$1.new" "$1"; sync; }
 state() { cat "$STORE/slots/$1.state" 2>/dev/null || echo absent; }
 other() { if [ "$1" = a ]; then echo b; else echo a; fi; }
 valid() { case "$1" in a|b) ;; *) echo 'invalid slot' >&2; exit 1;; esac; }
-[ "$(cat "$STORE/format")" = encore-biscuit-v1 ]
+format=$(cat "$STORE/format")
+case "$format" in encore-biscuit-v1|encore-biscuit-arm64-starter-v1) ;; *) exit 1;; esac
 case "${1:-}" in
 next)
+  [ "$format" = encore-biscuit-v1 ]
   slot=$(cat "$STORE/active"); valid "$slot"
   for candidate in "$slot" "$(other "$slot")"; do
     [ -x "$STORE/slots/$candidate/sbin/init" ] || continue
@@ -28,10 +30,21 @@ next)
 arm)
   slot=$(cat "$BOOTED"); valid "$slot"
   [ "$(cat "$STORE/active")" = "$slot" ]
-  [ "$(state "$slot")" = held ]
-  # This running boot is the first trial; only one subsequent boot remains.
-  # Repeated arm cannot replenish an already-started trial budget.
-  put "$STORE/slots/$slot.state" 'trial 1'
+  if [ "$format" = encore-biscuit-arm64-starter-v1 ]; then
+    # BOOTED is in tmpfs; a second invocation this boot cannot spend another
+    # attempt. Treat an interrupted activation as requiring operator review.
+    mkdir "$BOOTED.armed"
+  fi
+  case "$(state "$slot")" in
+    held) put "$STORE/slots/$slot.state" 'trial 1';;
+    'trial 1')
+      # The starter spends its second attempt on explicit app activation, not
+      # on a reboot into the USB-only hold. Legacy callers cannot re-arm.
+      [ "$format" = encore-biscuit-arm64-starter-v1 ]
+      put "$STORE/slots/$slot.state" 'trial 0';;
+    good) [ "$format" = encore-biscuit-arm64-starter-v1 ];;
+    *) exit 1;;
+  esac
   ;;
 commit)
   slot=$(cat "$BOOTED"); valid "$slot"

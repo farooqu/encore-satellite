@@ -430,10 +430,15 @@ class RecoveryTests(unittest.TestCase):
                               backup_dir=self.root / "private-backup", firmware_dir=self.firmware,
                               bundle=self.root / "bundle.zip")
         self.fail_extract = False
+        self.stock_ok = True
         owner = self
 
         class RecoveryADB(install.ADB):
             def shell(self, command, data=None):
+                if command.startswith("if sh -s check "):
+                    if owner.stock_ok:
+                        return b"ENCORE_STOCK_OK\n"
+                    return b"Stock radio firmware: system_b lacks the supported set\nENCORE_STOCK_FAILED\n"
                 # A partial extraction destroys only the selected target. Raising
                 # after this command tests that it was invalidated before writes.
                 interrupted = owner.fail_extract and "tar -xzf" in command
@@ -483,6 +488,133 @@ class RecoveryTests(unittest.TestCase):
             install.install(self.args)
         self.assertFalse(self.store("").exists())
         self.assertEqual((self.device / "dev/block/mmcblk0p12").read_bytes(), self.twrp)
+
+    def test_fresh_arm64_install_needs_no_legacy_layout(self):
+        from kernel61 import starter_install
+
+        p12 = self.device / "dev/block/mmcblk0p12"
+        twrp = self.twrp.ljust(16 << 20, b"R")
+        p12.write_bytes(twrp)
+        image = b"native ARM64 recovery".ljust(4096, b"I")
+        rootfs = b"verified AArch64 rootfs fixture"
+        self.args.command = "install-arm64"
+        self.args.twrp_sha256 = "0" * 64
+        self.args.sha256 = "fixture digest"
+        self.args.wifi_ssid = None
+        (self.device / "tools/dd").write_text('#!/bin/sh\nexec /usr/bin/dd "$@" conv=notrunc\n')
+        unrelated = self.device / "data/unrelated"
+        unrelated.write_bytes(b"not Encore")
+        with patch.object(starter_install, "load_bundle", return_value=({"package_revision": 1}, rootfs, image)):
+            self.stock_ok = False
+            for apply in (False, True):
+                self.args.apply = apply
+                with self.assertRaisesRegex(ValueError, "system_b lacks"):
+                    install.install(self.args)
+            self.assertFalse(self.args.backup_dir.exists())
+            self.stock_ok = True
+            with self.assertRaisesRegex(ValueError, "independently verified backup"):
+                install.install(self.args)
+            self.assertEqual(p12.read_bytes(), twrp)
+            self.assertFalse(self.store("").exists())
+            self.args.twrp_sha256 = package.sha(twrp)
+            install.install(self.args)
+            with self.assertRaises(RuntimeError):
+                install.install(self.args)
+        self.assertEqual(self.store("format").read_text(), starter_install.FORMAT + "\n")
+        self.assertEqual(self.store("slots/a.state").read_text(), "held\n")
+        self.assertEqual(self.store("slots/b/rootfs.tar.gz").read_bytes(), rootfs)
+        self.assertFalse(self.store("firmware").exists())
+        self.assertEqual(self.store("twrp.img").read_bytes(), twrp)
+        self.assertEqual((self.args.backup_dir / "current-p12.img").read_bytes(), twrp)
+        self.assertEqual(p12.read_bytes(), image + twrp[len(image):])
+        self.assertEqual(unrelated.read_bytes(), b"not Encore")
+        self.assertEqual(sorted(p.name for p in (self.device / "data/encore").iterdir()),
+                         ["config.json", "noise.psk"])
+
+    def test_arm64_transition_publishes_only_after_flash_readback(self):
+        self.check_arm64_transition(corrupt_readback=False)
+
+    def test_arm64_transition_leaves_selector_unpublished_on_bad_readback(self):
+        self.check_arm64_transition(corrupt_readback=True)
+
+    def check_arm64_transition(self, corrupt_readback):
+        from kernel61 import starter_install
+
+        self.bundle(17)
+        install.install(self.args)
+        state = self.device / "data/encore"
+        old_key = (state / "noise.psk").read_bytes()
+        misc = self.device / "dev/block/mmcblk0p8"
+        old_misc = misc.read_bytes()
+        (self.device / "data/unrelated").write_bytes(b"not Encore")
+        firmware = self.store("firmware/WMT_SOC.cfg").read_bytes()
+        p12 = self.device / "dev/block/mmcblk0p12"
+        current = b"current diagnostic".ljust(16 << 20, b"C")
+        p12.write_bytes(current)
+        twrp = self.twrp.ljust(16 << 20, b"T")
+        self.store("twrp.img").write_bytes(twrp)
+        self.store("twrp.img.sha256").write_text(package.sha(twrp) + "  twrp.img\n")
+        self.args.command = "transition-arm64"
+        self.args.backup_dir = self.root / "starter-backup"
+        self.args.twrp_sha256 = "0" * 64
+        (self.device / "tools/dd").write_text('#!/bin/sh\nexec /usr/bin/dd "$@" conv=notrunc\n')
+        image = b"new recovery".ljust(4096, b"I")
+        rootfs = b"verified clean rootfs fixture"
+        real_shell = install.ADB.shell
+        events = []
+
+        def observed_shell(adb, command, data=None):
+            if command.startswith("dd if="):
+                self.assertFalse(self.store("format").exists())
+                self.assertEqual((self.args.backup_dir / "current-p12.img").stat().st_size, len(current))
+                self.assertTrue((self.args.backup_dir / "SHA256SUMS").is_file())
+                self.assertEqual(sorted(p.name for p in state.iterdir()), ["config.json", "noise.psk"])
+                events.append("flash")
+            if command == f"cat {starter_install.P12}" and events == ["flash"]:
+                events.append("read-back")
+                if corrupt_readback:
+                    result = real_shell(adb, command, data)
+                    # A prefix-only check misses this fault in the preserved tail.
+                    return result[:-1] + b"X"
+            if command.startswith("mv /cache/encore/.arm64-transition/format"):
+                self.assertEqual(events, ["flash", "read-back"])
+                events.append("publish")
+            return real_shell(adb, command, data)
+
+        with patch.object(starter_install, "load_bundle", return_value=({"package_revision": 18}, rootfs, image)), \
+                patch.object(install.ADB, "shell", observed_shell):
+            with self.assertRaisesRegex(ValueError, "independently verified backup"):
+                install.install(self.args)
+            self.assertFalse(self.args.backup_dir.exists())
+            self.assertEqual(self.store("format").read_text(), package.FORMAT + "\n")
+            self.assertEqual((state / "noise.psk").read_bytes(), old_key)
+            self.args.twrp_sha256 = package.sha(twrp)
+            if corrupt_readback:
+                with self.assertRaisesRegex(RuntimeError, "selector remains unpublished"):
+                    install.install(self.args)
+                self.assertEqual(events, ["flash", "read-back"])
+            else:
+                install.install(self.args)
+                self.assertEqual(events, ["flash", "read-back", "publish"])
+            with self.assertRaises(RuntimeError):
+                install.install(self.args)  # never guess how to replay a transition
+        if corrupt_readback:
+            self.assertFalse(self.store("format").exists())
+            self.assertEqual(self.store(".arm64-transition/format").read_text(), starter_install.FORMAT + "\n")
+        else:
+            self.assertEqual(self.store("format").read_text(), starter_install.FORMAT + "\n")
+        for slot in "ab":
+            self.assertEqual(self.store(f"slots/{slot}.state").read_text(), "held\n")
+            self.assertEqual(self.store(f"slots/{slot}/rootfs.tar.gz").read_bytes(), rootfs)
+        self.assertEqual(p12.read_bytes(), image + current[len(image):])
+        self.assertEqual(misc.read_bytes(), old_misc)
+        self.assertEqual(self.store("twrp.img").read_bytes(), twrp)
+        self.assertEqual(self.store("firmware/WMT_SOC.cfg").read_bytes(), firmware)
+        self.assertEqual(self.store("archive-arm32-before-18/slots/a.state").read_text(), "trial 2\n")
+        self.assertEqual((self.device / "data/unrelated").read_bytes(), b"not Encore")
+        self.assertEqual((self.device / "data/encore-archive-arm32-before-18/noise.psk").read_bytes(), old_key)
+        self.assertNotEqual((state / "noise.psk").read_bytes(), old_key)
+        self.assertEqual((state / "noise.psk").stat().st_mode & 0o777, 0o600)
 
     def test_clean_install_and_alternating_updates_preserve_identity_and_good_slot(self):
         self.bundle(1)

@@ -33,11 +33,11 @@ func (managementRadio) Scan(ctx context.Context, _ bool, ready func() error, _ f
 // Exercise the production encrypted endpoint, including its combined listing
 // and actual Action dispatch. Only the radio, network adapter and PCM are fake.
 func TestLinuxManagementEncryptedAPI(t *testing.T) {
-	m, err := newManagement()
+	ssh := &sshManager{dataDir: filepath.Join(t.TempDir(), "ssh"), runDir: filepath.Join(t.TempDir(), "run")}
+	m, err := newManagement(ssh)
 	if err != nil {
 		t.Fatal(err)
 	}
-	m.ssh = &sshManager{dataDir: filepath.Join(t.TempDir(), "ssh"), runDir: filepath.Join(t.TempDir(), "run")}
 	m.wifi, _, _ = testWiFiManager(t)
 	stop := startTestWiFiWorker(t, m.wifi)
 	defer stop()
@@ -45,7 +45,7 @@ func TestLinuxManagementEncryptedAPI(t *testing.T) {
 	s := &settings{config: c, path: filepath.Join(t.TempDir(), "config.json")}
 	p := newSpeaker(&speakerPCM{})
 	defer p.Close()
-	d := &biscuitControls{Proxy: bluetooth.New(managementRadio{}, bluetooth.Options{}), music: newMusic(c, s, p), management: m}
+	d := &biscuitControls{Proxy: bluetooth.New(managementRadio{}, bluetooth.Options{}), player: p, music: newMusic(c, s, p), management: m}
 	key, err := esphome.GeneratePSK()
 	if err != nil {
 		t.Fatal(err)
@@ -159,6 +159,85 @@ listing:
 	peer.conn.Close()
 	if err := d.Serve(ctx, listener, esphome.Info{Name: c.Name}, esphome.PSK{}); err == nil {
 		t.Fatal("management endpoint accepted an unprovisioned key")
+	}
+}
+
+func TestLinuxManagementWithoutOptionalServices(t *testing.T) {
+	m, err := newManagement(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.wifi, _, _ = testWiFiManager(t)
+	p := newSpeaker(&speakerPCM{})
+	defer p.Close()
+	d := &biscuitControls{Proxy: bluetooth.New(managementRadio{}, bluetooth.Options{}), player: p, management: m}
+	key, err := esphome.GeneratePSK()
+	if err != nil {
+		t.Fatal(err)
+	}
+	l, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- d.Serve(ctx, l, esphome.Info{Name: "starter-controls"}, key) }()
+	t.Cleanup(func() { cancel(); _ = l.Close(); <-done })
+	peer := newManagementPeer(t, l.Addr().String(), key)
+	defer peer.conn.Close()
+	peer.send(&api.HelloRequest{ClientInfo: "starter-controls", ApiVersionMajor: 1, ApiVersionMinor: 12})
+	if _, ok := peer.receive().(*api.HelloResponse); !ok {
+		t.Fatal("missing encrypted hello")
+	}
+	peer.send(&api.ListEntitiesRequest{})
+	listed := map[string]bool{}
+listing:
+	for {
+		switch v := peer.receive().(type) {
+		case *api.ListEntitiesServicesResponse:
+			listed[v.Name] = true
+		case interface{ GetObjectId() string }:
+			listed[v.GetObjectId()] = true
+		case *api.ListEntitiesDoneResponse:
+			break listing
+		}
+	}
+	for _, want := range []string{"wifi_status", "wifi_stage", "wifi_ssid", "speaker_volume", "speaker_mute", "bluetooth_proxy"} {
+		if !listed[want] {
+			t.Errorf("missing starter control %s", want)
+		}
+	}
+	for name := range listed {
+		if strings.HasPrefix(name, "sendspin") || strings.HasPrefix(name, "ssh_") {
+			t.Errorf("listed unsupported control %s", name)
+		}
+	}
+	// Cached commands for removed controls must not reach a missing worker.
+	peer.send(&api.SwitchCommandRequest{Key: sshEnabledKey, State: true})
+	peer.send(&api.SwitchCommandRequest{Key: musicKey, State: true})
+	peer.send(&api.SwitchCommandRequest{Key: speakerMuteKey, State: true})
+	peer.send(&api.SubscribeStatesRequest{})
+	peer.send(&api.ExecuteServiceRequest{Key: (&esphome.Base{ObjectID: "action:ssh_status"}).Key(), CallId: 42, ReturnResponse: true})
+	seenMute := false
+	for {
+		switch v := peer.receive().(type) {
+		case *api.SwitchStateResponse:
+			if v.Key == speakerMuteKey && v.State {
+				seenMute = true
+			}
+			if v.Key == musicKey || v.Key == sshEnabledKey {
+				t.Fatal("published unsupported switch state")
+			}
+		case *api.TextStateResponse:
+			if v.Key == musicURLKey {
+				t.Fatal("published unsupported Sendspin URL")
+			}
+		case *api.ExecuteServiceResponse:
+			if v.Success || v.CallId != 42 || !seenMute {
+				t.Fatalf("unexpected stale SSH response or missing speaker mute: %v; mute=%v", v, seenMute)
+			}
+			return
+		}
 	}
 }
 
