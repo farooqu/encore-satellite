@@ -64,7 +64,9 @@ type charObj struct {
 
 // OpenPeripheral connects to bluetoothd, exports the service under root (a path of this process's
 // own, such as /org/techo5/improv) and registers it and its advertisement with the first adapter,
-// turning the adapter on if it is off. Close takes it all down again.
+// turning the adapter on if it is off. A nonempty LocalName also sets the adapter's
+// Alias so GAP name reads and scan responses agree. Close unregisters the service
+// and advertisement, but leaves the adapter's name in place.
 //
 // An adapter that can serve GATT but not advertise (a kernel before Add Advertising, such as 3.18)
 // still gets the service: Advertising then reports false, and the caller advertises it some other
@@ -90,6 +92,12 @@ func OpenPeripheral(root dbus.ObjectPath, serviceUUID string, chars []CharSpec, 
 		return nil, err
 	}
 	adapter := object(conn, p.adapter)
+	if ad.LocalName != "" {
+		if err := adapter.SetProperty(adapterIfc+".Alias", dbus.MakeVariant(ad.LocalName)); err != nil {
+			conn.Close()
+			return nil, fmt.Errorf("bluez: set adapter alias: %w", err)
+		}
+	}
 	_ = adapter.Call(propsIfc+".Set", 0, adapterIfc, "Powered", dbus.MakeVariant(true)).Err
 	if err := adapter.Call(gattMgrIfc+".RegisterApplication", 0, root, map[string]dbus.Variant{}).Err; err != nil {
 		conn.Close()

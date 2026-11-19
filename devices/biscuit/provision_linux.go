@@ -159,7 +159,7 @@ func PrepareNetwork(ctx context.Context, c Config) error {
 			})
 		}
 		log.Print("First setup: press Action to authorize Improv Wi-Fi; proxy remains off")
-		if err = bluez.Provision(ctx, improv.Options{Name: c.Name, Version: "0.1.0-dev.0", Hardware: "Echo Dot 2", Authorize: auth, Join: joinWiFi,
+		if err = bluez.Provision(ctx, "Encore Satellite Echo Dot", improv.Options{Name: c.Name, Version: "0.1.0-dev.0", Hardware: "Echo Dot 2", Authorize: auth, Join: joinWiFi,
 			Health: func() error {
 				if err := ctx.Err(); err != nil {
 					return err

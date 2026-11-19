@@ -284,7 +284,10 @@ func TestProvisionWithoutProxyOverDBus(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := prop.Export(server, adapter, prop.Map{adapterIfc: {"Powered": {Value: false, Writable: true}}}); err != nil {
+	if _, err := prop.Export(server, adapter, prop.Map{adapterIfc: {
+		"Powered": {Value: false, Writable: true},
+		"Alias":   {Value: "BlueZ", Writable: true},
+	}}); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -295,7 +298,7 @@ func TestProvisionWithoutProxyOverDBus(t *testing.T) {
 	// No proxy, Noise connection, scanner or GATT central is started. First
 	// boot's locally authorized peripheral role must remain independent.
 	go func() {
-		done <- Provision(ctx, improv.Options{Name: "Setup only", Authorize: auth, Join: func(_ context.Context, wifi improv.WiFi) (string, error) {
+		done <- Provision(ctx, "Encore Satellite Echo Dot", improv.Options{Name: "kitchen-dot", Authorize: auth, Join: func(_ context.Context, wifi improv.WiFi) (string, error) {
 			joined <- wifi
 			return "http://192.0.2.23/", nil
 		}})
@@ -309,6 +312,14 @@ func TestProvisionWithoutProxyOverDBus(t *testing.T) {
 	var objs map[dbus.ObjectPath]map[string]map[string]dbus.Variant
 	if err := server.Object(string(sender), "/org/encore/improv").Call(objMgrIfc+".GetManagedObjects", 0).Store(&objs); err != nil {
 		t.Fatal(err)
+	}
+	alias, err := server.Object(service, adapter).GetProperty(adapterIfc + ".Alias")
+	if err != nil || alias.Value() != "Encore Satellite Echo Dot" {
+		t.Fatalf("adapter alias %v: %v", alias, err)
+	}
+	name, err := server.Object(string(sender), "/org/encore/improv/advert").GetProperty(advertIfc + ".LocalName")
+	if err != nil || name.Value() != "Encore Satellite Echo Dot" {
+		t.Fatalf("advertised name %v: %v", name, err)
 	}
 	chars := map[string]dbus.ObjectPath{}
 	for path, ifcs := range objs {
@@ -342,6 +353,8 @@ func TestProvisionWithoutProxyOverDBus(t *testing.T) {
 	}
 	readUntil(improv.CapabilitiesUUID, []byte{2}) // Device info only, not identify/scan.
 	readUntil(improv.StateUUID, []byte{1})
+	write([]byte{3, 0, 3}) // Device info keeps the per-unit name, not the public BLE label.
+	readUntil(improv.RPCResultUUID, improv.Result(improv.CmdDeviceInfo, "Encore Satellite", "", "", "kitchen-dot"))
 	// Independently encoded Wi-Fi request: command, payload length, strings, checksum.
 	frame := []byte{1, 8, 3, 'l', 'a', 'b', 3, 'p', 's', 'k', 0x8c}
 	write(frame)

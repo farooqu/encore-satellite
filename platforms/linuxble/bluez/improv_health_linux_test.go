@@ -30,14 +30,17 @@ func TestProvisionHealthFollowsRegistrationAndStopsOnAdapterLoss(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	properties, err := prop.Export(server, adapter, prop.Map{adapterIfc: {"Powered": {Value: false, Writable: true}}})
+	properties, err := prop.Export(server, adapter, prop.Map{adapterIfc: {
+		"Powered": {Value: false, Writable: true},
+		"Alias":   {Value: "BlueZ", Writable: true},
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	checks := 0
-	err = Provision(ctx, improv.Options{
+	err = Provision(ctx, "Setup", improv.Options{
 		Authorize: make(chan struct{}),
 		Join: func(context.Context, improv.WiFi) (string, error) {
 			t.Error("unexpected join")

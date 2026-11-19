@@ -18,7 +18,9 @@ import (
 // authorized local recovery action, never just because an online device loses
 // Wi-Fi. It must stop/wait for proxy workers before entry and may resume voice
 // afterwards. A successful registration is not a hardware/provisioning proof.
-func Provision(ctx context.Context, options improv.Options) (err error) {
+// localName is the public Bluetooth name, separate from the per-unit name in
+// the Improv device-info response.
+func Provision(ctx context.Context, localName string, options improv.Options) (err error) {
 	if options.Join == nil || options.Authorize == nil {
 		return errors.New("improv: Join and physical authorization are required")
 	}
@@ -43,7 +45,7 @@ func Provision(ctx context.Context, options improv.Options) (err error) {
 		{UUID: improv.CapabilitiesUUID, Flags: []string{"read"}, Value: []byte{byte(improv.CanDeviceInfo)}},
 	}
 	p, err := OpenPeripheral("/org/encore/improv", improv.ServiceUUID, chars, AdvertSpec{
-		ServiceUUIDs: []string{improv.ServiceUUID}, LocalName: options.Name,
+		ServiceUUIDs: []string{improv.ServiceUUID}, LocalName: localName,
 		ServiceData: map[string][]byte{improv.ServiceDataUUID: improv.ServiceData(improv.AuthorizationRequired, improv.CanDeviceInfo)},
 	})
 	if err != nil {
@@ -101,7 +103,7 @@ func Provision(ctx context.Context, options improv.Options) (err error) {
 	started := make(chan struct{})
 	advertDone := make(chan error, 1)
 	go func() {
-		advertDone <- linuxble.OfferKernel(ctx, uint16(i), improv.Advertisement(improv.AuthorizationRequired, improv.CanDeviceInfo), improv.ScanResponse(options.Name), updates, func() error { close(started); return nil })
+		advertDone <- linuxble.OfferKernel(ctx, uint16(i), improv.Advertisement(improv.AuthorizationRequired, improv.CanDeviceInfo), improv.ScanResponse(localName), updates, func() error { close(started); return nil })
 	}()
 	select {
 	case err := <-advertDone:
