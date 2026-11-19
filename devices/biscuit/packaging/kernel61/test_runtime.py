@@ -188,17 +188,17 @@ class RuntimeTests(unittest.TestCase):
                     self.assertEqual(live.stat().st_mode & 0o777, 0o600)
                     self.assertEqual(result.stdout, "-D\nnl80211\n-i\nwlan0\n-c\n" + str(live) + "\n" + expected)
 
-    def test_starter_requires_separate_enrollment_and_muted_app_activation(self):
+    def test_starter_enrolls_and_starts_muted_app_without_operator_markers(self):
         run = self.root / "run"
         run.mkdir()
         (run / "base-ready").touch()
         (run / "bluetooth-ready").write_text("14\n")
         (run / "udhcpc.pid").write_text("29\n")
-        (self.root / "held-start").touch()
+        (self.root / "encore-base").write_text("encore-biscuit-arm64-starter-v1\n")
         script = self.root / "service"
         source = (HERE / "runtime-service").read_text().replace("/bin/busybox.static", self.bb)
         for source_path, target in (("/run/encore", run), ("/run/udhcpc.pid", run / "udhcpc.pid"),
-                                    ("/etc/encore/held-start", self.root / "held-start"),
+                                    ("/etc/encore-base", self.root / "encore-base"),
                                     ("/sys/devices/platform/amz_privacy/privacy_state", self.root / "privacy"),
                                     ("/usr/local/bin/encore-satellite", self.root / "provision"),
                                     ("/usr/local/sbin/slotctl", self.root / "slotctl"),
@@ -214,20 +214,13 @@ class RuntimeTests(unittest.TestCase):
         def worker(name):
             return [self.bb, "sh", str(script), name, "worker"]
 
-        # Neither a draft app request before enrollment nor a BLE-ready marker
-        # can start a hardware owner from the held boot on its own.
-        (run / "enable-app").touch()
+        # Bluetooth readiness alone cannot start the app or spend a slot attempt.
         with self.assertRaises(subprocess.TimeoutExpired):
             subprocess.run(worker("app"), capture_output=True, timeout=.2)
-        (run / "enable-app").unlink()
         self.assertFalse(events.exists())
-        (run / "enable-enrollment").touch()
         subprocess.run(worker("enrollment"), capture_output=True, timeout=2, check=True)
         self.assertTrue((run / "enrollment-ready").exists())
-        with self.assertRaises(subprocess.TimeoutExpired):
-            subprocess.run(worker("app"), capture_output=True, timeout=.2)
         self.assertEqual(events.read_text(), "provision --provision-only\n")
-        (run / "enable-app").touch()
         for privacy in (None, "0\n", "unknown\n", "1\n"):
             with self.subTest(privacy=privacy):
                 if privacy is not None:
@@ -273,11 +266,9 @@ class RuntimeTests(unittest.TestCase):
             again.terminate()
             again.wait(timeout=3)
 
-    def test_network_manager_retries_only_after_enrollment_request_and_backoff(self):
+    def test_network_manager_starts_after_base_ready_and_retries_with_backoff(self):
         run = self.root / "run"
         run.mkdir()
-        (run / "base-ready").touch()
-        (self.root / "held-start").touch()
         runs = self.root / "runs"
         runner = self.root / "network"
         runner.write_text(f'#!/bin/sh\necho run >> "{runs}"\n[ "$(wc -l < "{runs}")" = 2 ] || exit 7\n')
@@ -286,7 +277,6 @@ class RuntimeTests(unittest.TestCase):
         script.write_text((HERE / "runtime-service").read_text()
                           .replace("/bin/busybox.static", self.bb)
                           .replace("/run/encore", str(run))
-                          .replace("/etc/encore/held-start", str(self.root / "held-start"))
                           .replace("/usr/local/sbin/encore-network", str(runner)))
         guard = subprocess.Popen([self.bb, "sh", str(script), "network"],
                                  stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -294,7 +284,7 @@ class RuntimeTests(unittest.TestCase):
             status = run / "services/network/exit-status"
             eventually((status.parent / "child.pid").exists)
             self.assertFalse(runs.exists())
-            (run / "enable-enrollment").touch()
+            (run / "base-ready").touch()
             eventually(lambda: status.exists() and status.read_text().strip() == "7")
             time.sleep(.15)
             self.assertEqual(runs.read_text(), "run\n")

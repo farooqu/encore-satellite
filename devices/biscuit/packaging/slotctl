@@ -38,8 +38,8 @@ arm)
   case "$(state "$slot")" in
     held) put "$STORE/slots/$slot.state" 'trial 1';;
     'trial 1')
-      # The starter spends its second attempt on explicit app activation, not
-      # on a reboot into the USB-only hold. Legacy callers cannot re-arm.
+      # The starter spends its second attempt on app startup, not during
+      # slot selection or enrollment. Legacy callers cannot re-arm.
       [ "$format" = encore-biscuit-arm64-starter-v1 ]
       put "$STORE/slots/$slot.state" 'trial 0';;
     good) [ "$format" = encore-biscuit-arm64-starter-v1 ];;

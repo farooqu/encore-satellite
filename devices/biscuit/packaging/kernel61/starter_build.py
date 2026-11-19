@@ -21,7 +21,6 @@ def starter_rootfs(base, binaries):
     files = {
         **{"usr/local/bin/" + name: (data, 0o755) for name, data in binaries.items()},
         "etc/encore-base": ((FORMAT + "\n").encode(), 0o644),
-        "etc/encore/held-start": (b"", 0o644),
     }
     for source, target in (("runtime-service", "runtime-service"), ("stock-firmware", "encore-stock-firmware"),
                            ("usb-rescue", "usb-rescue"), ("../run", "encore-run"),

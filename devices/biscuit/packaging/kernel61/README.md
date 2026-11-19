@@ -63,15 +63,15 @@ on. On each boot, Encore reads only `system_a`, verifies and copies the radio
 files to RAM, then unmounts stock. There is no persistent duplicate, and neither
 Encore slot writes either stock system partition. If import fails, base and
 radios stay unavailable; USB rescue and `/run/encore/base.log` remain available.
-From USB, after `base-ready`, creating
-`/run/encore/enable-enrollment` starts networking and provisioning without audio.
-Wait for `enrollment-ready` before separately requesting `enable-app` in the same
-directory. The app service refuses missing/unreadable or unmuted physical
-privacy and never retries on its own. Requests disappear at reboot. The slots
-start `held`, not `good`; only authorized app activation spends an attempt and
+After `base-ready`, radio and networking start automatically. On a fresh
+install, Improv requires the physical Action button to authorize Wi-Fi setup;
+on later boots the starter waits for the saved network instead. After Wi-Fi is
+ready, the app starts automatically if physical privacy is readable and muted.
+Leave privacy muted through startup; if the app refuses to start, mute and
+reboot. The slots start `held`, not `good`; app startup spends an attempt and
 only stable app readiness can commit a slot. Failed health leaves USB available
-without rebooting. Physical boot, enrollment and runtime acceptance remain
-separate from offline assembly and installer checks.
+without rebooting. Persistent enrollment and runtime acceptance still require
+hardware verification.
 
 ## Build locally
 

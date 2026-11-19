@@ -34,7 +34,7 @@ wait_for() {
     "$BB" sleep 1
   done
 }
-wait_for_request() {
+wait_for_marker() {
   until test -f "/run/encore/$1"; do "$BB" sleep 1; done
 }
 privacy_muted() {
@@ -45,13 +45,11 @@ run() {
     base) exec /etc/encore/boot.sh;;
   esac
   wait_for test -e /run/encore/base-ready
-  # /run is born empty on every boot. Once base is ready, starter services
-  # stay parked indefinitely until the USB operator requests enrollment.
-  if test -e /etc/encore/held-start; then wait_for_request enable-enrollment; fi
+  format=$("$BB" cat /etc/encore-base 2>/dev/null || :)
   case "$name" in
     radio)
       fw=/store/encore/firmware
-      if test -e /etc/encore/held-start; then fw=/run/encore/firmware; fi
+      if test "$format" = encore-biscuit-arm64-starter-v1; then fw=/run/encore/firmware; fi
       exec /usr/local/bin/wmtup -patches "$fw" -power;;
     wifi)
       wait_for test -e /sys/class/net/wlan0
@@ -78,12 +76,11 @@ run() {
       /usr/local/bin/encore-satellite --provision-only
       touch /run/encore/enrollment-ready;;
     health)
-      wait_for_request app-started
+      wait_for_marker app-started
       exec /usr/local/sbin/encore-health supervised;;
     app)
-      if test -e /etc/encore/held-start; then
-        wait_for_request enrollment-ready
-        wait_for_request enable-app
+      if test "$format" = encore-biscuit-arm64-starter-v1; then
+        wait_for_marker enrollment-ready
         test -s /run/encore/bluetooth-ready
         wait_for test -s /run/udhcpc.pid
         privacy_muted || { echo 'App activation refused: physical privacy must be muted'; return 1; }
