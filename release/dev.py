@@ -174,10 +174,10 @@ def dependency_paths(root=None):
                      if "build" not in path.relative_to(root).parts], "devices/android-generic/gradle.properties"})
 
 
-def validate_inputs(source_root=None):
+def validate_inputs(source_root=None, *, frozen_initial=False):
     policy = config()
     inputs = policy["inputs"]
-    p.require(policy["builds_enabled"] and isinstance(policy["distribution_review"], str)
+    p.require((frozen_initial or policy["builds_enabled"]) and isinstance(policy["distribution_review"], str)
               and policy["distribution_review"].strip() and isinstance(inputs, dict), "approved dev distribution/input setup required")
     source_root = source_root or ROOT
     p.require(inputs["dependency_sha256"] == {name: p.digest(source_root / name) for name in dependency_paths(source_root)},
@@ -226,7 +226,7 @@ def initial_plan(source_tree):
         p.require(reservation["core_version"] == value["core_version"] and reservation["channel"] == "dev"
                   and reservation["revisions"].get(target) == value["revisions"][target], "initial reservation mismatch")
         p.require(not git("tag", "--list", f"{target}-r{value['revisions'][target]}"), "initial release tag already exists")
-    validate_inputs(source_tree)
+    validate_inputs(source_tree, frozen_initial=True)
     value["builder_source"] = git("rev-parse", "HEAD")
     value["previous"] = {target: None for target in TARGETS}
     commits = git("rev-list", "--reverse", value["source"]).splitlines()
@@ -236,8 +236,8 @@ def initial_plan(source_tree):
     return value
 
 
-def fetch_inputs(output):
-    policy = validate_inputs()
+def fetch_inputs(output, *, frozen_initial=False):
+    policy = validate_inputs(frozen_initial=frozen_initial)
     output.mkdir(parents=True, exist_ok=True)
     # No floating Alpine repositories or source-kit regeneration during release.
     for role, item in policy["inputs"]["files"].items():
@@ -255,7 +255,7 @@ def fetch_inputs(output):
 
 def build(output, aapt, apksigner, initial=None):
     """Assemble both targets twice from reviewed retained inputs; no uploading."""
-    policy = validate_inputs()
+    policy = validate_inputs(frozen_initial=initial is not None)
     registry, ledger = inventory()
     source = git("rev-parse", "HEAD")
     p.require(not git("status", "--porcelain", "--untracked-files=normal"), "clean committed source required")
@@ -272,7 +272,7 @@ def build(output, aapt, apksigner, initial=None):
     work = ROOT / "build/dev-work"
     p.require(not work.exists(), "use a fresh release checkout for each assembly attempt")
     work.mkdir(parents=True)
-    inputs = fetch_inputs(work / "inputs")
+    inputs = fetch_inputs(work / "inputs", frozen_initial=initial is not None)
     for role in ("kernel", "sendspin"):
         (work / role).mkdir()
         with tarfile.open(inputs[role], "r:gz") as archive:

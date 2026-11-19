@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "builds_enabled": true,
+  "builds_enabled": false,
   "publishing_enabled": false,
   "metadata_signing": "offline",
   "distribution_review": "Umer approved the exact five bootstrap-bf44e17-v1 binary/source archives and initial CI candidate distribution on 2026-11-18: https://ampcode.com/threads/T-01a1eb12-5dda-7536-940c-23d12298e1ef . Correspondence/notices evidence and exact hashes: https://ampcode.com/artifacts/release-pipeline-runbook-e81cdbf9-14e7-48e2-85a1-344747a9c26e . The accepted exact-FPGA documented-risk policy is not legal clearance. Firmware publishing, feeds and device deployment remain disabled.",
