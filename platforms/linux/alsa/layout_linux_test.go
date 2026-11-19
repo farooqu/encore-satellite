@@ -10,12 +10,12 @@ import (
 // pinned to what the kernel headers give on a 32-bit and a 64-bit build.
 func TestWordSizedLayouts(t *testing.T) {
 	want := map[int]struct {
-		hwParams, xferi, elemValue uintptr
-		hwParamsNr, readi, writei  uintptr
-		elemRead, elemWrite        uintptr
+		hwParams, xferi, elemValue, status  uintptr
+		hwParamsNr, readi, writei, statusNr uintptr
+		elemRead, elemWrite                 uintptr
 	}{
-		4: {604, 12, 712, 0xc25c4111, 0x800c4151, 0x400c4150, 0xc2c85512, 0xc2c85513},
-		8: {608, 24, 1224, 0xc2604111, 0x80184151, 0x40184150, 0xc4c85512, 0xc4c85513},
+		4: {604, 12, 712, 108, 0xc25c4111, 0x800c4151, 0x400c4150, 0x806c4120, 0xc2c85512, 0xc2c85513},
+		8: {608, 24, 1224, 152, 0xc2604111, 0x80184151, 0x40184150, 0x80984120, 0xc4c85512, 0xc4c85513},
 	}[longSize]
 	if want.hwParams == 0 {
 		t.Fatalf("no reference layout for a %d-byte long", longSize)
@@ -26,12 +26,14 @@ func TestWordSizedLayouts(t *testing.T) {
 	}{
 		{"sizeof(snd_pcm_hw_params)", hwParamsSize, want.hwParams},
 		{"sizeof(snd_xferi)", xferiSize, want.xferi},
+		{"sizeof(snd_pcm_status)", statusSize, want.status},
 		{"xferi struct", unsafe.Sizeof(xferi{}), want.xferi},
 		{"xferi.buf offset", unsafe.Offsetof(xferi{}.buf), longSize},
 		{"sizeof(snd_ctl_elem_value)", elemValueSize, want.elemValue},
 		{"SNDRV_PCM_IOCTL_HW_PARAMS", ioctlHwParams, want.hwParamsNr},
 		{"SNDRV_PCM_IOCTL_READI_FRAMES", ioctlReadi, want.readi},
 		{"SNDRV_PCM_IOCTL_WRITEI_FRAMES", ioctlWritei, want.writei},
+		{"SNDRV_PCM_IOCTL_STATUS", ioctlStatus, want.statusNr},
 		{"SNDRV_CTL_IOCTL_ELEM_INFO", ioctlElemInfo, 0xc1105511},
 		{"SNDRV_CTL_IOCTL_ELEM_READ", ioctlElemRead, want.elemRead},
 		{"SNDRV_CTL_IOCTL_ELEM_WRITE", ioctlElemWrite, want.elemWrite},

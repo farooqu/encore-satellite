@@ -1,6 +1,7 @@
 package alsa
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"os"
@@ -15,9 +16,14 @@ const FormatS16_LE = 2
 // 32, and the sample width is left for the kernel to take from the format.
 const FormatS24_LE = 6
 
+// Native STATUS uses the legacy time32 layout on 32-bit kernels, not libc's
+// optional time64 ABI. Only the first field (the stream state) is read.
+const statusSize = 64 + 11*longSize
+
 var (
 	ioctlWritei = ioc(1, 'A', 0x50, xferiSize)
 	ioctlDrain  = ioc(0, 'A', 0x44, 0)
+	ioctlStatus = ioc(2, 'A', 0x20, statusSize)
 
 	// SNDRV_PCM_IOCTL_DELAY: _IOR('A', 0x21, snd_pcm_sframes_t), a signed long, so word sized.
 	ioctlDelay = ioc(2, 'A', 0x21, longSize)
@@ -204,7 +210,19 @@ func (p *Playback) Delay() (int, error) {
 // Success leaves the stream in SETUP; prepare it for the next turn.
 func (p *Playback) Drain() error {
 	if err := ioctlArgless(p.f.Fd(), ioctlDrain); err != nil {
-		return err
+		if err != syscall.EAGAIN {
+			return err
+		}
+		// Nonblocking DRAIN can return EAGAIN even after it reached SETUP.
+		// Check the kernel state rather than waiting for an ioctl success
+		// that such kernels never return, or mistaking zero delay for done.
+		var status [statusSize]byte
+		if err := ioctl(p.f.Fd(), ioctlStatus, unsafe.Pointer(&status)); err != nil {
+			return err
+		}
+		if binary.LittleEndian.Uint32(status[:4]) != 1 { // SNDRV_PCM_STATE_SETUP
+			return syscall.EAGAIN
+		}
 	}
 	p.started = false
 	return ioctlArgless(p.f.Fd(), ioctlPrepare)
