@@ -89,6 +89,111 @@ func (s scanner) Scan(ctx context.Context, _ bool, ready func() error, _ func(bl
 	return ctx.Err()
 }
 
+type stateTestScanner struct {
+	fail chan struct{}
+}
+
+func (s stateTestScanner) Scan(ctx context.Context, active bool, ready func() error, found func(ble.Advertisement)) error {
+	select {
+	case <-s.fail:
+		return io.ErrUnexpectedEOF
+	default:
+	}
+	if err := ready(); err != nil {
+		return err
+	}
+	// Use different addresses for the two radio modes, so updating only
+	// the state packet without changing the radio cannot pass.
+	a := ble.Advertisement{Address: 0xc0ffee123456, AddressType: 1, Data: []byte{2, 1, 6}}
+	if active {
+		a.Address++
+	}
+	found(a)
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func TestScannerStateAndModeRequests(t *testing.T) {
+	const (
+		active  = api.BluetoothScannerMode_BLUETOOTH_SCANNER_MODE_ACTIVE
+		passive = api.BluetoothScannerMode_BLUETOOTH_SCANNER_MODE_PASSIVE
+	)
+	for _, tc := range []struct {
+		name       string
+		modeSwitch bool
+		configured api.BluetoothScannerMode
+	}{
+		{"fixed active", false, active},
+		{"switchable", true, passive},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			radio := stateTestScanner{fail: make(chan struct{})}
+			p := bluetooth.New(radio, bluetooth.Options{Enabled: true, ModeSwitch: tc.modeSwitch})
+			l := &pipeListener{conns: make(chan net.Conn), done: make(chan struct{})}
+			s := &esphome.Server{Handler: p, Info: esphome.Info{BluetoothFeatures: p.Features()}, Logger: slog.New(slog.DiscardHandler)}
+			ctx, cancel := context.WithCancel(context.Background())
+			serverDone, proxyDone := make(chan struct{}), make(chan struct{})
+			go func() { defer close(serverDone); _ = s.Serve(ctx, l) }()
+			go func() { defer close(proxyDone); p.Run(ctx) }()
+			a, peer := net.Pipe()
+			t.Cleanup(func() { _ = peer.Close(); cancel(); <-serverDone; <-proxyDone })
+			_ = peer.SetDeadline(time.Now().Add(5 * time.Second))
+			l.conns <- a
+			send(t, peer, &api.HelloRequest{})
+			receive(t, peer, &api.HelloResponse{})
+			send(t, peer, &api.DeviceInfoRequest{})
+			info := &api.DeviceInfoResponse{}
+			receive(t, peer, info)
+			if flags := esphome.BluetoothFeature(info.BluetoothProxyFeatureFlags); flags&esphome.BluetoothRawAdvertisements == 0 || (flags&esphome.BluetoothStateAndMode != 0) != tc.modeSwitch {
+				t.Fatalf("unexpected scanner feature flags: %#x", flags)
+			}
+			checkState := func(state esphome.ScannerState, mode api.BluetoothScannerMode) {
+				t.Helper()
+				got := &api.BluetoothScannerStateResponse{}
+				receive(t, peer, got)
+				if got.State != state || got.Mode != mode || got.ConfiguredMode != tc.configured {
+					t.Fatalf("got %v, want %s with mode %s and configured mode %s", got, state, mode, tc.configured)
+				}
+			}
+			checkScan := func(mode api.BluetoothScannerMode, address uint64) {
+				t.Helper()
+				checkState(esphome.ScannerStarting, mode)
+				checkState(esphome.ScannerRunning, mode)
+				ads := &api.BluetoothLERawAdvertisementsResponse{}
+				receive(t, peer, ads)
+				if len(ads.Advertisements) == 0 || ads.Advertisements[0].Address != address {
+					t.Fatalf("got %v, want raw advertisements from %x", ads, address)
+				}
+			}
+			send(t, peer, &api.SubscribeBluetoothLEAdvertisementsRequest{Flags: 1})
+			if tc.modeSwitch {
+				checkScan(passive, 0xc0ffee123456)
+				send(t, peer, &api.BluetoothScannerSetModeRequest{Mode: active})
+				checkScan(active, 0xc0ffee123457)
+				send(t, peer, &api.BluetoothScannerSetModeRequest{Mode: passive})
+				checkScan(passive, 0xc0ffee123456)
+			} else {
+				checkScan(active, 0xc0ffee123457)
+			}
+			p.SetPaused(true)
+			checkState(esphome.ScannerStopped, tc.configured)
+			close(radio.fail)
+			p.SetPaused(false)
+			checkState(esphome.ScannerStarting, tc.configured)
+			checkState(esphome.ScannerFailed, tc.configured) // Radio failed before ready; no RUNNING.
+
+			unsupported := api.BluetoothScannerMode(2)
+			if !tc.modeSwitch {
+				unsupported = passive
+			}
+			send(t, peer, &api.BluetoothScannerSetModeRequest{Mode: unsupported})
+			if _, err := peer.Read(make([]byte, 1)); err != io.EOF {
+				t.Fatalf("unsupported mode must be rejected, read error = %v", err)
+			}
+		})
+	}
+}
+
 func TestStalledStateSubscribersDoNotBlockSettingsOrScanPause(t *testing.T) {
 	radio := scanner{started: make(chan context.Context, 1)}
 	p := bluetooth.New(radio, bluetooth.Options{SaveEnabled: func(bool) error { return nil }})

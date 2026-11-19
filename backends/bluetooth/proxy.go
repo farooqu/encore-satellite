@@ -139,7 +139,7 @@ func (b *Proxy) handle(c *esphome.Conn, msg proto.Message) (bool, error) {
 	switch m := msg.(type) {
 	case *api.SubscribeBluetoothLEAdvertisementsRequest:
 		if b.scanner == nil {
-			return true, c.Send(scannerState(esphome.ScannerFailed, false))
+			return true, c.Send(b.scannerState(esphome.ScannerFailed, false))
 		}
 		if m.Flags&1 == 0 {
 			return true, errors.New("assist: raw BLE advertisements must be negotiated")
@@ -196,12 +196,16 @@ func (b *Proxy) closed(c *esphome.Conn) {
 	}
 }
 
-func scannerState(state esphome.ScannerState, active bool) *api.BluetoothScannerStateResponse {
+func (b *Proxy) scannerState(state esphome.ScannerState, active bool) *api.BluetoothScannerStateResponse {
+	configured := api.BluetoothScannerMode_BLUETOOTH_SCANNER_MODE_PASSIVE
+	if b.scanner != nil && !b.modeSwitch {
+		configured = api.BluetoothScannerMode_BLUETOOTH_SCANNER_MODE_ACTIVE
+	}
 	mode := api.BluetoothScannerMode_BLUETOOTH_SCANNER_MODE_PASSIVE
 	if active {
 		mode = api.BluetoothScannerMode_BLUETOOTH_SCANNER_MODE_ACTIVE
 	}
-	return &api.BluetoothScannerStateResponse{State: state, Mode: mode, ConfiguredMode: api.BluetoothScannerMode_BLUETOOTH_SCANNER_MODE_PASSIVE}
+	return &api.BluetoothScannerStateResponse{State: state, Mode: mode, ConfiguredMode: configured}
 }
 
 func (b *Proxy) Run(ctx context.Context) {
@@ -231,13 +235,13 @@ func (b *Proxy) Run(ctx context.Context) {
 			continue
 		}
 		if paused {
-			if err := c.Send(scannerState(esphome.ScannerStopped, active)); err != nil {
+			if err := c.Send(b.scannerState(esphome.ScannerStopped, active)); err != nil {
 				b.closed(c)
 			}
 			cancel()
 			continue
 		}
-		if err := c.Send(scannerState(esphome.ScannerStarting, active)); err != nil {
+		if err := c.Send(b.scannerState(esphome.ScannerStarting, active)); err != nil {
 			b.closed(c)
 			cancel()
 			continue
@@ -252,7 +256,7 @@ func (b *Proxy) Run(ctx context.Context) {
 			}
 		}()
 		_ = b.scanner.Scan(scanCtx, active, func() error {
-			return c.Send(scannerState(esphome.ScannerRunning, active))
+			return c.Send(b.scannerState(esphome.ScannerRunning, active))
 		}, func(a ble.Advertisement) {
 			knownType := a.AddressType <= 1
 			scanOnlyUnknown := b.central == nil && a.AddressType == ble.AddressTypeUnknown
@@ -270,7 +274,7 @@ func (b *Proxy) Run(ctx context.Context) {
 		cancel()
 		<-written // Fence the old batch writer before starting a new scan.
 		if failed {
-			_ = c.Send(scannerState(esphome.ScannerFailed, active))
+			_ = c.Send(b.scannerState(esphome.ScannerFailed, active))
 		}
 	}
 }

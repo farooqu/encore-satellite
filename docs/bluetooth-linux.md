@@ -21,6 +21,17 @@ with the proxy OFF; forwarding advertisements does not provision Wi-Fi.
   cache clearing, connection-parameter setting, scanner-mode switching, or
   extended advertisements. A scan-only direct-H4 host advertises only scan/raw
   (and mode switching only if actually supported), never active GATT or pairing.
+- Fixed-active proxies send scanner state on the advertisement subscription,
+  with both the scan mode and configured mode set to active. `RUNNING` follows
+  scanner readiness; pause/OFF and scan failure are distinct states. This is
+  independent of advertisement delivery and slot allocation. Home Assistant
+  Core 2026.11.1 with `bleak-esphome` 4.0.0 listens for these packets only when
+  `FEATURE_STATE_AND_MODE` is set. Its frontend displays a missing current
+  mode as **No scanning**, even while receiving advertisements. Do not set that
+  bit for BlueZ discovery: HA can then send passive-mode requests, which this
+  scanner cannot honor. The compatible client fix is to listen for optional
+  state packets on raw subscriptions, while keeping mode commands, mode
+  settings and the first-state retry watchdog gated by the existing bit.
 - Just Works bonding uses a private `NoInputNoOutput` agent scoped to the
   requested device. PIN/passkey entry and numeric confirmation are rejected,
   not invented or silently approved. No global discoverability/default pairing
