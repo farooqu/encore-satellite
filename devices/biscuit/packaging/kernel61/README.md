@@ -67,17 +67,19 @@ radios stay unavailable; USB rescue and `/run/encore/base.log` remain available.
 After `base-ready`, radio and networking start automatically. On a fresh
 install, Improv requires the physical Action button to authorize Wi-Fi setup;
 on later boots the starter waits for the saved network instead. After Wi-Fi is
-ready, the app starts automatically if physical privacy is readable and muted.
-Leave privacy muted through startup; if the app refuses to start, mute and
-reboot. The slots start `held`, not `good`; app startup spends an attempt and
-only stable app readiness can commit a slot. Failed health leaves USB available
-without rebooting. Persistent enrollment and runtime acceptance still require
-hardware verification.
+ready, the app starts regardless of the physical privacy state. The microphone
+stays off while muted or while the state is unreadable; capture starts or
+resumes only after the driver confirms it is unmuted. The slots start `held`,
+not `good`; app startup spends an attempt and only stable app readiness can
+commit a slot. App readiness does not require an active microphone: capture
+may be safely disabled by privacy. Failed health leaves USB available without
+rebooting. Persistent enrollment and runtime acceptance still require hardware
+verification.
 
 ### Add the ESPHome controls to Home Assistant
 
 After Wi-Fi enrollment and app startup, press **Action again**, preferably with
-physical privacy still muted. Then add the discovered Encore device under Home
+physical privacy muted. Then add the discovered Encore device under Home
 Assistant **Settings → Devices & services** (or add ESPHome by IP, TCP 6053).
 Home Assistant Core 2026.10.4 generates the permanent key and transmits it via
 zero-PSK Noise. Encore saves it privately to `/data/encore/noise.psk` and closes
@@ -181,10 +183,11 @@ kernel with the retained `audiofix1` rootfs as its userspace input.
 
 ## Contracts implemented
 
-- The native runtime requires this kernel's standalone privacy node
-  and exact input names `mtk-pmic-keys`, `keys`, `action_key`. The latter two
-  are platform node names used by `gpio_keys`, not `gpio-keys` compatible
-  strings. All three groups are required. There is no silent legacy fallback.
+- Microphone capture requires this kernel's standalone privacy node to report
+  unmuted. The native runtime requires the exact input names `mtk-pmic-keys`,
+  `keys`, `action_key`. The latter two are platform node names used by
+  `gpio_keys`, not `gpio-keys` compatible strings. All three groups are required.
+  There is no silent legacy fallback.
 - Speaker configuration selects `Speaker Codec Profile=Flat` before playback
   prepare. Existing conservative software gain/routing remains; no copied
   positive gain boost, Radar crossover or claimed acoustic calibration.

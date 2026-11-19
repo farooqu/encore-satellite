@@ -34,7 +34,7 @@ func packagedExecutable(path string) bool {
 // Run opens the real host before exposing this package's sole Incubator backend. It does
 // not provision the base, start Wi-Fi, execute shell commands or run HTTP control.
 // ReadyPath is ephemeral startup readiness, NOT a hardware qualification result.
-func Run(parent context.Context, c Config, requireMutedStart bool) error {
+func Run(parent context.Context, c Config) error {
 	_ = os.Remove(ReadyPath)
 	defer os.Remove(ReadyPath)
 	if err := syscall.Sethostname([]byte(c.Name)); err != nil {
@@ -43,13 +43,8 @@ func Run(parent context.Context, c Config, requireMutedStart bool) error {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 	gate := linux.NewPrivacy(func() (bool, error) { return linux.ReadPrivacy(privacyState) })
-	muted, err := gate.Check(nil)
-	if err != nil {
-		return errors.New("dot: authoritative privacy driver is required")
-	}
-	if requireMutedStart && !muted {
-		return errors.New("dot: the supervised starter requires physical privacy muted before opening audio")
-	}
+	// An unreadable state is muted; the capture worker keeps checking it.
+	muted, _ := gate.Check(nil)
 	mixer, err := alsa.OpenMixer(0)
 	if err != nil {
 		return err

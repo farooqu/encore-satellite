@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"sync"
 	"sync/atomic"
@@ -276,12 +277,18 @@ func captureLossMonitor(m captureControls) (func() (bool, error), error) {
 func capture(ctx context.Context, pcm capturePCM, loss func() (bool, error), gate *linux.Privacy, voice *incubator.Server, meter *captureMeter, ready func(), privacy ...func(bool)) error {
 	engine := voice.Engine
 	defer meter.clear()
-	setPrivacy := func(muted bool) {
+	reportedUnavailable := false
+	setPrivacy := func(muted bool, err error) {
 		if muted {
+			engine.SetMuted(true)
 			meter.clear()
 		}
 		for _, notify := range privacy {
 			notify(muted)
+		}
+		if err != nil && !reportedUnavailable {
+			log.Printf("dot: privacy state unavailable; microphone capture stays off while unreadable: %v", err)
+			reportedUnavailable = true
 		}
 	}
 	b := make([]byte, 320*27)
@@ -312,19 +319,15 @@ func capture(ctx context.Context, pcm capturePCM, loss func() (bool, error), gat
 			// even when Read succeeds. Never publish before this check.
 			lost, lossErr = loss()
 		})
-		setPrivacy(muted || privacyErr != nil)
+		setPrivacy(muted, privacyErr)
 		if muted {
 			clear(b)
-			engine.SetMuted(true)
 		}
 		if muted && started {
 			if err := pcm.Rewind(); err != nil {
 				return err
 			}
 			started, discontinuity = false, true
-		}
-		if privacyErr != nil {
-			return errors.New("dot: privacy state unavailable; capture closed")
 		}
 		if lossErr != nil {
 			clear(b)
@@ -363,15 +366,9 @@ func capture(ctx context.Context, pcm capturePCM, loss func() (bool, error), gat
 					meter.clear()
 				}
 			})
-			setPrivacy(muted || privacyErr != nil)
-			if muted {
-				engine.SetMuted(true)
-			}
+			setPrivacy(muted, privacyErr)
 			clear(samples)
 			clear(b)
-			if privacyErr != nil {
-				return errors.New("dot: privacy state unavailable; capture closed")
-			}
 			if muted {
 				if err := pcm.Rewind(); err != nil {
 					return err
@@ -386,8 +383,8 @@ func capture(ctx context.Context, pcm capturePCM, loss func() (bool, error), gat
 				}
 			}
 		}
-		// A muted startup may be ready without sampling the microphones: the
-		// prepared PCM, mixer and controls were opened, the physical cut is read.
+		// The app can be ready without sampling when the privacy gate denies
+		// capture. This is not microphone readiness; keep polling the gate.
 		if muted && !announced {
 			ready()
 			announced = true

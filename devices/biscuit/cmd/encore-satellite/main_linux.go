@@ -33,8 +33,7 @@ func main() {
 	if len(os.Args) == 2 && os.Args[1] == "--provision-only" {
 		return
 	}
-	requireMutedStart := len(os.Args) == 2 && os.Args[1] == "--require-muted-start"
-	if err = biscuit.Run(ctx, c, requireMutedStart); err != nil {
+	if err = biscuit.Run(ctx, c); err != nil {
 		log.Fatal(err)
 	}
 }

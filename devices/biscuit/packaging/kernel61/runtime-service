@@ -37,9 +37,6 @@ wait_for() {
 wait_for_marker() {
   until test -f "/run/encore/$1"; do "$BB" sleep 1; done
 }
-privacy_muted() {
-  value=$(cat /sys/devices/platform/amz_privacy/privacy_state) && test "$value" = 1
-}
 run() {
   case "$name" in
     base) exec /etc/encore/boot.sh;;
@@ -88,11 +85,9 @@ run() {
         wait_for_marker enrollment-ready
         test -s /run/encore/bluetooth-ready
         wait_for test -s /run/udhcpc.pid
-        privacy_muted || { echo 'App activation refused: physical privacy must be muted'; return 1; }
         /usr/local/sbin/slotctl arm
-        privacy_muted || { echo 'App activation refused: physical privacy changed'; return 1; }
         touch /run/encore/app-started
-        exec /usr/local/sbin/encore-run --require-muted-start
+        exec /usr/local/sbin/encore-run
       fi
       wait_for test -s /run/udhcpc.pid
       exec /usr/local/sbin/encore-run;;

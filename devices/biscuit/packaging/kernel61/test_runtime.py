@@ -205,7 +205,7 @@ class RuntimeTests(unittest.TestCase):
                     self.assertEqual(live.stat().st_mode & 0o777, 0o600)
                     self.assertEqual(result.stdout, "-D\nnl80211\n-i\nwlan0\n-c\n" + str(live) + "\n" + expected)
 
-    def test_starter_enrolls_and_starts_muted_app_without_operator_markers(self):
+    def test_starter_enrolls_and_launches_app_without_requiring_privacy_state(self):
         run = self.root / "run"
         run.mkdir()
         (run / "base-ready").touch()
@@ -240,13 +240,15 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(events.read_text(), "provision --provision-only\n")
         for privacy in (None, "0\n", "unknown\n", "1\n"):
             with self.subTest(privacy=privacy):
+                events.unlink(missing_ok=True)
+                (run / "app-started").unlink(missing_ok=True)
+                (self.root / "privacy").unlink(missing_ok=True)
                 if privacy is not None:
                     (self.root / "privacy").write_text(privacy)
                 result = subprocess.run(worker("app"), capture_output=True, timeout=2)
-                self.assertEqual(result.returncode == 0, privacy == "1\n", result.stderr)
-                self.assertEqual((run / "app-started").exists(), privacy == "1\n")
-                expected = "provision --provision-only\n" + ("slotctl arm\napp --require-muted-start\n" if privacy == "1\n" else "")
-                self.assertEqual(events.read_text(), expected)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertTrue((run / "app-started").exists())
+                self.assertEqual(events.read_text(), "slotctl arm\napp\n")
 
     def test_failed_service_parks_and_never_duplicates_even_after_guard_restart(self):
         runner = self.root / "wmtup"

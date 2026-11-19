@@ -69,7 +69,7 @@ func (s *captureStub) Read(b []byte) (int, error) {
 }
 
 func TestCapturePrivacyAtOSBoundaryAndAfterRead(t *testing.T) {
-	for _, scenario := range []string{"open", "initially_muted", "mute_during_read", "driver_error"} {
+	for _, scenario := range []string{"open", "initially_muted", "mute_during_read", "driver_error", "driver_error_during_read"} {
 		t.Run(scenario, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
@@ -83,8 +83,9 @@ func TestCapturePrivacyAtOSBoundaryAndAfterRead(t *testing.T) {
 			}
 			var muted atomic.Bool
 			muted.Store(scenario == "initially_muted")
+			unreadable := scenario == "driver_error"
 			gate := linux.NewPrivacy(func() (bool, error) {
-				if scenario == "driver_error" {
+				if unreadable {
 					return false, errors.New("state unavailable")
 				}
 				return muted.Load(), nil
@@ -92,6 +93,8 @@ func TestCapturePrivacyAtOSBoundaryAndAfterRead(t *testing.T) {
 			pcm := &captureStub{}
 			if scenario == "mute_during_read" {
 				pcm.duringRead = func() { muted.Store(true) }
+			} else if scenario == "driver_error_during_read" {
+				pcm.duringRead = func() { unreadable = true }
 			}
 			ready := false
 			meter := &captureMeter{origin: time.Now()}
@@ -106,12 +109,8 @@ func TestCapturePrivacyAtOSBoundaryAndAfterRead(t *testing.T) {
 			if meter.snapshot(time.Now()).ready {
 				t.Fatal("capture exit retained visual observation")
 			}
-			if scenario == "driver_error" {
-				if err == nil || ready {
-					t.Fatal("unreadable privacy declared ready")
-				}
-			} else if err != nil || !ready {
-				t.Fatalf("capture: %v ready=%v", err, ready)
+			if err != nil || !ready {
+				t.Fatalf("capture: %v app ready=%v", err, ready)
 			}
 			var audioCommands []session.Command
 			for _, c := range l.commands {
@@ -131,14 +130,58 @@ func TestCapturePrivacyAtOSBoundaryAndAfterRead(t *testing.T) {
 				if len(audioCommands) != 0 || !e.Snapshot().Muted || !l.closed {
 					t.Fatal("muted capture escaped OS boundary")
 				}
-				if scenario != "mute_during_read" && pcm.reads != 0 {
-					t.Fatal("OS acquired muted audio")
+				wantReads := 0
+				if scenario == "mute_during_read" || scenario == "driver_error_during_read" {
+					wantReads = 1
 				}
-				if scenario == "mute_during_read" && pcm.rewinds != 1 {
+				if pcm.starts != wantReads || pcm.reads != wantReads {
+					t.Fatalf("PCM starts=%d reads=%d, want %d each", pcm.starts, pcm.reads, wantReads)
+				}
+				for _, b := range pcm.buffer {
+					if b != 0 {
+						t.Fatal("capture retained discarded audio")
+					}
+				}
+				if pcm.rewinds != wantReads {
 					t.Fatal("pending kernel audio not discarded")
 				}
 			}
 		})
+	}
+}
+
+func TestCaptureRecoversFromUnreadablePrivacyWithoutRestart(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	engine := session.New(silentPlayer{})
+	pcm := &captureStub{}
+	meter := &captureMeter{origin: time.Now()}
+	state := "unreadable"
+	gate := linux.NewPrivacy(func() (bool, error) {
+		if state == "unreadable" {
+			return false, errors.New("state unavailable")
+		}
+		return state == "muted", nil
+	})
+	resumed := false
+	err := capture(ctx, pcm, func() (bool, error) { return false, nil }, gate, &incubator.Server{Engine: engine}, meter, func() {
+		if state != "unreadable" || !engine.Snapshot().Muted || pcm.starts != 0 || pcm.reads != 0 {
+			t.Fatal("app must start with no PCM activity while privacy is unreadable")
+		}
+		state = "muted"
+	}, func(muted bool) {
+		if state == "muted" {
+			if !muted || !engine.Snapshot().Muted || pcm.starts != 0 || pcm.reads != 0 {
+				t.Fatal("a readable muted state must not resume capture")
+			}
+			state = "unmuted"
+		} else if !muted && meter.snapshot(time.Now()).ready {
+			resumed = !engine.Snapshot().Muted
+			cancel()
+		}
+	})
+	if err != nil || !resumed || pcm.starts != 1 {
+		t.Fatalf("capture did not resume: %v resumed=%v starts=%d", err, resumed, pcm.starts)
 	}
 }
 
