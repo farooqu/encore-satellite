@@ -222,11 +222,23 @@ func TestNativeWireEvidenceEndpointingDrainAndFollowUp(t *testing.T) {
 
 func TestNativeAnnouncementOwnsMultipleStreamsUntilInactive(t *testing.T) {
 	p := &speaker{}
-	e, address := start(t, p)
+	s, address := startServer(t, p, true) // Biscuit enables pushed wake models.
+	e := s.Engine
 	c := connect(t, address)
-	receive(t, c, 0x01)
+	hello := object(t, receive(t, c, 0x01))
+	if hello["monitor"] != false || (hello["monitor_aec"] != nil && hello["monitor_aec"] != false) {
+		t.Fatal("playback and wake-model support must not claim People recording support", hello)
+	}
+	// An unsupported MONITOR request must not stream the microphone during playback.
+	send(t, c, 0x14, []byte(`{"active":true,"intercom":false}`))
 	send(t, c, 0x12, []byte(`{"type":"announcement","data":{"active":true}}`))
-	for _, pcm := range [][]byte{{31, 0, 0, 128}, {254, 255, 1, 1}} {
+	for i, pcm := range [][]byte{{31, 0, 0, 128}, {254, 255, 1, 1}} {
+		if i == 1 {
+			// The first drain confirms the server already read MONITOR.
+			if err := s.Capture(audio.Frame{Samples: []int16{11, -257, 513}}); err != nil {
+				t.Fatal(err)
+			}
+		}
 		send(t, c, 0x10, pcm)
 		send(t, c, 0x11, nil)
 		receive(t, c, 0x06)
