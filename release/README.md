@@ -11,9 +11,9 @@ remains disabled. Reserving versions does not build, sign, publish or qualify th
 Android now has a development APK and a gated signing/update foundation; see
 [Android signing and updates](android-updates.md). No production trust roots,
 published feeds or release credentials are provisioned by this repository.
-There are no supported device releases. The Dot now has a
-local development builder and explicitly invoked USB/recovery installer/updater;
-its local revisions do not change this release inventory or qualify hardware.
+There are no supported device releases. The Dot's current local development
+builder and USB/recovery installer target Linux 6.1/AArch64 only; local
+revisions do not change this release inventory or qualify hardware.
 Its bundle is the Dot Linux environment, including a project-built kernel,
 recovery initramfs and radio/userspace services, not an app for preinstalled Linux.
 The dedicated `biscuit-kernel.yml` workflow builds and verifies pinned kernel inputs.
@@ -25,7 +25,9 @@ Durable corresponding-source retention and signing remain release gates.
 The [publishing runbook](publishing.md) covers main-driven dev automation,
 offline preparation, signed receipts, immutable binary/source releases and
 explicit stable promotion/renewal. `dev-release.yml` plans versions/changelogs
-after green main checks. Separately approved build setup appends central
+after green main checks. New cohort builds are held until reviewed AArch64
+inputs and release/update validation replace the historical ARMv7 path.
+The exact frozen initial-source reproduction is separate. Approved build setup appends central
 reservations and prepares both experimental targets, twice, with an already
 signed APK and matching source kits/evidence. Publication remains **disabled**;
 metadata keys stay offline, and CI has no metadata signer/publisher job. A later

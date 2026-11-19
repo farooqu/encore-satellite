@@ -1,11 +1,10 @@
 # Echo Dot (2nd generation) development package
 
-**Experimental, never released, not hardware-qualified.** There is now a real
-Linux environment: project-built ARMv7 kernel, recovery initramfs, Alpine userspace,
-radio services, Satellite runtime and USB/recovery tooling, not an app requiring an
-existing Linux installation. Do not flash a household device expecting a finished Techo5 replacement.
-`profile.json` and the central registry remain planned/revision-zero because no
-supported release or provisioned public update channel exists. Other Echo models are not supported.
+**Experimental, not hardware-qualified.** Biscuit builds use Linux 6.1.178,
+Alpine 3.22 AArch64, the native Encore runtime and a separate USB recovery
+environment. See [the current build and fresh-install instructions](packaging/kernel61/README.md).
+The ARMv7 setup below is historical evidence, not an installation, build or
+update path for new devices. Other Echo models are not supported.
 
 ## Internal names
 
@@ -42,7 +41,7 @@ promised. Do not rewrite retained provenance, source kits, backups or device dat
 The frozen first private candidate remains built from its original commit and
 does not need this rename for physical preflight; no device migration is performed.
 
-## What is implemented
+## Historical ARMv7 baseline and shared device behavior
 
 - Static Go Linux ARMv7 executable explicitly assembling the shared engine,
   Linux host primitives, Biscuit wiring and the native Incubator backend only.
@@ -476,7 +475,7 @@ partitions alone. Cache (p15) holds `/encore/{slots/a,slots/b,firmware}`; userda
 (p16) holds `/encore` configuration and Noise identity. MISC's recovery command
 field selects Linux on future boots; Android slot metadata is not changed.
 
-## Build locally
+## Historical ARMv7 build recipe
 
 Requirements: Linux x86-64, Go from `go.mod`, Python 3.12+, Git, kernel build tools
 (see the workflow below), CMake 3.22+, Ninja, a host C++20 compiler, binutils/readelf,
@@ -610,7 +609,7 @@ Use it to correct `/data/encore/config.json` or the supplicant configuration and
 reboot. Assist's generated Noise key is `/data/encore/noise.psk`; read it privately
 over this console for HA pairing, never publish it in a log or screenshot.
 
-## Encore-only updates and recovery
+## Historical ARMv7 updates and recovery
 
 From the USB console, `encore-recovery twrp --apply` restores the verified saved
 TWRP image and reboots into it. Run `install.py update` with `--serial`, `--bundle`
