@@ -28,6 +28,8 @@ import (
 	"syscall"
 	"time"
 	"unsafe"
+
+	"golang.org/x/sys/unix"
 )
 
 // The driver's ioctls (wmt_dev.h), encoded the asm-generic way: direction in the top two bits, then
@@ -42,10 +44,10 @@ func iow(nr, size uintptr) uintptr {
 }
 
 var (
-	setPatchName = iow(4, 4)  // char * — the directory, for the driver's own logging
-	setSTPMode   = iow(5, 4)  // int — (fm << 4) | stp
-	setPatchNum  = iow(14, 4) // int — how many patches follow
-	setPatchInfo = iow(15, 4) // struct wmt_patch_info *
+	setPatchName = iow(4, unsafe.Sizeof(uintptr(0)))  // char * — native driver pointer size
+	setSTPMode   = iow(5, 4)                          // int — (fm << 4) | stp
+	setPatchNum  = iow(14, 4)                         // int — how many patches follow
+	setPatchInfo = iow(15, unsafe.Sizeof(uintptr(0))) // char * encoding, struct wmt_patch_info payload
 )
 
 // The host interface this board uses: STP over BTIF, FM over the common path (wmt_dev.h, wmt_core.h).
@@ -252,30 +254,21 @@ func patchAddr(path string) ([4]byte, error) {
 	return out, nil
 }
 
-// pollfd is poll(2)'s argument.
-type pollfd struct {
-	fd      int32
-	events  int16
-	revents int16
-}
-
-const pollIn = 0x1
-
 // wait blocks until the driver has something to say.
 func wait(fd int) error {
-	fds := []pollfd{{fd: int32(fd), events: pollIn}}
+	fds := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
 	for {
-		_, _, errno := syscall.Syscall(syscall.SYS_POLL, uintptr(unsafe.Pointer(&fds[0])), 1, uintptr(pollTimeoutMS))
-		switch errno {
-		case 0:
-			if fds[0].revents&pollIn != 0 {
+		_, err := unix.Poll(fds, pollTimeoutMS)
+		switch err {
+		case nil:
+			if fds[0].Revents&unix.POLLIN != 0 {
 				return nil
 			}
 			// Timed out with nothing to read: go round again, so a chip reset still finds us here.
-			fds[0].revents = 0
-		case syscall.EINTR:
+			fds[0].Revents = 0
+		case unix.EINTR:
 		default:
-			return errno
+			return err
 		}
 	}
 }
