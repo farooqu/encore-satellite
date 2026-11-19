@@ -1,0 +1,91 @@
+#!/bin/busybox.static sh
+# One attempt per service per boot; init respawn cannot create a restart storm.
+# All peripheral children have detached stdio and their own process group.
+set -eu
+BB=/bin/busybox.static
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+umask 077
+name=${1:-}
+case "$name" in base|radio|wifi|dhcp|bluetooth|network|app) ;; *) exit 2;; esac
+dir=/run/encore/services/$name
+child=
+sleeper=
+stop() {
+  trap - TERM INT
+  if test -n "$child"; then
+    kill -TERM "-$child" 2>/dev/null || :
+    "$BB" sleep 1
+    kill -KILL "-$child" 2>/dev/null || :
+  fi
+  if test -n "$sleeper"; then kill -TERM "$sleeper" 2>/dev/null || :; fi
+  # Never wait for an uninterruptible device worker here.
+  exit 0
+}
+wait_for() {
+  i=0
+  until "$@"; do
+    i=$((i+1)); test "$i" -lt 100 || return 1
+    "$BB" sleep 1
+  done
+}
+run() {
+  case "$name" in
+    base) exec /etc/encore/boot.sh;;
+  esac
+  wait_for test -e /run/encore/base-ready
+  case "$name" in
+    radio) exec /usr/local/bin/wmtup -patches /store/encore/firmware -power;;
+    wifi)
+      wait_for test -e /sys/class/net/wlan0
+      # Only the current installation's saved config; never replace a live owner.
+      test ! -e /run/encore/wpa_supplicant.conf
+      if test -s /data/encore/wpa_supplicant.conf; then
+        cp /data/encore/wpa_supplicant.conf /run/encore/wpa_supplicant.conf
+      else
+        echo ctrl_interface=/run/wpa_supplicant > /run/encore/wpa_supplicant.conf
+      fi
+      exec wpa_supplicant -D nl80211 -i wlan0 -c /run/encore/wpa_supplicant.conf;;
+    dhcp)
+      i=0
+      until test "$(wpa_cli -i wlan0 ping 2>/dev/null)" = PONG; do
+        i=$((i+1)); test "$i" -lt 100 || return 1; "$BB" sleep 1
+      done
+      exec udhcpc -f -i wlan0 -s /etc/encore/dhcp.sh -p /run/udhcpc.pid;;
+    bluetooth)
+      wait_for test -e /sys/class/net/wlan0
+      exec /usr/local/sbin/encore-bluetooth;;
+    network) exec /usr/local/sbin/encore-network;;
+    app)
+      wait_for test -s /run/udhcpc.pid
+      exec /usr/local/sbin/encore-run;;
+  esac
+}
+if test "${2:-}" = worker; then
+  # Bound regular-file output before starting any peripheral child (128 KiB).
+  ulimit -f 256
+  run
+  exit
+fi
+# Base installs applet links only after this supervisor starts its worker.
+"$BB" mkdir -p "$dir"
+exec 9>"$dir/lock"
+$BB flock -n 9 || exit 1
+trap stop TERM INT
+echo "$$" > "$dir/supervisor.pid"
+if "$BB" mkdir "$dir/attempted" 2>/dev/null; then
+  # Reexec this script inside setsid: no shell/TTY inherited from an operator.
+  # Base mounts /tmp, so logs use /run until that dependency is established.
+  "$BB" setsid "$BB" sh "$0" "$name" worker 9>&- </dev/null >"$dir/output.log" 2>&1 &
+  child=$!
+  echo "$child" > "$dir/child.pid"
+  status=0
+  wait "$child" || status=$?
+  child=
+  echo "$status" > "$dir/exit-status"
+fi
+while :; do
+  "$BB" sleep 3600 9>&- &
+  sleeper=$!
+  wait "$sleeper" || :
+  sleeper=
+done

@@ -1,0 +1,288 @@
+--- a/sound/soc/mediatek/mt8163/mt8163-afe.c
++++ b/sound/soc/mediatek/mt8163/mt8163-afe.c
+@@ -797,7 +797,8 @@
+ 	}
+ 
+ 	runtime->hw = mt8163_pcm_hardware;
+-	runtime->dma_area = (void *)afe->sram;
++	/* SRAM is I/O memory, not a buffer for the generic RAM helpers. */
++	runtime->dma_area = NULL;
+ 	runtime->dma_addr = afe->sram_phys;
+ 	runtime->dma_bytes = afe->sram_size;
+ 	ret = snd_pcm_hw_constraint_step(runtime, 0,
+@@ -853,7 +854,7 @@
+ 	    !IS_ALIGNED(bytes, MT8163_PCM_ALIGN))
+ 		return -EINVAL;
+ 
+-	substream->runtime->dma_area = (void *)afe->sram;
++	substream->runtime->dma_area = NULL;
+ 	substream->runtime->dma_addr = afe->sram_phys;
+ 	substream->runtime->dma_bytes = bytes;
+ 	regmap_write(afe->regmap, AFE_DL1_BASE, (u32)afe->sram_phys);
+@@ -1091,8 +1092,63 @@
+ 	return 0;
+ }
+ 
++static int mt8163_pcm_fill_silence(struct snd_pcm_substream *substream,
++				 int channel, unsigned long pos,
++				 unsigned long bytes)
++{
++	struct snd_soc_component *component = snd_soc_rtdcom_lookup(
++		asoc_substream_to_rtd(substream), MT8163_AFE_COMPONENT_NAME);
++	struct mt8163_afe *afe = snd_soc_component_get_drvdata(component);
++	size_t size = substream->runtime->dma_bytes;
++	size_t first;
++
++	if (channel != 0 || pos >= size || bytes > size)
++		return -EINVAL;
++	/* All advertised formats (S16_LE/S24_LE/S32_LE) use zero silence.
++	 * pos/bytes are bytes, not frames. This can run under the stream lock;
++	 * do not allocate, sleep or acquire afe->lock here.
++	 */
++	first = min_t(size_t, bytes, size - pos);
++	memset_io(afe->sram + pos, 0, first);
++	if (first < bytes)
++		memset_io(afe->sram, 0, bytes - first);
++	return 0;
++}
++
++static int mt8163_pcm_copy_kernel(struct snd_pcm_substream *substream,
++				int channel, unsigned long pos,
++				void *buf, unsigned long bytes)
++{
++	struct snd_soc_component *component = snd_soc_rtdcom_lookup(
++		asoc_substream_to_rtd(substream), MT8163_AFE_COMPONENT_NAME);
++	struct mt8163_afe *afe = snd_soc_component_get_drvdata(component);
++	size_t size = substream->runtime->dma_bytes;
++	size_t first;
++
++	if (channel != 0 || pos >= size || bytes > size)
++		return -EINVAL;
++	first = min_t(size_t, bytes, size - pos);
++	memcpy_toio(afe->sram + pos, buf, first);
++	if (first < bytes)
++		memcpy_toio(afe->sram, buf + first, bytes - first);
++	return 0;
++}
++
++static int mt8163_pcm_construct(struct snd_soc_component *component,
++			       struct snd_soc_pcm_runtime *rtd)
++{
++	/* Linux 6.1 has no component fill_silence/copy_kernel hooks. ASoC has
++	 * already installed &rtd->ops on the PCM before pcm_construct runs.
++	 * Keep its other operations; replace only the generic SRAM accesses.
++	 */
++	rtd->ops.fill_silence = mt8163_pcm_fill_silence;
++	rtd->ops.copy_kernel = mt8163_pcm_copy_kernel;
++	return 0;
++}
++
+ static const struct snd_soc_component_driver mt8163_afe_component = {
+ 	.name = MT8163_AFE_COMPONENT_NAME,
++	.pcm_construct = mt8163_pcm_construct,
+ 	.open = mt8163_pcm_open,
+ 	.close = mt8163_pcm_close,
+ 	.hw_params = mt8163_pcm_hw_params,
+--- a/libreecho/run_contract_tests.py
++++ b/libreecho/run_contract_tests.py
+@@ -29,6 +29,7 @@
+     "sound/soc/mediatek/mt8163/test_radar_puffin_volume_preservation.py",
+     "sound/soc/mediatek/mt8163/test_radar_puffin_speaker_profile.py",
+     "sound/soc/mediatek/mt8163/test_mt8163_wide_playback_contract.py",
++    "sound/soc/mediatek/mt8163/test_mt8163_sram_silence_contract.py",
+     "fs/proc/test_proc_map_files_null_mm_contract.py",
+     "tools/mt8163_pstore_contract_test.py",
+     "tools/mt8163_pstore_ramoops_contract_test.py",
+--- /dev/null
++++ b/sound/soc/mediatek/mt8163/test_mt8163_sram_silence_contract.py
+@@ -0,0 +1,190 @@
++#!/usr/bin/env python3
++"""Execute the retained PCM SW_PARAMS/silence path with instrumented I/O.
++
++This is a source-extracted host contract, not an MMIO or hardware test.
++The kernel build separately type-checks the complete driver/ASoC registration.
++An optional driver path exercises the unchanged baseline as a negative control.
++"""
++from pathlib import Path
++import re
++import subprocess
++import sys
++import tempfile
++
++HERE = Path(__file__).resolve().parent
++ROOT = HERE.parents[3]
++
++
++def function(text, name):
++    match = re.search(r"^(?:static )?(?:int|void) " + name + r"\([^;{]*\)\s*\{.*?^}\n",
++                      text, re.M | re.S)
++    if not match:
++        raise AssertionError("missing function: " + name)
++    return match.group(0)
++
++
++def main():
++    driver = Path(sys.argv[1]) if len(sys.argv) > 1 else HERE / "mt8163-afe.c"
++    afe = driver.read_text()
++    lib = (ROOT / "sound/core/pcm_lib.c").read_text()
++    native = (ROOT / "sound/core/pcm_native.c").read_text()
++    soc = (ROOT / "sound/soc/soc-pcm.c").read_text()
++    # The hooks mutate the same ops object already installed by ASoC.
++    assert soc.index("snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_PLAYBACK, &rtd->ops)") < soc.index("ret = snd_soc_pcm_component_new(rtd)")
++    fixed = "mt8163_pcm_construct" in afe
++    if fixed:
++        assert ".pcm_construct = mt8163_pcm_construct" in afe
++        assert "runtime->dma_area = (void *)afe->sram" not in afe
++    prelude = r'''
++#include <assert.h>
++#include <errno.h>
++#include <limits.h>
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++typedef unsigned long snd_pcm_uframes_t;
++typedef long snd_pcm_sframes_t;
++#define SNDRV_PCM_STREAM_PLAYBACK 0
++#define SNDRV_PCM_ACCESS_RW_INTERLEAVED 3
++#define SNDRV_PCM_ACCESS_MMAP_INTERLEAVED 0
++#define SNDRV_PCM_STATE_OPEN 0
++#define SNDRV_PCM_TSTAMP_NONE 0
++#define SNDRV_PCM_TSTAMP_LAST 2
++#define SNDRV_PCM_TSTAMP_TYPE_LAST 2
++#define SNDRV_PROTOCOL_VERSION(a,b,c) (((a)<<16)|((b)<<8)|(c))
++#define PCM_RUNTIME_CHECK(s) (!(s)->runtime)
++#define MT8163_AFE_COMPONENT_NAME "mt-soc-i2s0dl1-pcm"
++#define min_t(t,a,b) ((t)(a)<(t)(b)?(t)(a):(t)(b))
++#define READ_ONCE(v) (v)
++#define snd_BUG_ON(c) ({ bool bad=!!(c); assert(!bad); bad; })
++struct snd_pcm_substream;
++typedef int (*pcm_transfer_f)(struct snd_pcm_substream *, int, unsigned long, void *, unsigned long);
++struct snd_pcm_ops {
++ int (*fill_silence)(struct snd_pcm_substream *, int, unsigned long, unsigned long);
++ pcm_transfer_f copy_kernel;
++ int preserved;
++};
++struct snd_pcm_runtime {
++ size_t dma_bytes; void *dma_area; int format, access, channels, state;
++ unsigned long buffer_size, boundary, silence_filled, silence_start;
++ unsigned long silence_threshold, silence_size, tstamp_mode, tstamp_type;
++ unsigned long period_step, start_threshold, stop_threshold;
++ struct { unsigned long hw_ptr; } *status;
++ struct { unsigned long appl_ptr, avail_min; } *control;
++};
++struct snd_soc_pcm_runtime { struct snd_pcm_ops ops; };
++struct snd_pcm_substream { struct snd_pcm_runtime *runtime; struct snd_pcm_ops *ops; int stream; };
++struct snd_pcm_sw_params {
++ unsigned long tstamp_mode, tstamp_type, proto, avail_min, silence_size;
++ unsigned long silence_threshold, period_step, start_threshold, stop_threshold, boundary;
++};
++struct mt8163_afe { unsigned char *sram; };
++struct snd_soc_component { struct mt8163_afe *afe; };
++static unsigned char storage[24 + 2];
++static struct mt8163_afe afe = { storage + 1 };
++static struct snd_soc_component component = { &afe };
++static struct snd_soc_pcm_runtime rtd;
++static unsigned long written;
++static int locked;
++static void *snd_soc_component_get_drvdata(struct snd_soc_component *c) { return c->afe; }
++static struct snd_soc_pcm_runtime *asoc_substream_to_rtd(struct snd_pcm_substream *s) { return &rtd; }
++static struct snd_soc_component *snd_soc_rtdcom_lookup(struct snd_soc_pcm_runtime *r, const char *n) { return &component; }
++static void io_bounds(void *p, size_t n) {
++ assert((unsigned char *)p >= afe.sram);
++ assert((unsigned char *)p + n <= afe.sram + 24);
++}
++static void memset_io(void *p, int c, size_t n) { io_bounds(p,n); memset(p,c,n); written += n; }
++static void memcpy_toio(void *p, const void *v, size_t n) { io_bounds(p,n); memcpy(p,v,n); written += n; }
++static void *get_dma_ptr(struct snd_pcm_runtime *r, int c, unsigned long p) { return r->dma_area; }
++static unsigned long bytes_to_samples(struct snd_pcm_runtime *r, unsigned long n) { return n; }
++static unsigned long frames_to_bytes(struct snd_pcm_runtime *r, unsigned long n) {
++ return n * r->channels * (r->format == 16 ? 2 : 4);
++}
++static void snd_pcm_format_set_silence(int f, void *p, unsigned long n) {
++ fprintf(stderr, "UNSAFE generic RAM silence reached\n"); exit(99);
++}
++static void snd_pcm_stream_lock_irq(struct snd_pcm_substream *s) { assert(!locked); locked=1; }
++static void snd_pcm_stream_unlock_irq(struct snd_pcm_substream *s) { assert(locked); locked=0; }
++static bool snd_pcm_running(struct snd_pcm_substream *s) { return s->runtime->state == 3; }
++static int snd_pcm_update_state(struct snd_pcm_substream *s, struct snd_pcm_runtime *r) { return 0; }
++static long snd_pcm_playback_hw_avail(struct snd_pcm_runtime *r) { return 0; }
++static void snd_pcm_dma_buffer_sync(struct snd_pcm_substream *s, int d) {}
++#define SNDRV_DMA_SYNC_DEVICE 1
++'''
++    callbacks = ""
++    if fixed:
++        callbacks = "\n".join(function(afe, name) for name in
++                              ("mt8163_pcm_fill_silence", "mt8163_pcm_copy_kernel", "mt8163_pcm_construct"))
++    else:
++        callbacks = "static int mt8163_pcm_construct(struct snd_soc_component *c, struct snd_soc_pcm_runtime *r) { return 0; }\n"
++    # Execute the actual generic dispatcher, frame-to-byte conversion, ring
++    # split, and SW_PARAMS call, rather than a reimplementation of the fix.
++    core = function(lib, "fill_silence") + function(lib, "interleaved_copy")
++    core += "static int noninterleaved_copy(struct snd_pcm_substream *s, unsigned long a, void *b, unsigned long c, unsigned long d, pcm_transfer_f f) { abort(); }\n"
++    core += function(lib, "fill_silence_frames")
++    core += function(lib, "snd_pcm_playback_silence")
++    core += function(native, "snd_pcm_sw_params")
++    tests = r'''
++int main(void) {
++ struct snd_pcm_runtime runtime = { .dma_bytes=24, .access=3, .state=3, .boundary=1024 };
++ typeof(*runtime.status) status = {0}; typeof(*runtime.control) control = {0};
++ struct snd_pcm_substream s = { &runtime, &rtd.ops, 0 };
++ struct snd_pcm_sw_params sw = { .avail_min=1, .silence_size=1024 };
++ runtime.status=&status; runtime.control=&control;
++ rtd.ops.preserved=17;
++ assert(mt8163_pcm_construct(&component, &rtd)==0 && rtd.ops.preserved==17);
++ for (int channels=1; channels<=2; channels++) for (int format=16; format<=32; format+=8) {
++  runtime.channels=channels; runtime.format=format;
++  runtime.buffer_size=24/(channels*(format==16?2:4));
++  runtime.silence_filled=runtime.buffer_size;
++  memset(storage,0xa5,sizeof(storage)); written=0;
++  // This is the original faulting RUNNING + full-buffer SW_PARAMS silence path.
++  assert(snd_pcm_sw_params(&s,&sw)==0 && !locked);
++  // Account for the initialization pass: exercise an empty playback buffer too.
++  runtime.silence_filled=0; written=0;
++  assert(snd_pcm_sw_params(&s,&sw)==0 && !locked);
++  assert(written==24 && storage[0]==0xa5 && storage[25]==0xa5);
++  for(int i=1;i<=24;i++) assert(storage[i]==0);
++  // The generic ring splitter must cover tail then head, not treat bytes as frames.
++  memset(storage,0xa5,sizeof(storage)); written=0;
++  runtime.silence_size=runtime.buffer_size;
++  runtime.silence_threshold=runtime.buffer_size;
++  runtime.silence_start=runtime.buffer_size-1;
++  runtime.silence_filled=0; control.appl_ptr=runtime.silence_start;
++  snd_pcm_playback_silence(&s,0);
++  assert(written==24 && storage[0]==0xa5 && storage[25]==0xa5);
++  for(int i=1;i<=24;i++) assert(storage[i]==0);
++ }
++ // Check a non-frame-aligned byte range independently of core conversion.
++ memset(storage,0xa5,sizeof(storage)); written=0;
++ assert(rtd.ops.fill_silence(&s,0,19,9)==0 && written==9);
++ for(int i=0;i<24;i++) assert(afe.sram[i]==(i<4||i>=19?0:0xa5));
++ unsigned char data[9]={1,3,5,7,9,11,13,15,17};
++ assert(rtd.ops.copy_kernel(&s,0,19,data,9)==0);
++ for(int i=0;i<9;i++) assert(afe.sram[(19+i)%24]==data[i]);
++ unsigned char before[26]; memcpy(before,storage,sizeof(storage));
++ assert(rtd.ops.fill_silence(&s,0,24,1)==-EINVAL);
++ assert(rtd.ops.fill_silence(&s,0,0,25)==-EINVAL);
++ assert(rtd.ops.fill_silence(&s,1,0,1)==-EINVAL);
++ assert(rtd.ops.copy_kernel(&s,0,ULONG_MAX,data,1)==-EINVAL);
++ assert(rtd.ops.copy_kernel(&s,0,0,data,ULONG_MAX)==-EINVAL);
++ assert(!memcmp(before,storage,sizeof(storage)));
++ assert(rtd.ops.fill_silence(&s,0,0,0)==0);
++ assert(storage[0]==0xa5 && storage[25]==0xa5);
++ puts("SW_PARAMS + core silence dispatch/ring split; S16/S24/S32 mono/stereo; byte wrap/bounds/kernel-copy: PASS");
++ return 0;
++}
++'''
++    with tempfile.TemporaryDirectory(dir=ROOT) as tmp:
++        source = Path(tmp) / "contract.c"
++        binary = Path(tmp) / "contract"
++        source.write_text(prelude + callbacks + core + tests)
++        subprocess.run(["cc", "-std=gnu11", "-Wall", "-Werror", "-Wno-unused-parameter",
++                        "-Wno-unused-function", "-o", str(binary), str(source)], check=True)
++        subprocess.run([str(binary)], check=True)
++
++
++if __name__ == "__main__":
++    main()

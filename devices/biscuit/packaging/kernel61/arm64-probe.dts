@@ -1,0 +1,17 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Keep all board peripherals and reservations. Only secondary CPUs wait for
+// an ARM64 port of the ARM32-only mt-boot PSCI/MTCMOS implementation.
+#include "encore-biscuit.dts"
+
+/ {
+	model = "Encore Biscuit ARM64 hardware probe";
+	chosen {
+		bootargs = "console=ttyS0,921600n1 earlycon=uart8250,mmio32,0x11002000 clk_ignore_unused maxcpus=1 rdinit=/init panic=0";
+	};
+	cpus {
+		cpu@0 { enable-method = "psci"; };
+		cpu@1 { status = "disabled"; };
+		cpu@2 { status = "disabled"; };
+		cpu@3 { status = "disabled"; };
+	};
+};

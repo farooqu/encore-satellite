@@ -1,0 +1,3 @@
+#!/bin/busybox.static sh
+# The checksummed RAM root supervises USB independently of other services.
+exec /bin/busybox.static init

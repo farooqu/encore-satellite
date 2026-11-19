@@ -1,0 +1,12 @@
+#!/bin/busybox.static sh
+# Optional second ACM; init supervises it independently of the first shell.
+# Never creates or rebinds a gadget. Both ports still share the USB controller.
+set -eu
+BB=/bin/busybox.static
+while ! test -c /dev/ttyGS1; do $BB sleep 1; done
+exec 9>/run/encore/usb-console1.lock
+$BB flock -n 9 || exit 1
+while :; do
+  $BB setsid -c "$BB" sh /proc/self/fd/0 9>&- < /dev/ttyGS1 > /dev/ttyGS1 2>&1 || :
+  $BB sleep 2
+done

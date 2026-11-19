@@ -1,0 +1,32 @@
+diff --git a/conn_soc/common/mt8163/mtk_wcn_consys_hw.c b/conn_soc/common/mt8163/mtk_wcn_consys_hw.c
+index dc5a412..88a4db9 100644
+--- a/conn_soc/common/mt8163/mtk_wcn_consys_hw.c
++++ b/conn_soc/common/mt8163/mtk_wcn_consys_hw.c
+@@ -30,7 +30,6 @@
+ #endif /* defined(CONFIG_MTK_CLKMGR) */
+ #include <linux/pinctrl/consumer.h>
+ #include <linux/delay.h>
+-#include <asm/memblock.h>
+ #include "osal_typedef.h"
+ #include "mtk_wcn_consys_hw.h"
+ 
+@@ -358,6 +357,10 @@ INT32 mtk_wcn_consys_power_on(VOID)
+ 	}
+ 	WMT_PLAT_DBG_FUNC("conn_power_on ok\n");
+ #else
++	if (!my_pdev) {
++		WMT_PLAT_ERR_FUNC("CONSYS platform device is not ready\n");
++		return -ENODEV;
++	}
+ 	iRet = pm_runtime_resume_and_get(&my_pdev->dev);
+ 	if (iRet < 0) {
+ 		WMT_PLAT_ERR_FUNC("pm_runtime_resume_and_get() fail(%d)\n", iRet);
+@@ -388,6 +391,8 @@ VOID mtk_wcn_consys_power_off(VOID)
+ 		WMT_PLAT_ERR_FUNC("conn_power_off fail(%d)\n", iRet);
+ 	WMT_PLAT_DBG_FUNC("conn_power_off ok\n");
+ #else
++	if (!my_pdev)
++		return;
+ 	iRet = pm_runtime_put_sync(&my_pdev->dev);
+ 	if (iRet < 0)
+ 		WMT_PLAT_ERR_FUNC("pm_runtime_put_sync() fail.\n");

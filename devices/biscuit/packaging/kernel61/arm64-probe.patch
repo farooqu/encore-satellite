@@ -1,0 +1,48 @@
+diff --git a/drivers/clk/mediatek/Kconfig b/drivers/clk/mediatek/Kconfig
+--- a/drivers/clk/mediatek/Kconfig
++++ b/drivers/clk/mediatek/Kconfig
+@@ -408,7 +408,7 @@ config COMMON_CLK_MT8135
+ 
+ config COMMON_CLK_MT8163
+ 	bool "Clock driver for MediaTek MT8163"
+-	depends on (ARCH_MEDIATEK && ARM) || COMPILE_TEST
++	depends on ARCH_MEDIATEK || COMPILE_TEST
+ 	select COMMON_CLK_MEDIATEK
+ 	default MACH_MT8163
+ 	help
+diff --git a/drivers/pinctrl/mediatek/Kconfig b/drivers/pinctrl/mediatek/Kconfig
+--- a/drivers/pinctrl/mediatek/Kconfig
++++ b/drivers/pinctrl/mediatek/Kconfig
+@@ -74,7 +74,7 @@ config PINCTRL_MT8135
+ 
+ config PINCTRL_MT8163
+ 	bool "Mediatek MT8163 pin control"
+-	depends on MACH_MT8163 || COMPILE_TEST
++	depends on ARCH_MEDIATEK || COMPILE_TEST
+ 	depends on OF
+ 	default MACH_MT8163
+ 	select PINCTRL_MTK
+diff --git a/drivers/misc/mediatek/Kconfig b/drivers/misc/mediatek/Kconfig
+--- a/drivers/misc/mediatek/Kconfig
++++ b/drivers/misc/mediatek/Kconfig
+@@ -2,7 +2,7 @@
+ 
+ config MTK_MT8163_CONSYS
+ 	bool "MediaTek MT8163 integrated CONSYS connectivity"
+-	depends on ARM && ARCH_MEDIATEK && OF && HAS_IOMEM
++	depends on (ARM || ARM64) && ARCH_MEDIATEK && OF && HAS_IOMEM
+ 	depends on NET && RFKILL
+ 	select CFG80211
+ 	select CRC32
+diff --git a/drivers/soc/mediatek/Kconfig b/drivers/soc/mediatek/Kconfig
+--- a/drivers/soc/mediatek/Kconfig
++++ b/drivers/soc/mediatek/Kconfig
+@@ -57,7 +57,7 @@ config MTK_SCPSYS
+ 
+ config MTK_SCPSYS_MT8163
+ 	bool "MediaTek MT8163 SCPSYS Support"
+-	depends on MACH_MT8163 || COMPILE_TEST
++	depends on ARCH_MEDIATEK || COMPILE_TEST
+ 	depends on OF
+ 	select MTK_INFRACFG
+ 	default MACH_MT8163

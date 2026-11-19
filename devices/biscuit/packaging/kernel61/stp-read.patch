@@ -1,0 +1,163 @@
+--- a/drivers/misc/mediatek/mt8163-connectivity/conn_soc/common/linux/pub/stp_chrdev_bt.c
++++ b/drivers/misc/mediatek/mt8163-connectivity/conn_soc/common/linux/pub/stp_chrdev_bt.c
+@@ -105,7 +105,6 @@
+ /* Wait queue for poll and read */
+ static wait_queue_head_t inq;
+ static DECLARE_WAIT_QUEUE_HEAD(BT_wq);
+-static INT32 flag = 0;
+ /*
+  * Reset flag for whole chip reset scenario, to indicate reset status:
+  *   0 - normal, no whole chip reset occurs
+@@ -372,7 +371,7 @@
+ 			switch (rst_msg) {
+ 			case WMTRSTMSG_RESET_START:
+ 				BT_INFO_FUNC("Whole chip reset start!\n");
+-				rstflag = 1;
++				WRITE_ONCE(rstflag, 1);
+ 				break;
+ 
+ 			case WMTRSTMSG_RESET_END:
+@@ -382,8 +381,7 @@
+ 				else
+ 					BT_INFO_FUNC("Whole chip reset fail!\n");
+ 				rd_offset = 0;
+-				rstflag = 2;
+-				flag = 1;
++				WRITE_ONCE(rstflag, 2);
+ 				wake_up_interruptible(&inq);
+ 				wake_up(&BT_wq);
+ 				break;
+@@ -419,7 +417,6 @@
+ 	/*
+ 	* Finally, wake up any reader blocked in poll or read
+ 	*/
+-	flag = 1;
+ 	wake_up_interruptible(&inq);
+ 	wake_up(&BT_wq);
+ }
+@@ -457,94 +454,56 @@
+ 
+ ssize_t BT_read(struct file *filp, char __user *buf, size_t count, loff_t *f_pos)
+ {
+-	INT32 retval = 0;
++	INT32 retval;
++	UINT32 reset;
++
++	if (!count)
++		return 0;
+ 
+ 	down(&rd_mtx);
+ 
+ 	BT_DBG_FUNC("%s: count %zd pos %lld\n", __func__, count, *f_pos);
+-	if (rstflag) {
+-		while (rstflag != 2) {
+-			/*
+-			 * If nonblocking mode, return directly.
+-			 * O_NONBLOCK is specified during open()
+-			 */
+-			if (filp->f_flags & O_NONBLOCK) {
+-				BT_ERR_FUNC("Non-blocking read, whole chip reset occurs! rstflag=%d\n", rstflag);
+-				retval = -EIO;
+-				goto OUT;
+-			}
+-
+-			wait_event(BT_wq, flag != 0);
+-			flag = 0;
+-		}
+-		/*
+-		 * Reset end, send Hardware Error event to stack only once.
+-		 * To avoid high frequency read from stack before process is killed, set rstflag to 3
+-		 * to block poll and read after Hardware Error event is sent.
+-		 */
+-		retval = bt_report_hw_error(i_buf, count, &rd_offset);
+-		if (rd_offset == sizeof(HCI_EVT_HW_ERROR)) {
+-			rd_offset = 0;
+-			rstflag = 3;
+-		}
+-
+-		if (copy_to_user(buf, i_buf, retval)) {
+-			retval = -EFAULT;
+-			if (rstflag == 3)
+-				rstflag = 2;
+-		}
+-
+-		goto OUT;
+-	}
+-
+ 	if (count > BT_BUFFER_SIZE) {
+ 		count = BT_BUFFER_SIZE;
+ 		BT_ERR_FUNC("%s: count > BT_BUFFER_SIZE\n", __func__);
+ 	}
+ 
+-	do {
+-		retval = mtk_wcn_stp_receive_data(i_buf, count, BT_TASK_INDX);
+-		BT_DBG_FUNC("%s: mtk_wcn_stp_receive_data returns %d\n", __func__, retval);
+-		if (retval < 0) {
+-			goto OUT;
+-		} else if (retval == 0) {	/* Got nothing, wait for STP's signal */
+-			/*
+-			 * If nonblocking mode, return directly.
+-			 * O_NONBLOCK is specified during open()
+-			 */
+-			if (filp->f_flags & O_NONBLOCK) {
+-				BT_ERR_FUNC("Non-blocking read, no data is available!\n");
+-				retval = -EAGAIN;
+-				goto OUT;
+-			}
+-
+-			wait_event(BT_wq, flag != 0);
+-			flag = 0;
+-		} else {	/* Got something from STP driver */
+-			BT_DBG_FUNC("Read bytes %d\n", retval);
+-			break;
+-		}
+-	} while (!mtk_wcn_stp_is_rxqueue_empty(BT_TASK_INDX) && rstflag == 0);
+-
+-	if (retval == 0) {
+-		if (rstflag != 2) {	/* Should never happen */
+-			WARN(1, "Blocking read is waken up with no data but rstflag=%d\n", rstflag);
+-			retval = -EIO;
+-			goto OUT;
+-		} else {	/* Reset end, send Hardware Error event only once */
++	for (;;) {
++		reset = READ_ONCE(rstflag);
++		if (reset == 2) {
++			/* Report reset completion once, even across short reads. */
+ 			retval = bt_report_hw_error(i_buf, count, &rd_offset);
+ 			if (rd_offset == sizeof(HCI_EVT_HW_ERROR)) {
+ 				rd_offset = 0;
+-				rstflag = 3;
++				WRITE_ONCE(rstflag, 3);
+ 			}
++			break;
+ 		}
++		if (!reset) {
++			retval = mtk_wcn_stp_receive_data(i_buf, count, BT_TASK_INDX);
++			if (retval < 0)
++				goto OUT;
++			if (retval > 0)
++				break;
++		}
++		if (filp->f_flags & O_NONBLOCK) {
++			retval = reset ? -EIO : -EAGAIN;
++			goto OUT;
++		}
++
++		/* An STP notification does not guarantee bytes are still queued. */
++		wait_event(BT_wq, ({
++			UINT32 state = READ_ONCE(rstflag);
++
++			state == 2 || (!state && !mtk_wcn_stp_is_rxqueue_empty(BT_TASK_INDX));
++		}));
+ 	}
+ 
+ 	/* Got something from STP driver */
+ 	if (copy_to_user(buf, i_buf, retval)) {
+ 		retval = -EFAULT;
+-		if (rstflag == 3)
+-			rstflag = 2;
++		if (READ_ONCE(rstflag) == 3)
++			WRITE_ONCE(rstflag, 2);
+ 	}
+ 
+ OUT:
