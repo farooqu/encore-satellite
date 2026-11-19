@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import pty
 import select
+import shlex
 import shutil
 import signal
 import subprocess
@@ -29,8 +30,16 @@ class RuntimeTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(dir=ROOT / ".amp/in/orb-backup")
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        self.bb = shutil.which("busybox")
-        self.assertIsNotNone(self.bb)
+        busybox, flock = shutil.which("busybox"), shutil.which("flock")
+        self.assertIsNotNone(busybox, "BusyBox required for runtime fixtures")
+        self.assertIsNotNone(flock, "util-linux flock required for runtime fixtures")
+        launcher = self.root / "test-busybox"
+        # Ubuntu BusyBox lacks flock. Exercise the real lock even when the
+        # supervisor's PATH is empty, without altering the device script.
+        launcher.write_text(f'#!/bin/sh\nif [ "$1" = flock ]; then shift; exec {shlex.quote(flock)} "$@"; fi\n'
+                            f'exec {shlex.quote(busybox)} "$@"\n')
+        launcher.chmod(0o700)
+        self.bb = str(launcher)
 
     def test_ota_app_can_write_archive_larger_than_its_log_cap(self):
         runtime = self.root / "run/encore"

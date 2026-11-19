@@ -24,7 +24,8 @@ BACKUP = HERE.parents[3] / ".amp/in/orb-backup"
 class BootDecisionTests(unittest.TestCase):
     def setUp(self):
         BACKUP.mkdir(parents=True, exist_ok=True)
-        self.temp = tempfile.TemporaryDirectory(dir=BACKUP)
+        # Exercise checkout paths like /home/runner as well as the target /run.
+        self.temp = tempfile.TemporaryDirectory(prefix="runner-", dir=BACKUP)
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.busybox = shutil.which("busybox")
@@ -38,6 +39,11 @@ class BootDecisionTests(unittest.TestCase):
         result.write_text("#!/bin/sh\n" + source)
         result.chmod(0o755)
         return result
+
+    def remap_paths(self, source, *directories):
+        # Rewrite only root path components, without rescanning fixture paths.
+        return re.sub(rf"(?<![\w/])/({'|'.join(directories)})(?![\w.-])",
+                      lambda match: str(self.root / match[1]), source)
 
     def test_only_verified_ram_root_switches_and_every_failure_enters_rescue(self):
         raw = io.BytesIO()
@@ -66,8 +72,7 @@ exec "$BUSYBOX" "$@"
         a, b = source.index("rescue() {"), source.index("$BB mount -t proc")
         source = source[:a] + 'rescue() { echo "RESCUE $*" >> "$ROOT/events"; exit 0; }\n' + source[b:]
         source = source.replace("[ ! -b /dev/", "[ ! -f /dev/")
-        for directory in ("dev", "proc", "sys", "run", "newroot", "store"):
-            source = source.replace("/" + directory, str(self.root / directory))
+        source = self.remap_paths(source, "dev", "proc", "sys", "run", "newroot", "store")
         check = self.script("check", source)
         for mode in ("ok", "checksum", "extract", "-t ext4", "-t devtmpfs", "size=128m", "--move /proc"):
             with self.subTest(mode=mode):
@@ -111,8 +116,7 @@ exec "$BUSYBOX" "$@"
         a, b = source.index("rescue() {"), source.index("$BB mount -t proc")
         source = source[:a] + 'rescue() { echo "RESCUE $*"; exit 1; }\n' + source[b:]
         source = source.replace("[ ! -b /dev/", "[ ! -f /dev/")
-        for directory in ("dev", "proc", "sys", "run", "newroot", "store"):
-            source = source.replace("/" + directory, str(self.root / directory))
+        source = self.remap_paths(source, "dev", "proc", "sys", "run", "newroot", "store")
         check = self.script("starter-check", source)
         store = self.root / "store/encore"
         booted = self.root / "run/encore/slot"
@@ -152,6 +156,8 @@ exec "$BUSYBOX" "$@"
         bb = self.script("usb-bb", '''
 case "$1" in
 mountpoint|mount|mdev) exit 0;;
+# Host BusyBox may omit flock; use the host's real file descriptor lock.
+flock) shift; exec flock "$@";;
 mkdir)
   "$BUSYBOX" "$@" || exit
   case "$2" in */encore-biscuit61) "$BUSYBOX" mkdir "$2/functions" "$2/configs";; esac
@@ -166,8 +172,7 @@ exec "$BUSYBOX" "$@"
 ''')
         source = (HERE / "usb-rescue").read_text().replace("/bin/busybox.static", str(bb))
         source = source.replace("test -c /dev/ttyGS0", "test -f /dev/ttyGS0")
-        for directory in ("dev", "sys", "run", "etc"):
-            source = source.replace("/" + directory, str(self.root / directory))
+        source = self.remap_paths(source, "dev", "sys", "run", "etc")
         check = self.script("usb-check", source)
         udcs = self.root / "sys/class/udc"
         udcs.mkdir(parents=True)
