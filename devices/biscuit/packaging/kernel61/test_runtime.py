@@ -110,12 +110,17 @@ class RuntimeTests(unittest.TestCase):
         bindir.mkdir()
         boot = self.root / "boot"
         ready = self.root / "base-ready"
+        # Match the stock WLAN file size without using vendor firmware bytes.
+        firmware = self.root / "WIFI_RAM_CODE_8163"
+        firmware.write_bytes(b"wifi" * 93460)
+        installed = self.root / "initialized"
         boot.write_text('#!/bin/sh\nset -eu\n'
                         'for applet in mkdir sleep cat; do\n'
                         '  if command -v "$applet"; then exit 9; fi\n'
                         'done\n'
                         f'"{self.bb}" --install -s "{bindir}"\n'
-                        f'mkdir "{self.root / "initialized"}"\n'
+                        f'mkdir "{installed}"\n'
+                        f'cp "{firmware}" "{installed}/"\n'
                         f'echo ready > "{ready}"\n')
         boot.chmod(0o700)
         script = self.root / "service"
@@ -135,7 +140,7 @@ class RuntimeTests(unittest.TestCase):
                 self.assertTrue(state.exists(), log.read_text())
                 self.assertEqual(state.read_text().strip(), "0")
                 self.assertEqual(ready.read_text(), "ready\n")
-                self.assertTrue((self.root / "initialized").is_dir())
+                self.assertEqual((installed / firmware.name).read_bytes(), firmware.read_bytes())
                 self.assertIsNone(guard.poll())
             finally:
                 if guard.poll() is None:

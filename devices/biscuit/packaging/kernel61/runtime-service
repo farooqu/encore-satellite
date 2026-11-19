@@ -97,8 +97,9 @@ run() {
   esac
 }
 if test "${2:-}" = worker; then
-  # Bound regular-file output before starting any peripheral child (128 KiB).
-  ulimit -f 256
+  # Base copies stock firmware into the bounded /run tmpfs. A process-wide
+  # 128 KiB limit there would cap the payload, not just the log.
+  if test "$name" != base; then ulimit -f 256; fi
   run
   exit
 fi
