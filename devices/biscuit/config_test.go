@@ -82,24 +82,11 @@ func TestImprovWiFiUsesKnownWPAVectorAndEscapesSSID(t *testing.T) {
 	}
 }
 
-func TestNoiseKeyUniquePersistentAndPrivate(t *testing.T) {
+func TestNoiseKeyAbsentOrInvalid(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "noise.psk")
-	a, err := noiseKey(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	b, err := noiseKey(path)
-	if err != nil || a != b || a.IsZero() {
-		t.Fatal("key not persistent")
-	}
-	c, err := noiseKey(filepath.Join(dir, "other.psk"))
-	if err != nil || a == c {
-		t.Fatal("key not unique")
-	}
-	st, err := os.Stat(path)
-	if err != nil || st.Mode().Perm() != 0600 {
-		t.Fatal("insecure permissions")
+	if _, err := noiseKey(path); err != os.ErrNotExist {
+		t.Fatalf("missing key: %v", err)
 	}
 	if err := os.WriteFile(path, []byte("broken"), 0600); err != nil {
 		t.Fatal(err)

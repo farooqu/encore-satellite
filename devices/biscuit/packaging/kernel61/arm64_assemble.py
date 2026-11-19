@@ -94,7 +94,7 @@ def repack(data, replacements):
     return gzip.compress(buf.getvalue(), mtime=0)
 
 
-def initramfs(busybox, rootfs_hash, microphone_firmware, store_rootfs=STORE_ROOTFS, *, starter=False):
+def initramfs(busybox, rootfs_hash, microphone_firmware, store_rootfs=STORE_ROOTFS, *, starter=False, signed=None):
     init = (HERE / "init").read_text().replace(
         "@ROOTFS_SHA256@", rootfs_hash).replace(
         "/store/encore/kernel61-trial/rootfs.tar.gz", store_rootfs)
@@ -129,6 +129,39 @@ for slot in "$active" "$other"; do
 done
 [ -n "$selected" ] || rescue no-verified-slot
 ''' + init[end:]
+        if signed is not None:
+            core, revision, _ = signed
+            start = init.index('selected=\n')
+            end = init.index('moved=\n', start)
+            init = init[:start] + f'''\
+selected=
+for slot in "$active" "$other"; do
+  state=$($BB cat /store/encore/slots/$slot.state 2>/dev/null) || continue
+  case "$state" in
+    held|good|'trial 1') ;;
+    update) [ "$slot" = "$active" ] || continue;;
+    *) continue;;
+  esac
+  /bin/arm64-verify /store/encore "$slot" {rootfs_hash} {shlex.quote(core)} {int(revision)} \\
+    > /run/encore/arm64-installed.json || continue
+  archive=/store/encore/slots/$slot/rootfs.tar.gz
+  $BB mount -t tmpfs -o mode=0755,size=128m tmpfs /newroot || rescue ram-root
+  if $BB tar -xzf "$archive" -C /newroot &&
+      [ "$($BB cat /newroot/etc/encore-base)" = {STARTER_FORMAT} ] &&
+      [ -x /newroot/sbin/init ]; then
+    selected=$slot
+    break
+  fi
+  $BB umount /newroot || rescue ram-root-cleanup
+done
+[ -n "$selected" ] || rescue no-verified-slot
+if [ "$state" = update ]; then
+  next=$($BB mktemp /store/encore/slots/.state.XXXXXX) || rescue trial-write
+  printf '%s\\n' update-spent > "$next" && $BB sync &&
+    $BB mv -fT "$next" "/store/encore/slots/$selected.state" && $BB sync || rescue trial-write
+  : > /run/encore/arm64-update-trial || rescue trial-marker
+fi
+''' + init[end:]
         # Keep arm/commit bound to the slot whose verified rootfs was unpacked.
         # A fallback changes the selector, not either slot's health or attempts.
         init = init.replace("moved=\n", '''\
@@ -148,6 +181,8 @@ moved=
               ("bin/sh", stat.S_IFLNK | 0o777, b"busybox.static"),
               ("init", stat.S_IFREG | 0o755, init.encode()),
               ("usr/local/sbin/usb-rescue", stat.S_IFREG | 0o755, (HERE / "usb-rescue").read_bytes())]
+    if signed is not None:
+        files.append(("bin/arm64-verify", stat.S_IFREG | 0o755, signed[2]))
     return cpio(files)
 
 

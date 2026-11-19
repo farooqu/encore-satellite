@@ -151,6 +151,9 @@ type Config struct {
 	// StartFull holds a playback stream back until its whole ring is written, at open and again after
 	// every underrun. Without it the kernel starts the stream on the first frames written.
 	StartFull bool
+	// PlaybackWakeLead is the remaining frame count at which POLLOUT may wake
+	// the owner. Zero leaves the default ALSA readiness policy unchanged.
+	PlaybackWakeLead int
 }
 
 // Capture is an open PCM capture stream.

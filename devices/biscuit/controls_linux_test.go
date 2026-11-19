@@ -86,7 +86,7 @@ func TestButtonDiscoveryRequiresBoardHardwareGroups(t *testing.T) {
 
 // Use real evdev records through the production input reader, not direct calls
 // to a key mapping helper. Only the event node and audio hardware are virtual.
-func buttonEvents(t *testing.T, gate *linux.Privacy, engine *session.Engine, player *speaker) func(uint16, int32) {
+func buttonEvents(t *testing.T, gate *linux.Privacy, engine *session.Engine, player *speaker, apiAction chan<- struct{}) func(uint16, int32) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "events")
 	if err := syscall.Mkfifo(path, 0600); err != nil {
@@ -101,9 +101,10 @@ func buttonEvents(t *testing.T, gate *linux.Privacy, engine *session.Engine, pla
 		w.Close()
 		t.Fatal(err)
 	}
+	d.Name = "action_key"
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- buttons(ctx, d, gate, engine, player) }()
+	go func() { done <- buttons(ctx, d, gate, engine, player, apiAction) }()
 	t.Cleanup(func() {
 		cancel()
 		d.Close()
@@ -174,7 +175,7 @@ func buttonMusic(t *testing.T) (*speaker, func() int16) {
 func TestButtonsVolumeTapHoldReleaseAndLimits(t *testing.T) {
 	s, sample := buttonMusic(t)
 	e := session.New(s)
-	key := buttonEvents(t, linux.NewPrivacy(func() (bool, error) { return false, nil }), e, s)
+	key := buttonEvents(t, linux.NewPrivacy(func() (bool, error) { return false, nil }), e, s, nil)
 	key(114, 1)
 	buttonWait(t, "minus did not lower speaker gain", func() bool { return sample() == 5900 })
 	// This keypad reports only down/up; software must repeat while held.
@@ -224,7 +225,7 @@ func TestButtonsActionStopsAlertBeforeStartingVoice(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	key := buttonEvents(t, linux.NewPrivacy(func() (bool, error) { return false, nil }), e, s)
+	key := buttonEvents(t, linux.NewPrivacy(func() (bool, error) { return false, nil }), e, s, nil)
 	if err := e.Handle(g, session.Event{Kind: "timer_ringing"}); err != nil {
 		t.Fatal(err)
 	}
@@ -269,12 +270,18 @@ func TestButtonsMuteHonorsDriverLagAndBlocksAction(t *testing.T) {
 	}
 	var driver atomic.Bool
 	gate := linux.NewPrivacy(func() (bool, error) { return driver.Load(), nil })
-	key := buttonEvents(t, gate, e, s)
+	apiAction := make(chan struct{}, 1)
+	key := buttonEvents(t, gate, e, s, apiAction)
 	key(113, 1) // Driver state still reports old unmuted value during its lag.
 	buttonWait(t, "mute did not immediately silence speaker/voice", func() bool { return e.Snapshot().Muted && sample() == 0 })
 	key(113, 0)
 	key(138, 1)
 	key(138, 0)
+	select {
+	case <-apiAction: // Network pairing is authorized, audio is still inhibited.
+	case <-time.After(time.Second):
+		t.Fatal("muted Action did not authorize ESPHome setup")
+	}
 	if muted, _ := gate.Check(func() { t.Error("Action escaped mute transition") }); !muted {
 		t.Fatal("mute did not inhibit delayed hardware report")
 	}
@@ -314,7 +321,7 @@ func TestVolumeCuePhysicalPressNotHeldRepeatOrHA(t *testing.T) {
 	}
 	e := session.New(s)
 	e.SetActivityHandler(s.SetVoiceActive)
-	key := buttonEvents(t, linux.NewPrivacy(func() (bool, error) { return false, nil }), e, s)
+	key := buttonEvents(t, linux.NewPrivacy(func() (bool, error) { return false, nil }), e, s, nil)
 	nonzero := func() int {
 		pcm.mu.Lock()
 		defer pcm.mu.Unlock()

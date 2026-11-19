@@ -141,6 +141,38 @@ fi
                 else:
                     self.assertLessEqual(count, 191)
 
+    def test_arm64_update_health_commits_or_requests_fallback(self):
+        self.script("tools/sync", "exit 0\n")
+        self.script("tools/reboot", 'echo fallback >> "$ROOT/events"\n')
+        self.script("tools/sleep", "exit 0\n")
+        slotctl = self.script("tools/slotctl", (package.HERE / "slotctl").read_text())
+        source = self.relocated((package.HERE / "health").read_text())
+        source = source.replace("/usr/local/sbin/slotctl", str(slotctl))
+        script = self.script("arm64-update-health", source)
+        store = self.root / "store/encore"
+        booted = self.root / "run/encore/slot"
+        booted.write_text("b\n")
+        (booted.parent / "arm64-update-trial").touch()
+        (store / "format").write_text("encore-biscuit-arm64-starter-v1\n")
+        (store / "active").write_text("b\n")
+        (store / "highest-revision").write_text("24\n")
+        (store / "slots/a.state").write_text("good\n")
+        for healthy in (True, False):
+            with self.subTest(healthy=healthy):
+                (store / "slots/b.state").write_text("update-spent\n")
+                for name in ("base-ready", "ready"):
+                    path = booted.parent / name
+                    if healthy:
+                        path.write_text(str(os.getpid()) + "\n")
+                    else:
+                        path.unlink(missing_ok=True)
+                subprocess.run(["sh", str(script), "supervised"], check=True, timeout=10,
+                               env={**self.env, "STORE": str(store), "BOOTED": str(booted)})
+                self.assertEqual((store / "slots/b.state").read_text(), "good\n" if healthy else "update-spent\n")
+                self.assertEqual((store / "slots/a.state").read_text(), "good\n")
+                self.assertEqual((store / "highest-revision").read_text(), "24\n")
+                self.assertEqual((self.root / "events").exists(), not healthy)
+
     def test_held_candidate_neither_commits_nor_spends_health_budget_until_armed(self):
         self.script("tools/sync", "exit 0\n")
         self.script("tools/reboot", 'echo reboot >> "$ROOT/events"\n')

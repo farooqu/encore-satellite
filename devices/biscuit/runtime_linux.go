@@ -59,7 +59,8 @@ func Run(parent context.Context, c Config, requireMutedStart bool) error {
 	if err = configureMixer(mixer); err != nil {
 		return fmt.Errorf("dot: speaker routing: %w", err)
 	}
-	pcm, err := alsa.OpenPlayback(0, 23, alsa.Config{Channels: 2, Rate: 48000, Format: alsa.FormatS16_LE, Bits: 16, PeriodSize: 1024, Periods: 4})
+	// Wake at or below 35 ms; refill remains capped at the 40 ms lead.
+	pcm, err := alsa.OpenPlayback(0, 23, alsa.Config{Channels: 2, Rate: 48000, Format: alsa.FormatS16_LE, Bits: 16, PeriodSize: 1024, Periods: 4, PlaybackWakeLead: speakerLeadFrames - 240})
 	if err != nil {
 		return err
 	}
@@ -167,23 +168,14 @@ func Run(parent context.Context, c Config, requireMutedStart bool) error {
 		return err
 	}
 	controls := &biscuitControls{Proxy: proxy, player: player, management: admin, ring: ringPolicy, announcements: newAnnouncementPlayer(engine, player)}
+	if controls.updates, err = newARM64Updates(); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("read ARM64 boot identity: %w", err)
+	}
 	if packagedExecutable(musicExecutable) {
 		controls.music = newMusic(c, saved, player)
 	}
-	key, err := noiseKey(KeyPath)
-	if err != nil {
-		return err
-	}
-	listener, err := net.Listen("tcp4", ":6053")
-	if err != nil {
-		return err
-	}
-	defer listener.Close()
-	ad, err := mdns.Advertise(mdns.Config{Name: c.Name, FriendlyName: c.Name, Port: 6053, MACAddress: mac.String(), Version: "2026.10.1", Platform: "encore", Board: "biscuit", Encrypted: true, IPs: ips})
-	if err != nil {
-		return err
-	}
-	defer ad.Close()
+	apiAction := make(chan struct{})
+	apiAd := mdns.Config{Name: c.Name, FriendlyName: c.Name, Port: esphome.DefaultPort, MACAddress: mac.String(), Version: "2026.10.1", Platform: "encore", Board: "biscuit", IPs: ips}
 	voiceListener, err := net.Listen("tcp4", ":6055")
 	if err != nil {
 		return err
@@ -207,7 +199,6 @@ func Run(parent context.Context, c Config, requireMutedStart bool) error {
 		_ = os.Remove(ReadyPath)
 		engine.SetMuted(true)
 		cancel()
-		_ = listener.Close()
 		for _, d := range devices {
 			_ = d.Close()
 		}
@@ -223,14 +214,14 @@ func Run(parent context.Context, c Config, requireMutedStart bool) error {
 	})
 	start(func() error {
 		info := esphome.Info{Name: c.Name, FriendlyName: c.Name, MACAddress: mac.String(), Manufacturer: "Encore Satellite", Model: "Echo Dot (2nd gen)", Version: "0.1.0-dev.0", ProjectName: "encore.satellite"}
-		return controls.Serve(ctx, listener, info, key)
+		return controls.serveAPI(ctx, KeyPath, apiAction, info, apiAd)
 	})
 	voice := &incubator.Server{Engine: engine, Name: c.Name, MAC: mac.String(), Version: "0.1.0-dev.0", EnableModels: true}
 	start(func() error {
 		return voice.Serve(ctx, voiceListener)
 	})
 	for _, d := range devices {
-		start(func() error { return buttons(ctx, d, gate, engine, player) })
+		start(func() error { return buttons(ctx, d, gate, engine, player, apiAction) })
 	}
 	meter := &captureMeter{origin: time.Now()}
 	start(func() error {

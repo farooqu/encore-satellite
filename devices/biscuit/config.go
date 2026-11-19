@@ -93,6 +93,10 @@ func SaveConfig(path string, c Config) error {
 }
 
 func writePrivate(path string, b []byte) error {
+	return publishPrivate(path, b, true)
+}
+
+func publishPrivate(path string, b []byte, replace bool) error {
 	f, err := os.CreateTemp(filepath.Dir(path), ".encore-*")
 	if err != nil {
 		return err
@@ -108,7 +112,12 @@ func writePrivate(path string, b []byte) error {
 	if closeErr != nil {
 		return closeErr
 	}
-	if err = os.Rename(f.Name(), path); err != nil {
+	if replace {
+		err = os.Rename(f.Name(), path)
+	} else {
+		err = os.Link(f.Name(), path)
+	}
+	if err != nil {
 		return err
 	}
 	dir, err := os.Open(filepath.Dir(path))
@@ -119,31 +128,21 @@ func writePrivate(path string, b []byte) error {
 	return dir.Sync()
 }
 
-// noiseKey never logs or includes key material in returned errors. The parent
-// directory belongs to the base; refuse symlinks and persist a fresh 0600 PSK
-// before advertising encrypted controls. An invalid/truncated key is not silently replaced.
+func saveNoiseKey(path string, key esphome.PSK) error {
+	if err := publishPrivate(path, []byte(key.String()+"\n"), false); err != nil {
+		return errors.New("dot: could not persist first ESPHome key")
+	}
+	return nil
+}
+
+// noiseKey loads a paired key without exposing its contents in errors. Only
+// absence permits first pairing; malformed files and symlinks fail closed.
 func noiseKey(path string) (esphome.PSK, error) {
 	var zero esphome.PSK
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
-	if err == nil {
-		key, e := esphome.GeneratePSK()
-		if e != nil {
-			_ = f.Close()
-			_ = os.Remove(path)
-			return zero, errors.New("dot: PSK generation failed")
-		}
-		_, e = f.WriteString(key.String() + "\n")
-		if e == nil {
-			e = f.Sync()
-		}
-		closeErr := f.Close()
-		if e != nil || closeErr != nil {
-			return zero, errors.New("dot: PSK persistence failed")
-		}
-	} else if !errors.Is(err, os.ErrExist) {
-		return zero, errors.New("dot: cannot create Noise PSK")
-	}
 	st, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return zero, os.ErrNotExist
+	}
 	if err != nil || !st.Mode().IsRegular() {
 		return zero, errors.New("dot: Noise PSK must be a regular file")
 	}

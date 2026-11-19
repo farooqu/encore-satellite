@@ -40,8 +40,8 @@ inside the mounted partition; root-level `vendor` and `etc` symlinks are not
 followed. The bench check ran from Encore recovery, not the TWRP installer.
 Only proceed with a coordinated, explicitly approved `--apply --allow-development`
 after verifying both real ext4 partitions and the recovery return path. Keep the
-private backup directory off the device: it contains the verified full recovery,
-MISC backup and new pairing key. Installation requires the Encore paths to be
+private backup directory off the device: it contains the verified full recovery
+and MISC backup. Installation requires the Encore paths to be
 absent and does not modify unrelated data. It publishes the format selector
 after full p12 read-back, then leaves the device in recovery without changing
 MISC or rebooting. After an interruption, inspect the retained backups and
@@ -53,11 +53,12 @@ verified. A TWRP-free installer would still need a booted rescue environment
 to verify/mount ext4, stage the files and verify full partition read-back.
 
 The first boot checks the published selector and embedded rootfs digest before
-starting the RAM root. If the active slot is ineligible or its archive is
-missing or corrupt, recovery tries the other slot against the same digest. It
-selects a verified fallback without spending an activation attempt or marking
-it healthy. If neither slot qualifies, it stays in USB rescue. This is not an
-update mechanism: both slots still use the starter's single pinned digest.
+starting the RAM root. Upgrade-capable starters also authenticate a later
+slot's `release.jws` using the public root embedded in recovery and check that
+its exact archive matches the signed digest and size. If the active slot is
+ineligible or invalid, recovery tries the other slot. It stays in USB rescue
+if neither slot qualifies. Older starters without `core_version` in the
+manifest only accept their one embedded archive and do not support this updater.
 p16 stores only the new installation's state, which USB rescue does not depend
 on. On each boot, Encore reads only `system_a`, verifies and copies the radio
 files to RAM, then unmounts stock. There is no persistent duplicate, and neither
@@ -72,6 +73,81 @@ reboot. The slots start `held`, not `good`; app startup spends an attempt and
 only stable app readiness can commit a slot. Failed health leaves USB available
 without rebooting. Persistent enrollment and runtime acceptance still require
 hardware verification.
+
+### Add the ESPHome controls to Home Assistant
+
+After Wi-Fi enrollment and app startup, press **Action again**, preferably with
+physical privacy still muted. Then add the discovered Encore device under Home
+Assistant **Settings → Devices & services** (or add ESPHome by IP, TCP 6053).
+Home Assistant Core 2026.10.4 generates the permanent key and transmits it via
+zero-PSK Noise. Encore saves it privately to `/data/encore/noise.psk` and closes
+setup. No key file or copy/paste is needed. If two minutes pass without a key,
+press Action again to retry. This is independent of Improv Wi-Fi setup and does
+not unmute the microphone. If the controls do not appear after the key handoff,
+reload the ESPHome integration in Home Assistant so it reconnects with its saved key.
+
+Pair only on a trusted LAN: the zero-PSK exchange protects the key from passive
+sniffing, not active impersonation. While the window is open, a reachable client
+could claim the device. HA versions without zero-PSK provisioning cannot pair
+this way; Encore refuses a plaintext key push. Existing keys (including those on
+older starter builds) stay in use and never open the pairing window. If HA loses
+the key or the success reply is lost after Encore saves it, use the private USB
+rescue console for manual recovery; don't delete the key as part of an update.
+
+### Verify upgrade support offline before installation
+
+Build the upgrade-capable starter with `starter_build.py --core-version` and
+`--ca-bundle`. The CA input is `etc/ssl/certs/ca-certificates.crt` from Alpine
+v3.22 `ca-certificates-bundle-20261020-r0.apk`; the builder pins its SHA-256.
+The initial archive is trusted by the pinned private installer and recovery
+digest; later archives must have an Echo Dot Ed25519 signature. The legacy
+ARMv7 updater cannot update this slot layout.
+
+The ARM64 feed entry is `biscuit-arm64/incubator/stable.jws` below the Encore
+Pages base. `feed.py --arm64-starter-sha256 ... --arm64-rootfs-output ...`
+prepares an offline-signed entry and exact rootfs for immutable retention.
+Reserve the starter and release revisions from the same Biscuit ledger. The
+public version must be stable, newer than the private core, and compatible with
+the pinned ARM64 base. Production signing and public feed activation are
+separate from building or reviewing a private baseline. The existing legacy
+retention/activation workflow does not accept this ARM64 asset format.
+
+Before approving the initial private install, implement and review the upgrade
+path and verify it offline with two different signed versions. Check package
+identity, a monotonic Biscuit revision ledger and authenticated feed/package
+verification using the existing Echo Dot Ed25519 public root. Private installs
+check the public feed by default, with no channel enrollment step. Until a
+compatible signed public release is available there is nothing to install. Test
+the ESPHome state in Home Assistant: a blank latest version can falsely show an
+available update. When there's no verified offer, report the installed version
+as the latest version and keep check errors separate from availability.
+Checking for an update never installs it; installation requires an explicit
+firmware update request from Home Assistant's ESPHome update control. Verify
+rejection of older revisions and unrelated targets, backends and bases.
+Exercise boot verification, inactive-slot activation, state preservation,
+failed-trial rollback and the reviewed recovery path. The initial install starts
+with fresh state and checks existing stock firmware read-only. It does not
+depend on a live upgrade run.
+
+An update requires a healthy running slot, muted physical privacy and read-only
+confirmation that MISC already selects recovery. Fresh installation and OTA do
+not change MISC. Check that a normal reboot returns to Encore on the exact
+target and that the device has a valid clock for TLS and feed expiry; do not
+bypass either check. An approved update stages only the inactive cache slot,
+sets a durable high-water mark before publishing the selector, and requests a
+reboot. Recovery spends the trial attempt before switching to the new root.
+The health service commits only after sustained runtime readiness; a failed
+update trial reboots to the prior good slot without lowering the high-water
+mark. These are update reboots, not permission to reboot during first install.
+
+After initial install and enrollment, separately approve a different-version
+upgrade on the same device. Verify that the newly created identity, Wi-Fi,
+ESPHome Noise key, Bluetooth bonds and settings survive, and that the new
+version reaches normal health and reconnects to the same Home Assistant entry.
+A reinstall or reset does not count. Until this run passes, live upgrade
+compatibility is unverified. A signed private second version can exercise the
+intended public path; actual private-to-public qualification requires real
+public release bytes and trust.
 
 ## Build locally
 

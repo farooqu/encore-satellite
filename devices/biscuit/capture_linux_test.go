@@ -371,6 +371,62 @@ func (*speakerPCM) Drain() error        { return nil }
 func (*speakerPCM) Close() error        { return nil }
 func (*speakerPCM) Delay() (int, error) { return 0, nil }
 
+type recoveringSpeakerPCM struct {
+	speakerPCM
+	once             sync.Once
+	entered, release chan struct{}
+}
+
+func (p *recoveringSpeakerPCM) Delay() (int, error) {
+	var err error
+	p.once.Do(func() { err = syscall.EPIPE })
+	return 0, err
+}
+
+func (p *recoveringSpeakerPCM) Drop() error {
+	close(p.entered)
+	<-p.release
+	return nil
+}
+
+func TestUnmutedCaptureContinuesDuringPlaybackRecovery(t *testing.T) {
+	pcm := &recoveringSpeakerPCM{entered: make(chan struct{}), release: make(chan struct{})}
+	// No gain write here: the real callback must run while recovery owns the lock.
+	player := linux.NewMixer(pcm, speakerLeadFrames)
+	defer player.Close()
+	defer close(pcm.release)
+	select {
+	case <-pcm.entered:
+	case <-time.After(time.Second):
+		t.Fatal("playback did not enter recovery")
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	mic := &captureStub{}
+	mic.duringRead = func() {
+		if mic.reads == 2 {
+			cancel()
+		}
+	}
+	gate := linux.NewPrivacy(func() (bool, error) { return false, nil })
+	voice := &incubator.Server{Engine: session.New(player)}
+	done := make(chan error, 1)
+	go func() {
+		// Exercise a real privacy transition, not only the no-op fast path.
+		player.SetMusicPrivacy(true)
+		voice.Engine.SetMuted(true)
+		done <- capture(ctx, mic, func() (bool, error) { return false, nil }, gate, voice, &captureMeter{origin: time.Now()}, func() {}, player.SetMusicPrivacy)
+	}()
+	select {
+	case err := <-done:
+		if err != nil || mic.reads != 2 {
+			t.Fatalf("capture did not reach the second read: reads=%d, err=%v", mic.reads, err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("unmuted capture waited on playback recovery")
+	}
+}
+
 func TestNativeVolumeAndMuteApplyToVoicePCM(t *testing.T) {
 	for _, tc := range []struct {
 		name    string

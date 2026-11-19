@@ -52,6 +52,7 @@ type Release struct {
 	SHA256      string `json:"sha256"`
 	Issued      int64  `json:"issued"`
 	Expires     int64  `json:"expires"`
+	Proof       string `json:"-"` // authenticated compact JWS retained for boot verification
 }
 
 type checkpoint struct {
@@ -132,28 +133,9 @@ func (c *Client) Check(ctx context.Context, channel string, highest int64) (*Rel
 	if err != nil || len(b) > 32768 {
 		return nil, errors.New("invalid metadata size")
 	}
-	parts := strings.Split(strings.TrimSpace(string(b)), ".")
-	if len(parts) != 3 {
-		return nil, errors.New("invalid JWS")
-	}
-	header, e1 := base64.RawURLEncoding.DecodeString(parts[0])
-	payload, e2 := base64.RawURLEncoding.DecodeString(parts[1])
-	sig, e3 := base64.RawURLEncoding.DecodeString(parts[2])
-	if e1 != nil || e2 != nil || e3 != nil || string(header) != Header || !ed25519.Verify(c.Key, []byte(parts[0]+"."+parts[1]), sig) {
-		return nil, errors.New("invalid update signature")
-	}
-	var r Release
-	if err := json.Unmarshal(payload, &r); err != nil {
+	r, err := VerifyRelease(b, c.Key, i, channel)
+	if err != nil {
 		return nil, err
-	}
-	if r.Target != i.Target || r.Backend != i.Backend || r.Format != i.Format || r.Channel != channel || r.BaseSHA256 != i.BaseSHA256 {
-		return nil, errors.New("incompatible target/backend/shared base; base migration unsupported")
-	}
-	if !validCore(r.CoreVersion) || r.Revision <= 0 || !digest.MatchString(r.SHA256) || r.Size <= 0 || r.Size > MaxBundle || !secureURL(r.URL) {
-		return nil, errors.New("invalid release metadata")
-	}
-	if channel == "stable" && semver.Prerelease("v"+r.CoreVersion) != "" {
-		return nil, errors.New("stable core must not be a prerelease")
 	}
 	if err := r.Fresh(); err != nil {
 		return nil, err
@@ -187,6 +169,41 @@ func (c *Client) Check(ctx context.Context, channel string, highest int64) (*Rel
 		return nil, nil
 	}
 	return &r, nil
+}
+
+// VerifyRelease verifies immutable release identity. Feed freshness is checked
+// at admission, not at boot: installed software must survive feed expiry and
+// an unset RTC without needing to contact the network.
+func VerifyRelease(b []byte, key ed25519.PublicKey, i Manifest, channel string) (Release, error) {
+	var r Release
+	if len(b) > 32768 || len(key) != ed25519.PublicKeySize {
+		return r, errors.New("invalid metadata size or trust root")
+	}
+	proof := strings.TrimSpace(string(b))
+	parts := strings.Split(proof, ".")
+	if len(parts) != 3 {
+		return r, errors.New("invalid JWS")
+	}
+	header, e1 := base64.RawURLEncoding.DecodeString(parts[0])
+	payload, e2 := base64.RawURLEncoding.DecodeString(parts[1])
+	sig, e3 := base64.RawURLEncoding.DecodeString(parts[2])
+	if e1 != nil || e2 != nil || e3 != nil || string(header) != Header || !ed25519.Verify(key, []byte(parts[0]+"."+parts[1]), sig) {
+		return r, errors.New("invalid update signature")
+	}
+	if err := json.Unmarshal(payload, &r); err != nil {
+		return r, err
+	}
+	if r.Target != i.Target || r.Backend != i.Backend || r.Format != i.Format || r.Channel != channel || r.BaseSHA256 != i.BaseSHA256 {
+		return r, errors.New("incompatible target/backend/shared base; base migration unsupported")
+	}
+	if !validCore(r.CoreVersion) || r.Revision <= 0 || !digest.MatchString(r.SHA256) || r.Size <= 0 || r.Size > MaxBundle || !secureURL(r.URL) {
+		return r, errors.New("invalid release metadata")
+	}
+	if channel == "stable" && semver.Prerelease("v"+r.CoreVersion) != "" {
+		return r, errors.New("stable core must not be a prerelease")
+	}
+	r.Proof = proof
+	return r, nil
 }
 
 func (r Release) Fresh() error {

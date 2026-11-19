@@ -15,6 +15,8 @@ import (
 	"github.com/farooqu/encore-satellite/platforms/linux"
 )
 
+const testMixAhead = 1920
+
 // Clocked by the test, not by Write: accepting PCM must never count as playing.
 type mixerPCM struct {
 	mu          sync.Mutex
@@ -115,7 +117,7 @@ func pump(p *mixerPCM, frames int) {
 }
 func TestMixerIndependentFlushDrainGainAndConsumption(t *testing.T) {
 	p := &mixerPCM{}
-	m := linux.NewMixer(p)
+	m := linux.NewMixer(p, testMixAhead)
 	defer m.Close()
 	m.SetVolume(1)
 	var played atomic.Uint32
@@ -131,14 +133,14 @@ func TestMixerIndependentFlushDrainGainAndConsumption(t *testing.T) {
 	if played.Load() != 0 {
 		t.Fatal("accepted ALSA frames were reported as consumed")
 	}
-	voice := make([]int16, 320)
+	voice := make([]int16, 640) // Start voice before Flush; this is not an EOF test.
 	for i := range voice {
 		voice[i] = 1200
 	}
 	if err := m.Write(ctx, voice); err != nil {
 		t.Fatal(err)
 	}
-	pump(p, 1200)
+	pump(p, 1920+240) // Retire the DMA lead and part of the mixed voice.
 	if played.Load() == 0 || stamp.Load() <= 0 {
 		t.Fatal("no real consumption callback")
 	}
@@ -156,7 +158,7 @@ func TestMixerIndependentFlushDrainGainAndConsumption(t *testing.T) {
 	m.Flush()
 	select {
 	case <-fault:
-	default:
+	case <-ctx.Done():
 		t.Fatal("DMA drop did not request music resynchronization")
 	}
 	if err := m.MusicWrite(ctx, 7, fillPCM(1, 10000, -6000)); !errors.Is(err, context.Canceled) {
@@ -191,7 +193,7 @@ func TestMixerIndependentFlushDrainGainAndConsumption(t *testing.T) {
 		t.Fatal("voice drained before hardware progress")
 	case <-time.After(10 * time.Millisecond):
 	}
-	pump(p, 2400)
+	pump(p, 1920+2160)
 	select {
 	case err := <-drained:
 		if err != nil {
@@ -208,12 +210,12 @@ func TestMixerIndependentFlushDrainGainAndConsumption(t *testing.T) {
 	if err := m.MusicWrite(ctx, 8, fillPCM(4800, 10000, -6000)); err != nil {
 		t.Fatal(err)
 	}
-	p.waitBuffered(t, 960)
+	p.waitBuffered(t, 1920)
 	m.SetVoiceActive(true)
 	m.MusicVolume(50, false)
 	p.heardPCM()
-	// Retire the existing 20-ms DMA queue, then the full 20-ms gain ramp.
-	pump(p, 960+960)
+	// Retire the existing DMA queue, then the unchanged 20-ms gain ramp.
+	pump(p, 1920+960)
 	p.heardPCM()
 	pump(p, 240)
 	samples := p.heardPCM()
@@ -233,10 +235,10 @@ func TestMixerIndependentFlushDrainGainAndConsumption(t *testing.T) {
 	if err := m.MusicWrite(ctx, 9, fillPCM(4800, 10000, -6000)); err != nil {
 		t.Fatal(err)
 	}
-	p.waitBuffered(t, 960)
+	p.waitBuffered(t, 1920)
 	m.MusicVolume(35, false)
 	m.SetVoiceActive(false)
-	pump(p, 960+960) // queued ducked audio plus the release ramp
+	pump(p, 1920+960) // queued ducked audio plus the release ramp
 	p.heardPCM()
 	pump(p, 240)
 	samples = p.heardPCM()
@@ -256,7 +258,7 @@ func TestMixerIndependentFlushDrainGainAndConsumption(t *testing.T) {
 	m.SetVoiceActive(true)
 	m.SetVoiceActive(false)
 	p.heardPCM()
-	pump(p, 960) // gain changes do not rewrite the bounded 20-ms DMA window
+	pump(p, 1920) // gain changes do not rewrite the queued DMA window
 	p.heardPCM()
 	pump(p, 480)
 	for _, v := range p.heardPCM() {
@@ -268,7 +270,7 @@ func TestMixerIndependentFlushDrainGainAndConsumption(t *testing.T) {
 
 func TestMixerStopPrivacyAndEpochCannotAutoplay(t *testing.T) {
 	p := &mixerPCM{}
-	m := linux.NewMixer(p)
+	m := linux.NewMixer(p, testMixAhead)
 	defer m.Close()
 	m.SetVolume(1)
 	ctx := context.Background()
@@ -308,7 +310,7 @@ func TestMixerStopPrivacyAndEpochCannotAutoplay(t *testing.T) {
 		}
 	}
 	m.PlayMusic()
-	pump(p, 1440)
+	pump(p, 1920+480)
 	s := p.heardPCM()
 	if len(s) == 0 || s[len(s)-2] != 5000 || s[len(s)-1] != -9000 {
 		t.Fatal("explicit Play did not resume stereo music")
@@ -328,7 +330,7 @@ func TestMixerStopPrivacyAndEpochCannotAutoplay(t *testing.T) {
 
 func TestMixerVoiceInterpolationRejectsImagingAndFailsClosed(t *testing.T) {
 	p := &mixerPCM{}
-	m := linux.NewMixer(p)
+	m := linux.NewMixer(p, testMixAhead)
 	defer m.Close()
 	m.SetVolume(1)
 	samples := make([]int16, 1600)
@@ -380,7 +382,7 @@ func TestMixerUnderrunRecoversAndFencesUncertainAudio(t *testing.T) {
 	for _, where := range []string{"delay", "write"} {
 		t.Run(where, func(t *testing.T) {
 			p := &mixerPCM{}
-			m := linux.NewMixer(p)
+			m := linux.NewMixer(p, testMixAhead)
 			defer m.Close()
 			m.SetVolume(1)
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -450,15 +452,61 @@ func TestMixerUnderrunRecoversAndFencesUncertainAudio(t *testing.T) {
 	}
 }
 
-func TestMixerDropDoesNotReplayDMARace(t *testing.T) {
-	p := &mixerPCM{dropConsume: 16}
-	m := linux.NewMixer(p)
+func TestMixerLeadSurvivesDelayedRefillAndAccountsOnlyHeardFrames(t *testing.T) {
+	p := &mixerPCM{}
+	m := linux.NewMixer(p, testMixAhead)
 	defer m.Close()
 	m.SetVolume(1)
+	p.waitBuffered(t, 1)
+	var played atomic.Uint32
+	fault := make(chan struct{}, 1)
+	m.MusicStart(1, func(n uint32, _ int64) { played.Add(n) }, func() { fault <- struct{}{} })
+	if err := m.MusicWrite(t.Context(), 1, fillPCM(4800, 1234, -4321)); err != nil {
+		t.Fatal(err)
+	}
+	// Advance the fake hardware clock in one jump before the pump can refill.
+	// 1383 frames is just over the observed 28.8 ms gap at 48 kHz.
+	const gap = 1383
+	for range 2 {
+		before, err := p.Delay()
+		if err != nil || before <= gap || before > 4096 {
+			t.Fatalf("DMA lead %d must survive %d frames and fit hardware ring: %v", before, gap, err)
+		}
+		p.consume(gap)
+		p.waitBuffered(t, 1920)
+	}
+	samples := p.heardPCM()
+	const musicFrames = 2*gap - 1920 // initial ring was all silence
+	if len(samples) != 4*gap || played.Load() != musicFrames {
+		t.Fatalf("heard samples=%d, reported music frames=%d, want %d and %d", len(samples), played.Load(), 4*gap, musicFrames)
+	}
+	for i := 0; i < len(samples)/2; i++ {
+		left, right := int16(0), int16(0)
+		if i >= 1920 {
+			left, right = 1234, -4321
+		}
+		if samples[2*i] != left || samples[2*i+1] != right {
+			t.Fatalf("gap or replay at frame %d", i)
+		}
+	}
+	select {
+	case <-fault:
+		t.Fatal("delayed refill fenced the stream")
+	default:
+	}
+}
+
+func TestMixerDropDoesNotReplayDMARace(t *testing.T) {
+	p := &mixerPCM{dropConsume: 16}
+	m := linux.NewMixer(p, testMixAhead)
+	defer m.Close()
+	m.SetVolume(1)
+	p.waitBuffered(t, testMixAhead) // prime known silence before either stream
 	fault := make(chan struct{}, 1)
 	var played atomic.Uint32
 	m.MusicStart(1, func(n uint32, _ int64) { played.Add(n) }, func() { fault <- struct{}{} })
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
 	b := fillPCM(4800, 0, 0)
 	for i := 0; i < 4800; i++ {
 		binary.LittleEndian.PutUint16(b[4*i:], uint16(i+100))
@@ -466,15 +514,17 @@ func TestMixerDropDoesNotReplayDMARace(t *testing.T) {
 	if err := m.MusicWrite(ctx, 1, b); err != nil {
 		t.Fatal(err)
 	}
-	voice := make([]int16, 320)
+	voice := make([]int16, 640) // Put voice into DMA so Flush must drop it.
 	if err := m.Write(ctx, voice); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(15 * time.Millisecond)
+	p.consume(testMixAhead)
+	p.heardPCM() // discard the priming silence, not any music frames
+	p.waitBuffered(t, testMixAhead)
 	m.Flush()
 	select {
 	case <-fault:
-	default:
+	case <-ctx.Done():
 		t.Fatal("uncertain shared clock was retained")
 	}
 	pump(p, 1200)
@@ -494,7 +544,7 @@ func TestMixerDropDoesNotReplayDMARace(t *testing.T) {
 
 func TestMixerConsecutiveVoiceBlocksHaveNoQueueGaps(t *testing.T) {
 	p := &mixerPCM{}
-	m := linux.NewMixer(p)
+	m := linux.NewMixer(p, testMixAhead)
 	defer m.Close()
 	m.SetVolume(.5)
 	voice := make([]int16, 2048)
@@ -539,9 +589,10 @@ func TestMixerVoiceIsNotDucked(t *testing.T) {
 	var previous []int16
 	for _, active := range []bool{false, true} {
 		p := &mixerPCM{}
-		m := linux.NewMixer(p)
+		m := linux.NewMixer(p, testMixAhead)
 		m.SetVolume(.5)
 		m.SetVoiceActive(active)
+		p.waitBuffered(t, testMixAhead)
 		voice := make([]int16, 1600)
 		for i := range voice {
 			voice[i] = 12000
@@ -594,7 +645,7 @@ func TestMixerCombinedSignalRespectsPhysicalCeiling(t *testing.T) {
 	}{{.25, 8192}, {.5, 16384}} {
 		for _, polarity := range []int16{32767, -32768} {
 			p := &mixerPCM{}
-			m := linux.NewMixer(p)
+			m := linux.NewMixer(p, testMixAhead)
 			m.SetVolume(tc.gain)
 			m.SetVoiceActive(true)
 			m.MusicStart(1, nil)
@@ -629,7 +680,7 @@ func TestMixerCombinedSignalRespectsPhysicalCeiling(t *testing.T) {
 
 func TestMixerGainChangesDoNotDropMusicClock(t *testing.T) {
 	p := &mixerPCM{}
-	m := linux.NewMixer(p)
+	m := linux.NewMixer(p, testMixAhead)
 	defer m.Close()
 	fault := make(chan struct{}, 1)
 	var played atomic.Uint32
@@ -638,7 +689,7 @@ func TestMixerGainChangesDoNotDropMusicClock(t *testing.T) {
 	if err := m.MusicWrite(ctx, 1, fillPCM(4800, 3000, -7000)); err != nil {
 		t.Fatal(err)
 	}
-	pump(p, 1200)
+	pump(p, 1920+240)
 	for _, gain := range []float64{.25, 0, .1} {
 		m.SetVolume(gain)
 		m.MusicVolume(35, gain == 0)

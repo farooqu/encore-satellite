@@ -23,9 +23,20 @@ type TimedPCM interface {
 	Delay() (int, error)
 }
 
+type pacedPCM interface {
+	PlaybackPaced() bool
+	WaitPlayback() (hardware bool, err error)
+	WakePlayback()
+}
+
 const (
-	mixBlock      = 240 // 5 ms, aligned to the driver's 16-frame DMA quantum.
-	mixAhead      = 960 // Prime/refill up to 20 ms; recover even if this is exhausted.
+	purgeVoice = 1 << iota
+	purgeMusic
+)
+
+const (
+	voiceChunk    = 320  // 20 ms at 16 kHz, independent of the DMA lead.
+	voicePreroll  = 1920 // 40 ms of converted voice before starting or resuming.
 	voiceCapacity = 3 * 2048
 	musicCapacity = 4800 // 100 ms, in addition to bounded companion IPC.
 )
@@ -42,33 +53,44 @@ type mixFrame struct {
 // PCM16/48k stereo. DMA drops are discontinuities: uncertain hardware frames
 // are never replayed or reported consumed, and affected music must resynchronize.
 type Mixer struct {
-	mu                           sync.Mutex
-	pcm                          TimedPCM
-	wake                         chan struct{}
-	stop                         chan struct{}
-	done                         chan struct{}
-	serial                       chan struct{}
-	err                          error
-	voice                        []float64
-	music                        []stereo
-	hardware, pending            []mixFrame
-	voicePending                 int
-	generation                   uint64
-	resample                     interpolator
-	tail                         bool
-	epoch                        uint64
-	played                       func(uint32, int64)
-	musicFailed                  func()
-	volume                       float64
-	musicGain                    float64
-	musicMuted, privacy, stopped bool
-	active                       atomic.Bool
-	duck                         float64
+	mu                  sync.Mutex
+	epochMu             sync.Mutex // serialize music replacement across its purge acknowledgement
+	pcm                 TimedPCM
+	pacer               pacedPCM
+	purge               uint8
+	purging             bool
+	mixAhead            int
+	wake                chan struct{}
+	stop                chan struct{}
+	done                chan struct{}
+	serial              chan struct{}
+	err                 error
+	voice               []float64
+	music               []stereo
+	hardware, pending   []mixFrame
+	voicePending        int
+	voiceStarted        bool
+	generation          uint64
+	resample            interpolator
+	tail                bool
+	epoch               uint64
+	played              func(uint32, int64)
+	musicFailed         func()
+	volume              float64
+	musicGain           float64
+	musicMuted, stopped bool
+	privacy             atomic.Bool // transitions and purge serialized by mu
+	active              atomic.Bool
+	duck                float64
 }
 
-// NewMixer starts silent; device assembly must select its physical gain.
-func NewMixer(pcm TimedPCM) *Mixer {
-	m := &Mixer{pcm: pcm, wake: make(chan struct{}), stop: make(chan struct{}), done: make(chan struct{}), serial: make(chan struct{}, 1), musicGain: 1, duck: 1}
+// NewMixer starts silent; device assembly selects physical gain and the
+// positive refill lead in PCM frames, no larger than the hardware ring.
+func NewMixer(pcm TimedPCM, mixAhead int) *Mixer {
+	m := &Mixer{pcm: pcm, mixAhead: mixAhead, wake: make(chan struct{}), stop: make(chan struct{}), done: make(chan struct{}), serial: make(chan struct{}, 1), musicGain: 1, duck: 1}
+	if p, ok := pcm.(pacedPCM); ok && p.PlaybackPaced() {
+		m.pacer = p
+	}
 	m.resample.init()
 	go m.run()
 	return m
@@ -78,6 +100,31 @@ func NewMixer(pcm TimedPCM) *Mixer {
 func (m *Mixer) SetVoiceActive(active bool) { m.active.Store(active) }
 
 func (m *Mixer) signal() { close(m.wake); m.wake = make(chan struct{}) }
+
+// notifyOwner is called under mu, which also protects shutdown from a wake
+// hitting a closed/reused descriptor. It never waits for the owner.
+func (m *Mixer) notifyOwner() {
+	if m.pacer != nil && m.err == nil {
+		m.pacer.WakePlayback()
+	}
+}
+
+func (m *Mixer) requestPurge(parts uint8) {
+	if m.err == nil {
+		m.purge |= parts
+		m.notifyOwner()
+	}
+	m.signal()
+}
+
+func (m *Mixer) waitPurge() {
+	for m.err == nil && (m.purge != 0 || m.purging) {
+		wake := m.wake
+		m.mu.Unlock()
+		<-wake
+		m.mu.Lock()
+	}
+}
 
 func (m *Mixer) wait(ctx context.Context, generation uint64, ready func() bool) error {
 	for {
@@ -90,7 +137,7 @@ func (m *Mixer) wait(ctx context.Context, generation uint64, ready func() bool) 
 		if generation != m.generation {
 			return context.Canceled
 		}
-		if ready() {
+		if m.purge == 0 && !m.purging && ready() {
 			return nil
 		}
 		wake := m.wake
@@ -127,16 +174,19 @@ func (m *Mixer) Write(ctx context.Context, samples []int16) error {
 	}
 	return m.voiceOp(ctx, func(g uint64) error {
 		for len(samples) > 0 {
-			// Convert at most one hardware lead while earlier voice is still
+			// Convert at most 20 ms while earlier voice is still
 			// queued. A maximum wire block must not wait for the queue to empty
 			// and leave fill padding its last partial block with silence.
-			n := min(len(samples), mixAhead/3)
+			n := min(len(samples), voiceChunk)
 			// Serial owns the FIR snapshot while the hardware clock keeps
 			// running; Flush/recovery fence each bounded chunk's commit.
 			r := m.resample
 			m.mu.Unlock()
 			converted := r.append(make([]float64, 0, n*3), samples[:n])
 			m.mu.Lock()
+			if len(m.voice)+len(converted) > voiceCapacity {
+				m.notifyOwner()
+			}
 			if err := m.wait(ctx, g, func() bool { return len(m.voice)+len(converted) <= voiceCapacity }); err != nil {
 				return err
 			}
@@ -146,6 +196,7 @@ func (m *Mixer) Write(ctx context.Context, samples []int16) error {
 			m.tail = false
 			samples = samples[n:]
 		}
+		m.notifyOwner()
 		return nil
 	})
 }
@@ -161,15 +212,19 @@ func (m *Mixer) Drain(ctx context.Context) error {
 			m.voice = m.resample.append(m.voice, make([]int16, 21))
 			m.voicePending += 63
 			m.tail = true
+			m.notifyOwner()
 		}
 		if err := m.wait(ctx, g, func() bool { return m.voicePending == 0 }); err != nil {
 			return err
 		}
+		m.voiceStarted = false
 		m.resample.reset()
 		return nil
 	})
 }
 
+// Flush fences this generation synchronously. Only the PCM owner can finish
+// the purge, after any in-flight ioctl; new writes wait for that acknowledgement.
 func (m *Mixer) Flush() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -177,9 +232,7 @@ func (m *Mixer) Flush() {
 	m.voice = m.voice[:0]
 	m.resample.reset()
 	m.tail = false
-	m.rebuild(true, false)
-	m.voicePending = 0
-	m.signal()
+	m.requestPurge(purgeVoice)
 }
 
 // SetVolume applies the model's conservative physical gain to both contributors.
@@ -187,45 +240,55 @@ func (m *Mixer) SetVolume(gain float64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.volume = max(0, min(1, gain))
+	m.notifyOwner()
 }
 
 // Privacy release deliberately does not release the music Stop latch. Only an
 // explicit operator Play may do that, never voice completion or a fresh stream.
 func (m *Mixer) SetMusicPrivacy(muted bool) {
+	if !muted && !m.privacy.Load() {
+		return // A no-op must not stall capture behind playback recovery.
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if muted == m.privacy {
+	if muted == m.privacy.Load() {
 		return
 	}
-	m.privacy = muted
+	m.privacy.Store(muted)
 	if muted {
 		m.stopped = true
-		m.silenceMusic()
+		m.requestPurge(purgeMusic)
 	}
 }
 func (m *Mixer) StopMusic() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.stopped = true
-	m.silenceMusic()
+	m.requestPurge(purgeMusic)
 }
 func (m *Mixer) PlayMusic() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if !m.privacy {
+	if !m.privacy.Load() {
 		m.stopped = false
+		m.notifyOwner()
 	}
 }
-func (m *Mixer) silenceMusic() { m.rebuild(false, true) }
 
 // MusicStart/Write/End implement the companion output contract. The epoch is
 // scoped to a child run by its Go bridge; it must not be reused on child restart.
 func (m *Mixer) MusicStart(epoch uint64, played func(uint32, int64), failed ...func()) {
+	m.epochMu.Lock()
+	defer m.epochMu.Unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.music = m.music[:0]
 	m.epoch, m.played, m.musicFailed = 0, nil, nil
-	m.rebuild(false, true)
+	m.requestPurge(purgeMusic)
+	m.waitPurge()
+	if m.err != nil {
+		return
+	}
 	m.epoch, m.played = epoch, played
 	m.musicFailed = nil
 	if len(failed) != 0 {
@@ -249,7 +312,7 @@ func (m *Mixer) MusicWrite(ctx context.Context, epoch uint64, b []byte) error {
 		if epoch == 0 || m.epoch != epoch {
 			return context.Canceled
 		}
-		if len(m.music)+len(b)/4 <= musicCapacity {
+		if m.purge == 0 && !m.purging && len(m.music)+len(b)/4 <= musicCapacity {
 			break
 		}
 		wake := m.wake
@@ -263,9 +326,12 @@ func (m *Mixer) MusicWrite(ctx context.Context, epoch uint64, b []byte) error {
 	for i := 0; i < len(b); i += 4 {
 		m.music = append(m.music, stereo{int16(binary.LittleEndian.Uint16(b[i:])), int16(binary.LittleEndian.Uint16(b[i+2:]))})
 	}
+	m.notifyOwner()
 	return nil
 }
 func (m *Mixer) MusicEnd(epoch uint64) {
+	m.epochMu.Lock()
+	defer m.epochMu.Unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.epoch != epoch {
@@ -273,28 +339,31 @@ func (m *Mixer) MusicEnd(epoch uint64) {
 	}
 	m.music = m.music[:0]
 	m.epoch, m.played, m.musicFailed = 0, nil, nil
-	m.rebuild(false, true)
-	m.signal()
+	m.requestPurge(purgeMusic)
+	m.waitPurge()
 }
 func (m *Mixer) MusicVolume(volume uint8, muted bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.musicGain, m.musicMuted = float64(min(volume, 100))/100, muted
+	m.notifyOwner()
 }
 
 // progress retires only frames the kernel says it consumed. The raw monotonic
 // epoch matches SendspinClient::now_us() on Linux. Callbacks must not block.
 func (m *Mixer) progress() error {
+	m.mu.Unlock()
 	delay, err := m.pcm.Delay()
+	var ts unix.Timespec
+	if err == nil {
+		err = unix.ClockGettime(unix.CLOCK_MONOTONIC_RAW, &ts)
+	}
+	m.mu.Lock()
 	if err != nil {
 		return err
 	}
 	if delay < 0 || delay > len(m.hardware) {
 		return errors.New("linux: invalid PCM delay")
-	}
-	var ts unix.Timespec
-	if err = unix.ClockGettime(unix.CLOCK_MONOTONIC_RAW, &ts); err != nil {
-		return err
 	}
 	n := len(m.hardware) - delay
 	count, last := uint32(0), 0
@@ -337,7 +406,10 @@ func (m *Mixer) rebuild(voice, music bool) {
 		}
 	}
 	if drop {
-		if err := m.pcm.Drop(); err != nil {
+		m.mu.Unlock()
+		err := m.pcm.Drop()
+		m.mu.Lock()
+		if err != nil {
 			m.fail(err)
 			return
 		}
@@ -372,6 +444,7 @@ func (m *Mixer) rebuild(voice, music bool) {
 	}
 	if voice {
 		m.voicePending = 0
+		m.voiceStarted = false
 	}
 	m.signal()
 }
@@ -392,53 +465,91 @@ func (m *Mixer) recover(err error) {
 		m.fail(err)
 		return
 	}
-	if err = m.pcm.Drop(); err != nil {
-		m.fail(err)
-		return
-	}
+	wasPurging := m.purging
+	m.purging = true
 	m.generation++
 	m.voice, m.hardware, m.pending = m.voice[:0], m.hardware[:0], m.pending[:0]
 	m.voicePending, m.tail = 0, false
+	m.voiceStarted = false
 	m.resample.reset()
 	m.invalidateMusic()
+	m.signal()
+	m.mu.Unlock()
+	err = m.pcm.Drop()
+	m.mu.Lock()
+	m.purging = wasPurging
+	if err != nil {
+		m.fail(err)
+	}
 	m.signal()
 }
 
 func (m *Mixer) fail(err error) {
 	if m.err == nil {
+		m.notifyOwner()
 		m.err = err
-		_ = m.pcm.Close()
 		m.signal()
 	}
 }
 
 func (m *Mixer) run() {
 	defer close(m.done)
-	tick := time.NewTicker(2 * time.Millisecond)
-	defer tick.Stop()
+	defer m.pcm.Close()
+	var ticks <-chan time.Time
+	if m.pacer == nil { // Test and other non-pollable PCM adapters.
+		tick := time.NewTicker(2 * time.Millisecond)
+		defer tick.Stop()
+		ticks = tick.C
+	}
+	noProgress := 0
 	for {
-		select {
-		case <-m.stop:
-			return
-		case <-tick.C:
+		var hardware bool
+		var waitErr error
+		if m.pacer != nil {
+			hardware, waitErr = m.pacer.WaitPlayback()
+		} else {
+			select {
+			case <-m.stop:
+				return
+			case <-ticks:
+			}
 		}
 		m.mu.Lock()
+		if waitErr != nil {
+			m.fail(waitErr)
+		}
 		if m.err != nil {
 			m.mu.Unlock()
 			return
+		}
+		if parts := m.purge; parts != 0 {
+			m.purge, m.purging = 0, true
+			m.rebuild(parts&purgeVoice != 0, parts&purgeMusic != 0)
+			m.purging = false
+			m.signal()
+			if m.purge != 0 || m.err != nil {
+				m.mu.Unlock()
+				continue
+			}
 		}
 		if err := m.progress(); err != nil {
 			m.recover(err)
 			m.mu.Unlock()
 			continue
 		}
-		if len(m.hardware) < mixAhead {
-			for len(m.pending) < mixAhead-len(m.hardware) {
-				m.fill()
+		if m.purge != 0 || m.err != nil {
+			m.mu.Unlock()
+			continue
+		}
+		accepted := 0
+		if len(m.hardware) < m.mixAhead {
+			n := m.mixAhead - len(m.hardware)
+			if missing := n - len(m.pending); missing > 0 {
+				m.fill(missing)
 			}
-			n := min(mixAhead-len(m.hardware), len(m.pending))
 			b := make([]byte, n*4)
 			duck := m.duck
+			silentMusic := m.musicMuted || m.privacy.Load() || m.stopped
 			target := 1.0
 			if m.active.Load() {
 				target = 0.2
@@ -447,7 +558,7 @@ func (m *Mixer) run() {
 				// 20 ms full-range gain ramp, independent of user music gain.
 				duck += max(-0.8/960, min(0.8/960, target-duck))
 				gain := m.musicGain * duck
-				if m.musicMuted || m.privacy || m.stopped {
+				if silentMusic {
 					gain = 0
 				}
 				for ch, sample := range []int16{f.music.l, f.music.r} {
@@ -455,41 +566,69 @@ func (m *Mixer) run() {
 					binary.LittleEndian.PutUint16(b[i*4+ch*2:], uint16(int16(max(-32768, min(32767, math.Round(v))))))
 				}
 			}
+			m.mu.Unlock()
 			written, err := m.pcm.Write(b)
+			m.mu.Lock()
 			if written < 0 || written > len(b) || written%4 != 0 {
 				err = io.ErrShortWrite
 				written = 0
 			}
+			accepted = written / 4
 			step := float64(written/4) * 0.8 / 960
 			m.duck += max(-step, min(step, target-m.duck))
+			// A purge can arrive while this write is in flight. Account for
+			// what the kernel accepted so the next pass purges it as well.
 			m.hardware = append(m.hardware, m.pending[:written/4]...)
 			copy(m.pending, m.pending[written/4:])
 			m.pending = m.pending[:len(m.pending)-written/4]
 			if err != nil && !errors.Is(err, syscall.EAGAIN) && !errors.Is(err, syscall.EINTR) {
 				m.recover(err)
+				noProgress = 0
+				m.mu.Unlock()
+				continue
+			}
+		}
+		// Broken readiness must not turn into a tight loop. A healthy
+		// hardware wake either accepts frames or reports an ALSA fault.
+		if accepted > 0 {
+			noProgress = 0
+		} else if hardware {
+			noProgress++
+			if noProgress == 3 {
+				m.fail(errors.New("linux: playback readiness without progress"))
 			}
 		}
 		m.mu.Unlock()
 	}
 }
 
-func (m *Mixer) fill() {
-	for i := 0; i < mixBlock; i++ {
+func (m *Mixer) fill(frames int) {
+	// Hold a short initial/resume queue without holding the speaker clock.
+	// Drain's finite tail can finish even if this clip never met the threshold.
+	voiced := 0
+	if m.voiceStarted || m.tail || len(m.voice) >= voicePreroll {
+		voiced = min(frames, len(m.voice))
+		m.voiceStarted = voiced == frames
+	}
+	music := min(frames, len(m.music))
+	for i := 0; i < frames; i++ {
 		f := mixFrame{}
-		if i < len(m.voice) {
+		if i < voiced {
 			f.voice, f.voiced = m.voice[i], true
 		}
-		if i < len(m.music) {
+		if i < music {
 			f.music, f.epoch = m.music[i], m.epoch
 		}
 		m.pending = append(m.pending, f)
 	}
-	n := min(mixBlock, len(m.voice))
-	copy(m.voice, m.voice[n:])
-	m.voice = m.voice[:len(m.voice)-n]
-	n = min(mixBlock, len(m.music))
-	copy(m.music, m.music[n:])
-	m.music = m.music[:len(m.music)-n]
+	if voiced > 0 {
+		copy(m.voice, m.voice[voiced:])
+		m.voice = m.voice[:len(m.voice)-voiced]
+	}
+	if music > 0 {
+		copy(m.music, m.music[music:])
+		m.music = m.music[:len(m.music)-music]
+	}
 	m.signal()
 }
 

@@ -1,6 +1,7 @@
 package biscuit
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -8,9 +9,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"time"
 
@@ -30,6 +33,7 @@ type updateRequest struct {
 	channel    string
 	generation uint64
 	install    bool
+	offer      *linuxupdate.Release
 }
 
 // Kept outside config.json so the previous good runtime can still parse its
@@ -50,6 +54,9 @@ type linuxUpdates struct {
 	busy, activated bool
 	client          linuxupdate.Client
 	store           linuxupdate.Store
+	arm64           *linuxupdate.ARM64Store
+	offer           *linuxupdate.Release
+	beforeInstall   func() error
 	trustPath       string
 	reboot          func() error
 }
@@ -93,9 +100,49 @@ func updateVersion(core string, revision int64) string {
 	return fmt.Sprintf("%s (revision %d)", core, revision)
 }
 
+func newARM64Updates() (*linuxUpdates, error) {
+	b, err := os.ReadFile("/run/encore/arm64-installed.json")
+	if err != nil {
+		return nil, err
+	}
+	var m linuxupdate.Manifest
+	if err = json.Unmarshal(b, &m); err != nil {
+		return nil, err
+	}
+	version := updateVersion(m.CoreVersion, m.Revision)
+	return &linuxUpdates{
+		channel: m.Channel, jobs: make(chan updateRequest, 1),
+		state: api.UpdateStateResponse{Key: linuxUpdateKey, Title: "Encore Biscuit", CurrentVersion: version, LatestVersion: version},
+		client: linuxupdate.Client{Installed: m, Key: linuxupdate.BiscuitARM64Root(), Directory: "/data/encore/updates",
+			BaseURL: "https://farooqu.github.io/encore-satellite"},
+		arm64:  &linuxupdate.ARM64Store{Directory: "/store/encore", Booted: "/run/encore/slot"},
+		reboot: func() error { return exec.Command("/bin/busybox.static", "reboot").Run() },
+		beforeInstall: func() error {
+			b, err := os.ReadFile("/sys/devices/platform/amz_privacy/privacy_state")
+			if err != nil || strings.TrimSpace(string(b)) != "1" {
+				return errors.New("Mute the physical microphone before installing the update")
+			}
+			f, err := os.Open("/dev/mmcblk0p8")
+			if err != nil {
+				return errors.New("Cannot verify recovery boot selection; USB review required")
+			}
+			defer f.Close()
+			var command [32]byte
+			if _, err := io.ReadFull(f, command[:]); err != nil ||
+				!bytes.Equal(command[:], append([]byte("boot-recovery"), make([]byte, 19)...)) {
+				return errors.New("MISC does not select recovery; USB review required before updates")
+			}
+			return nil
+		},
+	}, nil
+}
+
 func (u *linuxUpdates) selectChannel(channel string) error {
 	u.mu.Lock()
 	defer u.mu.Unlock()
+	if u.arm64 != nil {
+		return errors.New("ARM64 checks the public feed; no channel selection")
+	}
 	if !linuxupdate.Channel(channel) {
 		return errors.New("invalid update channel")
 	}
@@ -130,24 +177,39 @@ func (u *linuxUpdates) request(install bool) {
 	if u.busy || u.activated {
 		return
 	}
+	if u.arm64 != nil && install && u.offer == nil {
+		return
+	}
 	u.busy = true
 	u.state.InProgress = true
-	u.state.MissingState = true
-	u.state.LatestVersion = ""
+	if u.arm64 == nil {
+		u.state.MissingState = true
+		u.state.LatestVersion = ""
+	} else if !install {
+		u.state.LatestVersion = u.state.CurrentVersion
+	}
 	u.state.ReleaseSummary = "Checking signed selected-channel metadata"
-	u.jobs <- updateRequest{u.channel, u.generation, install}
+	u.jobs <- updateRequest{channel: u.channel, generation: u.generation, install: install, offer: u.offer}
+	u.offer = nil
 }
 
 func (u *linuxUpdates) states() []proto.Message {
 	u.mu.Lock()
 	defer u.mu.Unlock()
+	if u.arm64 != nil {
+		return []proto.Message{proto.Clone(&u.state)}
+	}
 	return []proto.Message{&api.SelectStateResponse{Key: updateChannelKey, State: u.channel, MissingState: !linuxupdate.Channel(u.channel)}, proto.Clone(&u.state)}
 }
 func (u *linuxUpdates) list(c *esphome.Conn) error {
+	if u.arm64 == nil {
+		if err := c.Send(&api.ListEntitiesSelectResponse{Key: updateChannelKey, ObjectId: "update_channel", Name: "Update channel", Options: []string{"dev", "stable"}, EntityCategory: esphome.CategoryConfig}); err != nil {
+			return err
+		}
+	}
 	for _, m := range []proto.Message{
-		&api.ListEntitiesSelectResponse{Key: updateChannelKey, ObjectId: "update_channel", Name: "Update channel", Options: []string{"dev", "stable"}, EntityCategory: esphome.CategoryConfig},
 		&api.ListEntitiesButtonResponse{Key: checkUpdatesKey, ObjectId: "check_updates", Name: "Check for updates", EntityCategory: esphome.CategoryConfig},
-		&api.ListEntitiesUpdateResponse{Key: linuxUpdateKey, ObjectId: "linux_update", Name: "Linux update", EntityCategory: esphome.CategoryConfig},
+		&api.ListEntitiesUpdateResponse{Key: linuxUpdateKey, ObjectId: "linux_update", Name: "Linux update", DeviceClass: "firmware", EntityCategory: esphome.CategoryConfig},
 	} {
 		if err := c.Send(m); err != nil {
 			return err
@@ -159,6 +221,9 @@ func (u *linuxUpdates) list(c *esphome.Conn) error {
 func (u *linuxUpdates) run(ctx context.Context, changed func() error) {
 	tick := time.NewTicker(time.Hour)
 	defer tick.Stop()
+	if u.arm64 != nil {
+		u.request(false)
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -172,7 +237,11 @@ func (u *linuxUpdates) run(ctx context.Context, changed func() error) {
 			stale := job.channel != u.channel || job.generation != u.generation
 			u.mu.Unlock()
 			if !stale {
-				u.execute(child, job, changed)
+				if u.arm64 != nil {
+					u.executeARM64(child, job, changed)
+				} else {
+					u.execute(child, job, changed)
+				}
 			}
 			cancel()
 			u.mu.Lock()
@@ -182,6 +251,74 @@ func (u *linuxUpdates) run(ctx context.Context, changed func() error) {
 			u.mu.Unlock()
 			_ = changed()
 		}
+	}
+}
+
+func (u *linuxUpdates) executeARM64(ctx context.Context, job updateRequest, changed func() error) {
+	status := func(offer *linuxupdate.Release, summary string) {
+		u.mu.Lock()
+		defer u.mu.Unlock()
+		u.offer = offer
+		u.state.LatestVersion = u.state.CurrentVersion
+		if offer != nil {
+			u.state.LatestVersion = updateVersion(offer.CoreVersion, offer.Revision)
+		}
+		u.state.ReleaseSummary = summary
+	}
+	fail := func(err error) { status(nil, err.Error()) }
+	m := u.client.Installed
+	highest, err := u.arm64.InstalledHighWater(m)
+	if err != nil {
+		fail(err)
+		return
+	}
+	r, err := u.client.Check(ctx, m.Channel, highest)
+	if err != nil {
+		fail(err)
+		return
+	}
+	if r == nil {
+		status(nil, "No verified newer release")
+		return
+	}
+	if r.Size > linuxupdate.ARM64MaxArchive {
+		fail(errors.New("Public release exceeds ARM64 rootfs limit"))
+		return
+	}
+	if !job.install || job.offer == nil || job.offer.Revision != r.Revision || job.offer.SHA256 != r.SHA256 {
+		status(r, "Update available; confirm installation in Home Assistant")
+		return
+	}
+	if err := u.beforeInstall(); err != nil {
+		status(r, err.Error()) // user can correct privacy and confirm again
+		return
+	}
+	status(nil, "Downloading verified ARM64 rootfs")
+	_ = changed()
+	file, err := u.client.Download(ctx, *r)
+	if err != nil {
+		fail(err)
+		return
+	}
+	defer os.Remove(file)
+	if err := u.beforeInstall(); err != nil {
+		status(r, err.Error())
+		return
+	}
+	if err := ctx.Err(); err != nil {
+		fail(err)
+		return
+	}
+	if err := u.arm64.Install(m, u.client.Key, r.Proof, file); err != nil {
+		fail(err)
+		return
+	}
+	u.mu.Lock()
+	u.activated = true
+	u.mu.Unlock()
+	status(nil, "Trial slot selected; reboot requested; health check pending")
+	if err := u.reboot(); err != nil {
+		fail(fmt.Errorf("Trial slot selected but reboot failed: %w", err))
 	}
 }
 

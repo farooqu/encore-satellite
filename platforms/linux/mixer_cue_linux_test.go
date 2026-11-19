@@ -44,7 +44,7 @@ func TestMixerCueGainTailAndFollowingVoice(t *testing.T) {
 	render := func(gain float64, useCue bool) []int16 {
 		t.Helper()
 		p := &cuePCM{}
-		m := linux.NewMixer(p)
+		m := linux.NewMixer(p, testMixAhead)
 		defer m.Close()
 		m.SetVolume(gain)
 		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
@@ -108,7 +108,7 @@ func TestMixerCueGainTailAndFollowingVoice(t *testing.T) {
 func TestMixerCueRejectsBusyPrivacyStopAndClosed(t *testing.T) {
 	for _, condition := range []string{"active", "voice", "music", "privacy", "stopped", "closed"} {
 		t.Run(condition, func(t *testing.T) {
-			m := linux.NewMixer(&mixerPCM{})
+			m := linux.NewMixer(&mixerPCM{}, testMixAhead)
 			defer m.Close()
 			switch condition {
 			case "active":
@@ -131,7 +131,7 @@ func TestMixerCueRejectsBusyPrivacyStopAndClosed(t *testing.T) {
 			}
 		})
 	}
-	m := linux.NewMixer(&mixerPCM{})
+	m := linux.NewMixer(&mixerPCM{}, testMixAhead)
 	defer m.Close()
 	for _, samples := range [][]int16{nil, {}, make([]int16, 801)} {
 		if m.TryCue(samples) {
@@ -151,9 +151,9 @@ func (p *cueLockedPCM) Delay() (int, error) {
 	return 0, nil
 }
 
-func TestMixerCueNeverWaitsForOutputLock(t *testing.T) {
+func TestMixerCueCanQueueDuringPCMDelay(t *testing.T) {
 	p := &cueLockedPCM{cuePCM: &cuePCM{}, entered: make(chan struct{}), release: make(chan struct{})}
-	m := linux.NewMixer(p)
+	m := linux.NewMixer(p, testMixAhead)
 	defer m.Close()
 	defer close(p.release)
 	select {
@@ -165,8 +165,8 @@ func TestMixerCueNeverWaitsForOutputLock(t *testing.T) {
 	go func() { result <- m.TryCue([]int16{4000}) }()
 	select {
 	case accepted := <-result:
-		if accepted {
-			t.Fatal("accepted cue while output lock busy")
+		if !accepted {
+			t.Fatal("blocked DELAY held the otherwise idle cue queue")
 		}
 	case <-time.After(100 * time.Millisecond):
 		t.Fatal("cue waited for blocked PCM")

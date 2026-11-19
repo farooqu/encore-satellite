@@ -43,6 +43,11 @@ privacy_muted() {
 run() {
   case "$name" in
     base) exec /etc/encore/boot.sh;;
+    health)
+      # On an update trial the clock runs even if base or app startup stalls.
+      if test -f /run/encore/arm64-update-trial; then
+        exec /usr/local/sbin/encore-health supervised
+      fi;;
   esac
   wait_for test -e /run/encore/base-ready
   format=$("$BB" cat /etc/encore-base 2>/dev/null || :)
@@ -96,7 +101,17 @@ run() {
 if test "${2:-}" = worker; then
   # Base copies stock firmware into the bounded /run tmpfs. A process-wide
   # 128 KiB limit there would cap the payload, not just the log.
-  if test "$name" != base; then ulimit -f 256; fi
+  if test "$name" = app && test -f /run/encore/arm64-installed.json; then
+    # Limit diagnostic output, not the authenticated archive the app stages.
+    # Keep reading after the prefix so the app never gets SIGPIPE on its log.
+    fifo=$dir/output.pipe
+    "$BB" mkfifo -m 600 "$fifo"
+    { "$BB" head -c 131072; "$BB" cat >/dev/null; } <"$fifo" &
+    exec >"$fifo" 2>&1
+    "$BB" rm "$fifo"
+  elif test "$name" != base; then
+    ulimit -f 256
+  fi
   run
   exit
 fi

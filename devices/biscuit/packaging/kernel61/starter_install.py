@@ -5,6 +5,7 @@ import gzip
 import io
 import json
 import os
+import re
 import secrets
 import struct
 import tarfile
@@ -17,12 +18,24 @@ from kernel61.arm64_probe import BUSYBOX_SHA256, native_elf
 from package import FORMAT as LEGACY, sha
 
 FORMAT = STARTER_FORMAT
+BASE_SHA = "a8386b120851db6bf30cd6a2a354d605d3c76ea83e62b18c5549079a9b373fbe"
+CA_SHA = "5961c0a3c65459931c023e0075c09733f09aea4ca439cb85bc4a08bb4f3f568b"
 IMAGE_SHA = "3214a7bea1c369b34e8cae6b2cd97f2eb37cda6c6242b984fedc94337ad23604"
 DTB_SHA = "27f2ee89b2c1cb787fe8c88a5555da03d22f5a7f9b5669135cd83dd0aab4f312"
 P12 = "/dev/block/mmcblk0p12"
 STORE = "/cache/encore"
 STATE = "/data/encore"
 STOCK_FIRMWARE = Path(__file__).with_name("stock-firmware")
+
+
+def starter_version(core, revision):
+    if (not isinstance(core, str) or len(core) > 128 or not re.fullmatch(
+            r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?", core)
+            or any(p.isdigit() and len(p) > 1 and p.startswith("0")
+                   for p in core.partition("+")[0].partition("-")[2].split("."))
+            or type(revision) is not int or not 0 < revision < 2**63):
+        raise ValueError("expected core SemVer and a positive signed-64-bit revision")
+    return f"{core} {revision}"
 
 
 def check_stock_firmware(adb):
@@ -48,9 +61,11 @@ def load_bundle(path, digest):
         rootfs, recovery, header = (archive.read(n) for n in ("rootfs.tar.gz", "recovery.img", "header.bin"))
     if (manifest.get("format") != FORMAT or manifest.get("backend") != "incubator"
             or type(manifest.get("package_revision")) is not int or manifest["package_revision"] < 1
+            or type(manifest.get("api_key_provisioning", False)) is not bool
             or manifest.get("files") != {"rootfs.tar.gz": sha(rootfs), "recovery.img": sha(recovery),
                                          "header.bin": TEMPLATE_SHA256}):
         raise ValueError("invalid ARM64 starter manifest")
+    signed = None
     with tarfile.open(fileobj=io.BytesIO(rootfs), mode="r:gz") as archive:
         entries = {}
         size = 0
@@ -86,6 +101,15 @@ def load_bundle(path, digest):
         busybox, fpga = read("bin/busybox.static"), read("lib/firmware/i2s_to_spi_v34.bin")
         if sha(busybox) != BUSYBOX_SHA256 or sha(fpga) != FPGA_SHA256:
             raise ValueError("unexpected BusyBox or microphone firmware")
+        if "core_version" in manifest:
+            core, revision = manifest["core_version"], manifest["package_revision"]
+            if read("etc/encore-arm64-version") != (starter_version(core, revision) + "\n").encode():
+                raise ValueError("starter version marker mismatch")
+            if manifest.get("retained_base_sha256") != BASE_SHA or sha(read("etc/ssl/certs/ca-certificates.crt")) != CA_SHA:
+                raise ValueError("unexpected ARM64 base or CA bundle")
+            verifier = read("usr/local/bin/arm64-verify")
+            native_elf(verifier, static=True)
+            signed = (core, revision, verifier)
     # Reconstruct the entire recovery image, not just its header and outer digest.
     # The ramdisk must be the starter policy for this exact rootfs and retained kernel.
     if len(recovery) < 2048 or recovery[:8] != b"ANDROID!":
@@ -105,7 +129,7 @@ def load_bundle(path, digest):
     ramdisk_offset = 2048 + ((kernel_len + 2047) // 2048) * 2048
     ramdisk_size = struct.unpack_from("<I", recovery, 16)[0]
     ramdisk = recovery[ramdisk_offset:ramdisk_offset + ramdisk_size]
-    expected = gzip.decompress(initramfs(busybox, sha(rootfs), fpga, starter=True))
+    expected = gzip.decompress(initramfs(busybox, sha(rootfs), fpga, starter=True, signed=signed))
     decoder = zlib.decompressobj(31)
     if (decoder.decompress(ramdisk, len(expected) + 1) != expected or not decoder.eof or decoder.unused_data
             or recovery != boot_image(header, image, dtb, ramdisk, compressed_image=payload[:-65536])):
@@ -186,8 +210,12 @@ def install_locked(adb, args, manifest, rootfs, recovery, name):
         backup("legacy-data.tar", data)
     else:
         backup("legacy-data-absent.txt", b"/data/encore was absent\n")
-    key = base64.b64encode(secrets.token_bytes(32)) + b"\n"
-    backup("encore-api-key.txt", key)
+    # Older starter bundles require an existing key to boot. New ones begin
+    # unpaired and let Home Assistant choose the permanent key after Action.
+    key = None
+    if not manifest.get("api_key_provisioning", False):
+        key = base64.b64encode(secrets.token_bytes(32)) + b"\n"
+        backup("encore-api-key.txt", key)
     backup("SHA256SUMS", "".join(f"{digest}  {filename}\n" for filename, digest in checksums.items()).encode())
     for directory in (args.backup_dir, args.backup_dir.parent):
         fd = os.open(directory, os.O_RDONLY)
@@ -208,7 +236,8 @@ def install_locked(adb, args, manifest, rootfs, recovery, name):
     adb.write(f"{pending}/recovery.img", recovery)
     adb.write(f"{pending}/manifest.json", json.dumps(manifest, sort_keys=True).encode() + b"\n")
     adb.write(f"{next_data}/config.json", json.dumps({"schema": 1, "name": name}).encode() + b"\n")
-    adb.write(f"{next_data}/noise.psk", key)
+    if key is not None:
+        adb.write(f"{next_data}/noise.psk", key)
     adb.write(f"{pending}/active", b"a\n")
     adb.write(f"{pending}/highest-revision", f"{revision}\n".encode())
     adb.write(f"{pending}/format", (FORMAT + "\n").encode())

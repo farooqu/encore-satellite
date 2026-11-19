@@ -22,6 +22,9 @@ const (
 	speakerStartupSteps = 60
 	speakerMaxSteps     = 120
 	speakerMaxPercent   = speakerMaxSteps * 100.0 / 120
+	// 40 ms covers the observed ~29 ms refill-to-DELAY-error interval with
+	// ~11 ms nominal margin, within the 4096-frame playback ring.
+	speakerLeadFrames = 1920
 )
 
 type speaker struct {
@@ -34,7 +37,7 @@ type speaker struct {
 }
 
 func newSpeaker(pcm linux.TimedPCM) *speaker {
-	s := &speaker{Mixer: linux.NewMixer(pcm), volume: speakerStartupSteps, volumeChanged: make(chan struct{}, 1)}
+	s := &speaker{Mixer: linux.NewMixer(pcm, speakerLeadFrames), volume: speakerStartupSteps, volumeChanged: make(chan struct{}, 1)}
 	s.Mixer.SetVolume(float64(speakerStartupSteps) / 120)
 	return s
 }

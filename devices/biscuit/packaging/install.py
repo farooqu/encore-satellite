@@ -452,7 +452,7 @@ def main():
     p.add_argument("--allow-development", action="store_true", help="acknowledge unsigned local development build")
     p.add_argument("--name", help="new DNS device name; no old configuration is imported")
     p.add_argument("--twrp-sha256", required=True, help="SHA256 of the independently verified full original recovery partition")
-    p.add_argument("--backup-dir", type=Path, required=True, help="new private local directory for recovery and pairing key")
+    p.add_argument("--backup-dir", type=Path, required=True, help="new private local directory for recovery backups")
     args = parser.parse_args()
     try:
         install(args)

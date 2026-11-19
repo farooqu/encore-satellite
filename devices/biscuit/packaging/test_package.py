@@ -504,7 +504,8 @@ class RecoveryTests(unittest.TestCase):
         (self.device / "tools/dd").write_text('#!/bin/sh\nexec /usr/bin/dd "$@" conv=notrunc\n')
         unrelated = self.device / "data/unrelated"
         unrelated.write_bytes(b"not Encore")
-        with patch.object(starter_install, "load_bundle", return_value=({"package_revision": 1}, rootfs, image)):
+        manifest = {"package_revision": 1, "api_key_provisioning": True}
+        with patch.object(starter_install, "load_bundle", return_value=(manifest, rootfs, image)):
             self.stock_ok = False
             for apply in (False, True):
                 self.args.apply = apply
@@ -528,8 +529,9 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual((self.args.backup_dir / "current-p12.img").read_bytes(), twrp)
         self.assertEqual(p12.read_bytes(), image + twrp[len(image):])
         self.assertEqual(unrelated.read_bytes(), b"not Encore")
+        self.assertFalse((self.args.backup_dir / "encore-api-key.txt").exists())
         self.assertEqual(sorted(p.name for p in (self.device / "data/encore").iterdir()),
-                         ["config.json", "noise.psk"])
+                         ["config.json"])
 
     def test_arm64_transition_publishes_only_after_flash_readback(self):
         self.check_arm64_transition(corrupt_readback=False)

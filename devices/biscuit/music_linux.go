@@ -13,6 +13,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/farooqu/encore-satellite/backends/bluetooth"
+	"github.com/farooqu/encore-satellite/internal/esphomepairing"
 	"github.com/farooqu/encore-satellite/platforms/linuxsendspin"
 )
 
@@ -267,7 +268,7 @@ func (d *biscuitControls) Handle(ctx context.Context, c *esphome.Conn, msg proto
 			return d.broadcast()
 		}
 	case *api.UpdateCommandRequest:
-		if d.updates != nil && v.Key == linuxUpdateKey {
+		if d.updates != nil && v.Key == linuxUpdateKey && v.DeviceId == 0 {
 			switch v.Command {
 			case api.UpdateCommand_UPDATE_COMMAND_CHECK:
 				d.updates.request(false)
@@ -463,5 +464,7 @@ func (d *biscuitControls) Serve(ctx context.Context, l net.Listener, info esphom
 	defer func() { cancel(); <-done }()
 	info.BluetoothFeatures = d.Features()
 	info.VoiceFeatures = 0 // Common controls are not a second Assist voice endpoint.
-	return (&esphome.Server{Info: info, PSK: &key, Handler: d, WriteTimeout: 2 * time.Second}).Serve(ctx, l)
+	return (&esphome.Server{Info: info, PSK: &key, Handler: d, WriteTimeout: 2 * time.Second,
+		OnSetEncryptionKey: esphomepairing.RefuseKey,
+	}).Serve(ctx, l)
 }

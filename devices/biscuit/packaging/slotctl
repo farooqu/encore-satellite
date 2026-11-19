@@ -42,6 +42,7 @@ arm)
       # slot selection or enrollment. Legacy callers cannot re-arm.
       [ "$format" = encore-biscuit-arm64-starter-v1 ]
       put "$STORE/slots/$slot.state" 'trial 0';;
+    update-spent) [ "$format" = encore-biscuit-arm64-starter-v1 ] && [ -f "$(dirname "$BOOTED")/arm64-update-trial" ];;
     good) [ "$format" = encore-biscuit-arm64-starter-v1 ];;
     *) exit 1;;
   esac
@@ -49,7 +50,11 @@ arm)
 commit)
   slot=$(cat "$BOOTED"); valid "$slot"
   [ "$(cat "$STORE/active")" = "$slot" ]
-  case "$(state "$slot")" in good|'trial 0'|'trial 1') ;; *) exit 1;; esac
+  case "$(state "$slot")" in
+    good|'trial 0'|'trial 1') ;;
+    update-spent) [ "$format" = encore-biscuit-arm64-starter-v1 ] && [ -f "$(dirname "$BOOTED")/arm64-update-trial" ] || exit 1;;
+    *) exit 1;;
+  esac
   put "$STORE/slots/$slot.state" good
   ;;
 status)

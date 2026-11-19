@@ -18,7 +18,7 @@ func (m *Mixer) TryCue(samples []int16) bool {
 		return false
 	}
 	defer m.mu.Unlock()
-	if m.err != nil || m.active.Load() || m.voicePending != 0 || len(m.voice) != 0 || m.epoch != 0 || len(m.music) != 0 || m.privacy || m.stopped {
+	if m.err != nil || m.purge != 0 || m.purging || m.active.Load() || m.voicePending != 0 || len(m.voice) != 0 || m.epoch != 0 || len(m.music) != 0 || m.privacy.Load() || m.stopped {
 		return false
 	}
 	m.resample.reset()
@@ -26,6 +26,8 @@ func (m *Mixer) TryCue(samples []int16) bool {
 	m.voice = m.resample.append(m.voice, make([]int16, 21))
 	m.voicePending += (len(samples) + 21) * 3
 	m.tail = true
+	m.voiceStarted = true // A complete cue may play even if a short Write follows before refill.
 	m.resample.reset()
+	m.notifyOwner()
 	return true
 }

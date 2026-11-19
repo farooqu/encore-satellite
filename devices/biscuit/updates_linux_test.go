@@ -44,6 +44,139 @@ func testLinuxUpdates(t *testing.T, dir string) *linuxUpdates {
 	return u
 }
 
+func TestARM64PublicUpdateRequiresConfirmationAndPreservesEnrollment(t *testing.T) {
+	dir := t.TempDir()
+	store := linuxupdate.ARM64Store{Directory: filepath.Join(dir, "cache/encore"), Booted: filepath.Join(dir, "run/slot")}
+	m := linuxupdate.BiscuitARM64Identity("0.1.1-dev.5", 22)
+	seed := []byte("private baseline archive fixture")
+	update := []byte("different public archive fixture")
+	write := func(path string, data []byte) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, data, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	assertFile := func(path, expected string) {
+		t.Helper()
+		b, err := os.ReadFile(path)
+		if err != nil || string(b) != expected {
+			t.Fatalf("%s: got %q, want %q: %v", path, b, expected, err)
+		}
+	}
+	for path, value := range map[string]string{"active": "a\n", "highest-revision": "22\n", "slots/a.state": "good\n", "slots/b.state": "held\n",
+		"slots/a/rootfs.tar.gz": string(seed), "slots/b/rootfs.tar.gz": string(seed)} {
+		write(filepath.Join(store.Directory, path), []byte(value))
+	}
+	write(store.Booted, []byte("a\n"))
+	stateDir := filepath.Join(dir, "data/encore")
+	values := map[string]string{"config.json": `{"schema":1,"name":"fresh-dot","bluetooth_proxy":true}`, "noise.psk": "test-psk",
+		"wpa_supplicant.conf": "test-wifi", "bluetooth/AA:BB:CC:DD:EE:FF/peer/info": "test-bond"}
+	for path, value := range values {
+		write(filepath.Join(stateDir, path), []byte(value))
+	}
+	pub, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := func(b []byte) string { return fmt.Sprintf("%x", sha256.Sum256(b)) }
+	var metadata, downloads atomic.Int32
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/biscuit-arm64/incubator/stable.jws":
+			mode := metadata.Load()
+			if mode == 0 {
+				http.NotFound(w, r)
+				return
+			}
+			rel := linuxupdate.Release{Target: m.Target, Format: m.Format, Channel: m.Channel, Backend: m.Backend,
+				CoreVersion: "0.1.1", Revision: 23, BaseSHA256: m.BaseSHA256, Size: int64(len(update)), SHA256: digest(update),
+				URL: "https://" + r.Host + "/asset", Issued: time.Now().Unix() - 300, Expires: time.Now().Unix() + 300}
+			if mode == 3 {
+				rel.CoreVersion, rel.Revision = "0.1.2", 24
+			}
+			b, _ := json.Marshal(rel)
+			message := base64.RawURLEncoding.EncodeToString([]byte(linuxupdate.Header)) + "." + base64.RawURLEncoding.EncodeToString(b)
+			sig := ed25519.Sign(key, []byte(message))
+			if mode == 1 {
+				sig[0] ^= 1
+			}
+			fmt.Fprint(w, message+"."+base64.RawURLEncoding.EncodeToString(sig))
+		case "/asset":
+			downloads.Add(1)
+			_, _ = w.Write(update)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	var reboots int
+	version := updateVersion(m.CoreVersion, m.Revision)
+	u := &linuxUpdates{arm64: &store, channel: m.Channel, jobs: make(chan updateRequest, 1),
+		state:         api.UpdateStateResponse{CurrentVersion: version, LatestVersion: version},
+		client:        linuxupdate.Client{Installed: m, Key: pub, HTTP: server.Client(), BaseURL: server.URL, Directory: filepath.Join(stateDir, "updates")},
+		beforeInstall: func() error { return nil }, reboot: func() error { reboots++; return nil }}
+	job := func(install bool) {
+		t.Helper()
+		u.request(install)
+		select {
+		case request := <-u.jobs:
+			u.executeARM64(t.Context(), request, func() error { return nil })
+			u.busy, u.state.InProgress = false, false
+		default:
+			t.Fatal("no update job queued")
+		}
+	}
+	u.request(true)
+	if len(u.jobs) != 0 {
+		t.Fatal("install accepted before showing a verified offer")
+	}
+	for _, mode := range []int32{0, 1} {
+		metadata.Store(mode)
+		job(false)
+		if s := u.states()[0].(*api.UpdateStateResponse); s.MissingState || s.LatestVersion != s.CurrentVersion {
+			t.Fatalf("unexpected update offer: %v", s)
+		}
+	}
+	metadata.Store(2)
+	job(false)
+	if got := u.states()[0].(*api.UpdateStateResponse).LatestVersion; got != "0.1.1 (revision 23)" {
+		t.Fatalf("missing verified offer: %q", got)
+	}
+	metadata.Store(3)
+	job(true) // A release swap between offer and confirm requires new confirmation.
+	assertFile(filepath.Join(store.Directory, "active"), "a\n")
+	if downloads.Load() != 0 || reboots != 0 {
+		t.Fatal("a check or moved feed initiated installation")
+	}
+	job(true)
+	assertFile(filepath.Join(store.Directory, "active"), "b\n")
+	assertFile(filepath.Join(store.Directory, "slots/b.state"), "update\n")
+	assertFile(filepath.Join(store.Directory, "highest-revision"), "24\n")
+	assertFile(filepath.Join(store.Directory, "slots/a/rootfs.tar.gz"), string(seed))
+	if downloads.Load() != 1 || reboots != 1 {
+		t.Fatalf("downloads=%d reboots=%d", downloads.Load(), reboots)
+	}
+	if got, err := store.VerifyBoot("b", digest(seed), m, pub); err != nil || got.Revision != 24 || got.CoreVersion != "0.1.2" {
+		t.Fatalf("signed staged archive cannot boot: %+v %v", got, err)
+	}
+	if _, err := store.VerifyBoot("b", digest(seed), m, linuxupdate.BiscuitARM64Root()); err == nil {
+		t.Fatal("production key accepted an isolated test signature")
+	}
+	write(filepath.Join(store.Directory, "slots/b/rootfs.tar.gz"), bytes.Repeat([]byte{'x'}, len(update)))
+	if _, err := store.VerifyBoot("b", digest(seed), m, pub); err == nil {
+		t.Fatal("signed receipt accepted tampered archive bytes")
+	}
+	if got, err := store.VerifyBoot("a", digest(seed), m, pub); err != nil || got.Revision != 22 {
+		t.Fatalf("old good slot cannot roll back beneath high-water: %+v %v", got, err)
+	}
+	for path, value := range values {
+		assertFile(filepath.Join(stateDir, path), value)
+	}
+}
+
 func TestPrivateUpdateSelectionInitialization(t *testing.T) {
 	dir := t.TempDir()
 	manifest, selection := filepath.Join(dir, "installed.json"), filepath.Join(dir, "update-state.json")

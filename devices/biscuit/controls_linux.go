@@ -73,7 +73,7 @@ func buttonGroup(name string) uint8 {
 	return 0
 }
 
-func buttons(ctx context.Context, d *input.Device, gate *linux.Privacy, engine *session.Engine, player *speaker) error {
+func buttons(ctx context.Context, d *input.Device, gate *linux.Privacy, engine *session.Engine, player *speaker, apiAction chan<- struct{}) error {
 	// The Dot keypad emits down/up, not autorepeat. Keep reads interruptible
 	// while this worker repeats held volume keys, as Techo5 does every 200 ms.
 	events := make(chan input.Event)
@@ -163,6 +163,12 @@ func buttons(ctx context.Context, d *input.Device, gate *linux.Privacy, engine *
 		case 115:
 			player.pressVolume(1)
 		case 138:
+			if buttonGroup(d.Name) == 4 {
+				select {
+				case apiAction <- struct{}{}:
+				default: // No waiting first-pair window; never queue an authorization.
+				}
+			}
 			_, _ = gate.Check(func() {
 				s := engine.Snapshot()
 				if s.Phase == "idle" && !s.Active && !s.Alert {

@@ -98,7 +98,7 @@ listing:
 	state(20, false)
 	buttonWait(t, "unmute did not restore selected gain", func() bool { return sample() == 2400 })
 	e := session.New(p)
-	keys := buttonEvents(t, linux.NewPrivacy(func() (bool, error) { return false, nil }), e, p)
+	keys := buttonEvents(t, linux.NewPrivacy(func() (bool, error) { return false, nil }), e, p, nil)
 	keys(114, 1)
 	keys(114, 0)
 	state(100.0*23/120, false)

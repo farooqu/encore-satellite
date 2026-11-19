@@ -32,6 +32,23 @@ class RuntimeTests(unittest.TestCase):
         self.bb = shutil.which("busybox")
         self.assertIsNotNone(self.bb)
 
+    def test_ota_app_can_write_archive_larger_than_its_log_cap(self):
+        runtime = self.root / "run/encore"
+        (runtime / "services/app").mkdir(parents=True)
+        (runtime / "arm64-installed.json").touch()
+        source = (HERE / "runtime-service").read_text().replace("/bin/busybox.static", self.bb)
+        source = source.replace("/run/encore", str(runtime))
+        begin, end = source.index("run() {"), source.index('if test "${2:-}" = worker;')
+        source = source[:begin] + f'''run() {{
+  "$BB" dd if=/dev/zero of={self.root}/archive bs=1024 count=512 2>/dev/null
+  "$BB" dd if=/dev/zero bs=1024 count=640 2>/dev/null
+}}
+''' + source[end:]
+        result = subprocess.run([self.bb, "sh", "-s", "app", "worker"], input=source.encode(),
+                                check=True, capture_output=True, timeout=10)
+        self.assertEqual((self.root / "archive").stat().st_size, 512 * 1024)
+        self.assertEqual(len(result.stdout), 128 * 1024)
+
     def test_stock_firmware_checks_both_slots_but_loads_only_a(self):
         root = self.root
         for directory in ("tmp", "run/encore", "dev/block", "bin"):

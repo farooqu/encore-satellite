@@ -4,9 +4,12 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"syscall"
 	"unsafe"
+
+	"golang.org/x/sys/unix"
 )
 
 // FormatS16_LE is 16-bit little endian, the only format the playback codec accepts.
@@ -69,7 +72,8 @@ type Playback struct {
 	frameBytes int
 	started    bool
 	// full is whether the kernel took StartFull: the stream starts once the ring is written.
-	full bool
+	full   bool
+	wakeFD int // nonblocking control/event wake; -1 without hardware pacing
 }
 
 // OpenPlayback configures a playback stream. The hardware starts itself on the first write, or once
@@ -80,6 +84,10 @@ type Playback struct {
 // A held device returns ErrBusy. Writes and Drain remain nonblocking. The
 // caller serializes all operations and retries EAGAIN with cancellation.
 func OpenPlayback(card, device int, cfg Config) (*Playback, error) {
+	ring := cfg.PeriodSize * cfg.Periods
+	if cfg.PlaybackWakeLead < 0 || (cfg.PlaybackWakeLead != 0 && (cfg.StartFull || cfg.PlaybackWakeLead >= ring)) {
+		return nil, errors.New("alsa: invalid paced playback watermark")
+	}
 	path := fmt.Sprintf("/dev/snd/pcmC%dD%dp", card, device)
 	f, err := os.OpenFile(path, os.O_WRONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
@@ -116,9 +124,26 @@ func OpenPlayback(card, device int, cfg Config) (*Playback, error) {
 		sw := fullStart(cfg)
 		full = ioctl(f.Fd(), ioctlSwParams, unsafe.Pointer(&sw)) == nil
 	}
+	if cfg.PlaybackWakeLead != 0 {
+		// ALSA readiness is measured in free frames, not playback lead.
+		sw := fullStart(cfg)
+		sw.startThreshold, sw.availMin = 1, uint(ring-cfg.PlaybackWakeLead)
+		if err := ioctl(f.Fd(), ioctlSwParams, unsafe.Pointer(&sw)); err != nil {
+			_ = f.Close()
+			return nil, fmt.Errorf("alsa: paced playback sw_params: %w", err)
+		}
+	}
 	if err := ioctlArgless(f.Fd(), ioctlPrepare); err != nil {
 		_ = f.Close()
 		return nil, fmt.Errorf("prepare: %w", err)
+	}
+	wakeFD := -1
+	if cfg.PlaybackWakeLead != 0 {
+		wakeFD, err = unix.Eventfd(0, unix.EFD_NONBLOCK|unix.EFD_CLOEXEC)
+		if err != nil {
+			_ = f.Close()
+			return nil, fmt.Errorf("alsa: playback eventfd: %w", err)
+		}
 	}
 
 	return &Playback{
@@ -126,7 +151,49 @@ func OpenPlayback(card, device int, cfg Config) (*Playback, error) {
 		cfg:        cfg,
 		frameBytes: cfg.Channels * cfg.Bits / 8,
 		full:       full,
+		wakeFD:     wakeFD,
 	}, nil
+}
+
+func (p *Playback) PlaybackPaced() bool { return p.cfg.PlaybackWakeLead != 0 }
+
+// WakePlayback coalesces work without waiting for the PCM owner. The caller
+// serializes wakes with shutdown; only the owner closes either descriptor.
+func (p *Playback) WakePlayback() {
+	var b [8]byte
+	binary.NativeEndian.PutUint64(b[:], 1)
+	for {
+		if _, err := unix.Write(p.wakeFD, b[:]); err != unix.EINTR {
+			return // EAGAIN means a wake is already pending.
+		}
+	}
+}
+
+// WaitPlayback blocks on ALSA or a software wake, not a timer. ALSA POLLERR
+// also wakes the owner; DELAY determines whether recovery is needed.
+func (p *Playback) WaitPlayback() (bool, error) {
+	fds := [2]unix.PollFd{{Fd: int32(p.wakeFD), Events: unix.POLLIN}, {Fd: int32(p.f.Fd()), Events: unix.POLLOUT}}
+	for {
+		_, err := unix.Poll(fds[:], -1)
+		if err == unix.EINTR {
+			continue
+		}
+		if err != nil {
+			return false, err
+		}
+		if fds[0].Revents&unix.POLLIN != 0 {
+			var b [8]byte
+			for {
+				if _, err := unix.Read(p.wakeFD, b[:]); err != unix.EINTR {
+					return false, err
+				}
+			}
+		}
+		if fds[0].Revents != 0 || fds[1].Revents&(unix.POLLNVAL|unix.POLLHUP) != 0 {
+			return false, io.ErrClosedPipe
+		}
+		return true, nil
+	}
 }
 
 // StartsFull is whether the stream waits for a full ring before it starts, which is what
@@ -160,7 +227,7 @@ func granted(p *hwParams, cfg Config) error {
 func (p *Playback) FrameBytes() int { return p.frameBytes }
 
 // Write plays whole frames, returning EAGAIN if the hardware has no room. On underrun the stream is
-// re-prepared and the call reports it, since a gap in playback is worth knowing about. With
+// re-prepared unless the paced owner handles recovery; the call reports the gap either way. With
 // StartFull the kernel starts the stream itself when the write that fills the ring lands.
 func (p *Playback) Write(buf []byte) (int, error) {
 	frames := len(buf) / p.frameBytes
@@ -173,6 +240,9 @@ func (p *Playback) Write(buf []byte) (int, error) {
 	}
 	if err := ioctl(p.f.Fd(), ioctlWritei, unsafe.Pointer(&x)); err != nil {
 		if err == syscall.EPIPE {
+			if p.PlaybackPaced() {
+				return 0, ErrUnderrun // the owner fences the stream before preparing it
+			}
 			_ = ioctlArgless(p.f.Fd(), ioctlPrepare)
 			p.started = false
 			return 0, ErrUnderrun
@@ -238,6 +308,9 @@ func (p *Playback) Drop() error {
 }
 
 func (p *Playback) Close() error {
+	if p.PlaybackPaced() {
+		_ = unix.Close(p.wakeFD)
+	}
 	_ = ioctlArgless(p.f.Fd(), ioctlDrop)
 	return p.f.Close()
 }

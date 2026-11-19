@@ -12,16 +12,16 @@ import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from kernel61.arm64_assemble import HERE, ROOT, boot_image, initramfs, repack, sha
-from kernel61.starter_install import DTB_SHA, FORMAT, IMAGE_SHA, load_bundle
+from kernel61.starter_install import BASE_SHA, CA_SHA, DTB_SHA, FORMAT, IMAGE_SHA, load_bundle, starter_version
 
-BASE_SHA = "a8386b120851db6bf30cd6a2a354d605d3c76ea83e62b18c5549079a9b373fbe"
-
-
-def starter_rootfs(base, binaries):
+def starter_rootfs(base, binaries, version=None, ca=None):
     files = {
         **{"usr/local/bin/" + name: (data, 0o755) for name, data in binaries.items()},
         "etc/encore-base": ((FORMAT + "\n").encode(), 0o644),
     }
+    if version is not None:
+        files["etc/encore-arm64-version"] = ((version + "\n").encode(), 0o644)
+        files["etc/ssl/certs/ca-certificates.crt"] = (ca, 0o644)
     for source, target in (("runtime-service", "runtime-service"), ("stock-firmware", "encore-stock-firmware"),
                            ("usb-rescue", "usb-rescue"), ("../run", "encore-run"),
                            ("../slotctl", "slotctl"), ("../health", "encore-health"),
@@ -33,10 +33,13 @@ def starter_rootfs(base, binaries):
                               '''mount -t ext4 -o noatime,nosuid,nodev,noexec /dev/mmcblk0p16 /data
 test ! -L /data/encore
 test "$(stat -c '%u:%a' /data/encore)" = 0:700
-for state in config.json noise.psk; do
-  file=/data/encore/$state
-  test -s "$file" && test ! -L "$file" && test "$(stat -c '%u:%a' "$file")" = 0:600 || exit 1
-done''')
+test -s /data/encore/config.json && test ! -L /data/encore/config.json &&
+  test "$(stat -c '%u:%a' /data/encore/config.json)" = 0:600 || exit 1
+key=/data/encore/noise.psk
+if test -e "$key" || test -L "$key"; then
+  test ! -L "$key" && test -f "$key" && test -s "$key" &&
+    test "$(stat -c '%u:%a' "$key")" = 0:600 || exit 1
+fi''')
     startup = startup.replace('fw=/store/encore/firmware',
                               '/usr/local/sbin/encore-stock-firmware load\nfw=/run/encore/firmware')
     files["etc/encore/boot.sh"] = ((startup + "touch /run/encore/base-ready\n").encode(), 0o755)
@@ -65,10 +68,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sealed-base", type=Path, required=True)
     parser.add_argument("--revision", type=int, required=True)
+    parser.add_argument("--core-version", required=True, help="complete core SemVer, including prerelease when applicable")
+    parser.add_argument("--ca-bundle", type=Path, required=True, help="pinned Alpine Mozilla CA bundle")
     parser.add_argument("--output", type=Path, required=True, help="new private build directory")
     args = parser.parse_args()
-    if args.revision < 1:
-        parser.error("revision must be positive")
+    version = starter_version(args.core_version, args.revision)
+    ca = args.ca_bundle.read_bytes()
+    if sha(ca) != CA_SHA:
+        parser.error("expected the pinned Alpine ca-certificates-bundle")
     base_dir = args.sealed_base
     base, image, dtb, header = ((base_dir / name).read_bytes() for name in
                                  ("rootfs.tar.gz", "Image", "biscuit-arm64-probe.dtb", "audited-header.bin"))
@@ -94,14 +101,21 @@ def main():
         subprocess.run(["go", "build", "-trimpath", "-buildvcs=false", "-o", str(path), package],
                        cwd=ROOT, env=env, check=True)
         binaries[name] = path.read_bytes()
-    rootfs = starter_rootfs(base, binaries)
-    ramdisk = initramfs(busybox, sha(rootfs), fpga, starter=True)
+    verifier = output / "arm64-verify"
+    subprocess.run(["go", "build", "-trimpath", "-buildvcs=false", "-o", str(verifier),
+                    "./devices/biscuit/cmd/arm64-verify"], cwd=ROOT, env=env, check=True)
+    binaries["arm64-verify"] = verifier.read_bytes()
+    rootfs = starter_rootfs(base, binaries, version, ca)
+    ramdisk = initramfs(busybox, sha(rootfs), fpga, starter=True,
+                        signed=(args.core_version, args.revision, binaries["arm64-verify"]))
     recovery = boot_image(header, image, dtb, ramdisk)
     if any(sha((ROOT / path).read_bytes()) != digest for path, digest in sources.items()):
         raise RuntimeError("source changed during starter assembly")
 
     members = {"rootfs.tar.gz": rootfs, "recovery.img": recovery, "header.bin": header}
     manifest = {"format": FORMAT, "backend": "incubator", "package_revision": args.revision,
+                "core_version": args.core_version,
+                "api_key_provisioning": True,
                 "architecture": "aarch64", "distribution": "Alpine " + alpine, "release": False,
                 "retained_base_sha256": BASE_SHA, "kernel_image_sha256": IMAGE_SHA, "dtb_sha256": DTB_SHA,
                 "go": subprocess.check_output(["go", "version"], text=True).strip(), "sources": sources,
