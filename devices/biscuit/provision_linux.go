@@ -79,20 +79,24 @@ func joinWiFi(ctx context.Context, w improv.WiFi) (string, error) {
 			_ = reconfigureWiFi(cleanup)
 		}
 	}()
-	if err = exec.CommandContext(ctx, "ip", "addr", "flush", "dev", "wlan0").Run(); err != nil {
-		return "", errors.New("dot: clearing old Wi-Fi address failed")
-	}
-	if err = writePrivate(liveWiFiPath, b); err != nil {
+	adapter := systemWiFi{}
+	if err = adapter.apply(ctx, b); err != nil {
 		return "", err
 	}
-	if err = reconfigureWiFi(ctx); err != nil {
-		return "", err
-	}
+	renewed := false
 	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
 	for {
 		status, statusErr := exec.CommandContext(ctx, "wpa_cli", "-i", "wlan0", "status").Output()
 		if statusErr == nil && strings.Contains("\n"+string(status), "\nwpa_state=COMPLETED\n") {
+			if !renewed {
+				// A DHCP daemon can still hold a lease from a prior connection.
+				// Reuse its validated owner and require a fresh address.
+				if err = adapter.renew(ctx); err != nil {
+					return "", err
+				}
+				renewed = true
+			}
 			if ip := wlanIPv4(); ip != nil {
 				if err = writePrivate(wifiPath, b); err != nil {
 					return "", err
