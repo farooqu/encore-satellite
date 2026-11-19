@@ -141,6 +141,39 @@ fi
                 else:
                     self.assertLessEqual(count, 191)
 
+    def test_held_candidate_neither_commits_nor_spends_health_budget_until_armed(self):
+        self.script("tools/sync", "exit 0\n")
+        self.script("tools/reboot", 'echo reboot >> "$ROOT/events"\n')
+        self.script("tools/slotctl", 'echo "$1" >> "$ROOT/events"\n')
+        self.script("tools/sleep", '''
+n=$(cat "$ROOT/count"); n=$((n+1)); echo "$n" > "$ROOT/count"
+[ "$n" -lt 420 ] || exit 1
+if [ "$MODE" = arm ] && [ "$n" -eq 400 ]; then
+  echo 'trial 1' > "$ROOT/store/encore/slots/a.state"
+fi
+''')
+        source = self.relocated((package.HERE / "health").read_text())
+        source = source.replace("/usr/local/sbin/slotctl", str(self.root / "tools/slotctl"))
+        script = self.script("held-health-check", source)
+        (self.root / "run/encore/slot").write_text("a\n")
+        (self.root / "run/encore/base-ready").touch()
+        # Even a live/stale readiness marker must not commit a held slot.
+        (self.root / "run/encore/ready").write_text(str(os.getpid()))
+        for mode in ("hold", "arm"):
+            with self.subTest(mode=mode):
+                (self.root / "events").unlink(missing_ok=True)
+                (self.root / "count").write_text("0\n")
+                (self.root / "store/encore/slots/a.state").write_text("held\n")
+                result = subprocess.run(["sh", str(script)], capture_output=True, text=True,
+                                        env={**self.env, "MODE": mode}, timeout=30)
+                self.assertEqual(result.returncode, 0 if mode == "arm" else 1, result.stderr)
+                self.assertGreaterEqual(int((self.root / "count").read_text()), 400)
+                events = self.root / "events"
+                if mode == "arm":
+                    self.assertEqual(events.read_text(), "commit\n")
+                else:
+                    self.assertFalse(events.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

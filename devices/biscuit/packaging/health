@@ -13,6 +13,14 @@ provisioning_live() {
 }
 i=0
 while [ "$i" -lt 180 ]; do
+  # A supervised candidate can wait for explicit activation indefinitely.
+  # Neither a stale ready marker nor enrollment may commit a held slot.
+  slot=$(cat /run/encore/slot)
+  case "$slot" in a|b) ;; *) exit 1;; esac
+  if [ "$(cat /store/encore/slots/$slot.state)" = held ]; then
+    sleep 1
+    continue
+  fi
   # First-boot Wi-Fi entry is not a failed update. No slot is committed while
   # waiting. Only a fresh heartbeat from registered, functioning Improv and
   # Action input pauses the budget, never the Bluetooth supervisor marker.

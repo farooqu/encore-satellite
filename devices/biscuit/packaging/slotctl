@@ -14,7 +14,7 @@ next)
   for candidate in "$slot" "$(other "$slot")"; do
     [ -x "$STORE/slots/$candidate/sbin/init" ] || continue
     case "$(state "$candidate")" in
-      good) ;;
+      good|held) ;;
       'trial 2') put "$STORE/slots/$candidate.state" 'trial 1';;
       'trial 1') put "$STORE/slots/$candidate.state" 'trial 0';;
       *) put "$STORE/slots/$candidate.state" bad; continue;;
@@ -25,6 +25,14 @@ next)
   done
   exit 1
   ;;
+arm)
+  slot=$(cat "$BOOTED"); valid "$slot"
+  [ "$(cat "$STORE/active")" = "$slot" ]
+  [ "$(state "$slot")" = held ]
+  # This running boot is the first trial; only one subsequent boot remains.
+  # Repeated arm cannot replenish an already-started trial budget.
+  put "$STORE/slots/$slot.state" 'trial 1'
+  ;;
 commit)
   slot=$(cat "$BOOTED"); valid "$slot"
   [ "$(cat "$STORE/active")" = "$slot" ]
@@ -34,5 +42,5 @@ commit)
 status)
   printf 'active=%s a=%s b=%s\n' "$(cat "$STORE/active")" "$(state a)" "$(state b)"
   ;;
-*) echo 'usage: slotctl next|commit|status' >&2; exit 1;;
+*) echo 'usage: slotctl next|arm|commit|status' >&2; exit 1;;
 esac

@@ -190,6 +190,23 @@ class SlotTests(unittest.TestCase):
         self.assertEqual((self.root / "slots/b.state").read_text(), "bad\n")
         self.assertEqual(self.run_slot("next"), "a")
 
+    def test_held_candidate_requires_explicit_arm_before_trial_or_health_commit(self):
+        (self.root / "slots/b.state").write_text("held\n")
+        for _ in range(4):
+            self.assertEqual(self.run_slot("next"), "b")
+            self.assertEqual((self.root / "slots/b.state").read_text(), "held\n")
+        (self.root / "booted").write_text("a\n")
+        self.run_slot("arm", False)
+        (self.root / "booted").write_text("b\n")
+        self.run_slot("commit", False)
+        self.run_slot("arm")
+        self.assertEqual((self.root / "slots/b.state").read_text(), "trial 1\n")
+        self.run_slot("arm", False)  # Cannot reset the budget by arming twice.
+        self.assertEqual(self.run_slot("next"), "b")
+        self.assertEqual((self.root / "slots/b.state").read_text(), "trial 0\n")
+        self.assertEqual(self.run_slot("next"), "a")
+        self.assertEqual((self.root / "slots/b.state").read_text(), "bad\n")
+
     def test_health_commit_and_both_initial_slots_fail_to_rescue(self):
         self.assertEqual(self.run_slot("next"), "b")
         (self.root / "booted").write_text("a\n")
