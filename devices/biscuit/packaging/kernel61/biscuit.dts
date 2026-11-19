@@ -1,0 +1,28 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Experimental Encore profile. Shared SoC wiring is upstream, not evidence of
+// board equivalence. No bootloader, amplifier polarity or sensor population
+// qualification is implied. Keep upstream model/provenance names in its source.
+#include "libreecho-radar-puffin.dts"
+
+/ {
+	model = "Encore Biscuit 6.1 experiment";
+
+	// Vendor Biscuit tuples from Echo_Dot_src-6.5.7.1-20251024,
+	// arch/arm64/boot/dts/biscuit.dtsi. These are weighted virtual-sensor
+	// contributions, NOT calibrated enclosure temperatures or thermal trips.
+	thermistor@0 {
+		thermistor,offset = <85500>;
+		thermistor,alpha = <344>;
+		thermistor,weight = <(-1220)>;
+	};
+	thermistor@1 {
+		thermistor,offset = <53200>;
+		thermistor,alpha = <699>;
+		thermistor,weight = <747>;
+	};
+	thermistor@2 {
+		thermistor,offset = <46200>;
+		thermistor,alpha = <1>;
+		thermistor,weight = <1120>;
+	};
+};

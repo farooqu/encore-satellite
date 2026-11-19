@@ -20,17 +20,21 @@ import (
 	"github.com/farooqu/encore-satellite/platforms/linux/input"
 )
 
-func TestButtonDiscoveryRequiresBothHardwareGroups(t *testing.T) {
+func TestButtonDiscoveryRequiresBoardHardwareGroups(t *testing.T) {
 	for _, tc := range []struct {
-		name, gpioName, gpioPhys string
-		keypad, wantOK           bool
+		name, gpioName, gpioPhys, keypadName string
+		action, wantOK                       bool
 	}{
-		{"stock Biscuit", "keys", "gpio-keys/input0", true, true},
-		{"driver name", "gpio-keys", "", true, true},
-		{"generic keys without identity", "keys", "", true, false},
-		{"unrelated keys", "keys", "usb/input0", true, false},
-		{"wrong physical input", "keys", "gpio-keys/input1", true, false},
-		{"missing keypad", "keys", "gpio-keys/input0", false, false},
+		{"stock Biscuit", "keys", "gpio-keys/input0", "mtk-kpd", false, !kernel61},
+		{"driver name", "gpio-keys", "", "mtk-kpd", false, !kernel61},
+		{"generic keys without identity", "keys", "", "mtk-kpd", false, false},
+		{"unrelated keys", "keys", "usb/input0", "mtk-kpd", false, false},
+		{"wrong physical input", "keys", "gpio-keys/input1", "mtk-kpd", false, false},
+		{"missing keypad", "keys", "gpio-keys/input0", "", false, false},
+		{"6.1 board groups", "keys", "", "mtk-pmic-keys", true, kernel61},
+		{"6.1 missing Action", "keys", "", "mtk-pmic-keys", false, false},
+		{"6.1 missing PMIC", "keys", "", "", true, false},
+		{"6.1 missing volume", "volume-keys", "", "mtk-pmic-keys", true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			node := func(name, phys string) *input.Device {
@@ -50,15 +54,25 @@ func TestButtonDiscoveryRequiresBothHardwareGroups(t *testing.T) {
 			unrelated := node("ACCDET", "")
 			gpio := node(tc.gpioName, tc.gpioPhys)
 			devices := []*input.Device{unrelated, gpio}
-			if tc.keypad {
-				devices = append(devices, node("mtk-kpd", ""))
+			if tc.keypadName != "" {
+				devices = append(devices, node(tc.keypadName, ""))
+			}
+			if tc.action {
+				devices = append(devices, node("action_key", ""))
 			}
 			got, err := buttonDevices(devices)
 			if (err == nil) != tc.wantOK {
 				t.Fatalf("discovery error = %v, want success %v", err, tc.wantOK)
 			}
-			if tc.wantOK && (len(got) != 2 || got[0] != gpio || got[1] != devices[2]) {
-				t.Fatal("discovery did not retain exactly the two hardware groups")
+			if tc.wantOK {
+				if len(got) != len(devices)-1 {
+					t.Fatal("discovery did not retain exactly the board hardware groups")
+				}
+				for i, d := range got {
+					if d != devices[i+1] {
+						t.Fatal("discovery retained an unexpected input device")
+					}
+				}
 			}
 			for _, d := range devices {
 				_, readErr := d.Read()

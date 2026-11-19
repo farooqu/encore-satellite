@@ -1,0 +1,44 @@
+#!/bin/busybox.static sh
+# Non-release RAM-root trial. Never select recovery or write any partition.
+BB=/bin/busybox.static
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/sbin
+umask 077
+rescue() {
+  echo "Biscuit 6.1 trial: $*; USB rescue (no automatic reboot)" > /dev/kmsg
+  # Remain PID 1 even if USB configuration fails; never fall through to a panic.
+  /usr/local/sbin/usb-rescue || :
+  while :; do $BB sleep 60; done
+}
+$BB mount -t proc proc /proc || rescue proc
+$BB mount -t sysfs sysfs /sys || rescue sysfs
+$BB mount -t devtmpfs devtmpfs /dev || rescue devtmpfs
+$BB mount -t tmpfs -o mode=0755,size=4m tmpfs /run || rescue run
+$BB mkdir -p /dev/pts /run/encore || rescue directories
+$BB mount -t devpts devpts /dev/pts || rescue devpts
+$BB mdev -s || rescue mdev
+# Immutable image policy: rescue works without the store/rootfs or radios.
+if [ "@RESCUE_ONLY@" = 1 ]; then rescue operator-request; fi
+# Only the existing firmware/store partition is read. noload prevents ext4
+# journal replay even on a dirty filesystem. No data/MISC/recovery/expdb access.
+i=0
+while [ ! -b /dev/mmcblk0p15 ]; do
+  i=$((i+1)); [ "$i" -le 15 ] || rescue storage-timeout
+  $BB sleep 1; $BB mdev -s
+done
+$BB mount -t ext4 -o ro,noload /dev/mmcblk0p15 /store || rescue store
+archive=/store/encore/kernel61-trial/rootfs.tar.gz
+printf '%s  %s\n' '@ROOTFS_SHA256@' "$archive" | $BB sha256sum -c - || rescue rootfs-checksum
+# Bounded RAM use; exhaustion/extraction errors go to the independent rescue.
+$BB mount -t tmpfs -o mode=0755,size=128m tmpfs /newroot || rescue ram-root
+$BB tar -xzf "$archive" -C /newroot || rescue rootfs-extract
+[ "$(/bin/busybox.static cat /newroot/etc/encore-base)" = encore-biscuit-kernel61-trial-v1 ] || rescue rootfs-identity
+moved=
+for m in dev sys proc run store; do
+  if ! $BB mount --move /$m /newroot/$m; then
+    # Rejoin the initramfs mount namespace before invoking its rescue helper.
+    for previous in $moved; do $BB mount --move /newroot/$previous /$previous || :; done
+    rescue "move-$m"
+  fi
+  moved="$m $moved"
+done
+exec $BB switch_root /newroot /sbin/init

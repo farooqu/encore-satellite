@@ -94,8 +94,14 @@ func Run(parent context.Context, c Config) error {
 		return err
 	}
 	ring := &ringRenderer{volume: player.volumeFeedback, write: func(frame []byte) error {
+		if kernel61 {
+			return os.WriteFile(ringPath+"scaled_frame", scaledRingFrame(frame), 0644)
+		}
 		return os.WriteFile(ringPath+"frame", frame, 0644)
 	}, setCurrent: func(current byte) error {
+		if kernel61 {
+			return nil // The trial latches quarter current with every scaled frame.
+		}
 		return os.WriteFile(ringPath+"led_current", []byte{'0' + current}, 0644)
 	}}
 	if err = ring.update(engine.Snapshot(), captureReading{}, time.Now(), ringPolicy.snapshot()); err != nil {
@@ -156,9 +162,13 @@ func Run(parent context.Context, c Config) error {
 		return err
 	}
 	controls := &biscuitControls{Proxy: proxy, music: newMusic(c, saved, player), management: admin, ring: ringPolicy, announcements: newAnnouncementPlayer(engine, player)}
-	controls.updates, err = newLinuxUpdates("/data/encore/update-state.json", "/etc/encore-package.json")
-	if err != nil {
-		return err
+	// The 6.1 RAM-root trial must never enter the persistent release updater,
+	// advertise its actions, or require a release-slot identity to start.
+	if !kernel61 {
+		controls.updates, err = newLinuxUpdates("/data/encore/update-state.json", "/etc/encore-package.json")
+		if err != nil {
+			return err
+		}
 	}
 	key, err := noiseKey(KeyPath)
 	if err != nil {

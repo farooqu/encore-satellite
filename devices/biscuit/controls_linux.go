@@ -42,27 +42,49 @@ func openButtons() ([]*input.Device, error) {
 // devices and refusing a base that does not expose both key groups.
 func buttonDevices(devices []*input.Device) ([]*input.Device, error) {
 	var kept []*input.Device
-	keypad, gpio := false, false
+	var found uint8
+	want := uint8(3)
+	if kernel61 {
+		want = 7 // PMIC mute, volume GPIOs and separate Action GPIO.
+	}
 	for _, d := range devices {
-		isKeypad := strings.Contains(d.Name, "mtk-kpd")
-		// The Biscuit stock kernel reports Name="keys" for gpio-keys.
-		// Its physical identity distinguishes it from unrelated generic keys.
-		isGPIO := strings.Contains(d.Name, "gpio-keys") || (d.Name == "keys" && d.Phys == "gpio-keys/input0")
-		if isKeypad || isGPIO {
+		group := buttonGroup(d.Name, d.Phys)
+		if group != 0 {
 			kept = append(kept, d)
-			keypad = keypad || isKeypad
-			gpio = gpio || isGPIO
+			found |= group
 		} else {
 			_ = d.Close()
 		}
 	}
-	if !keypad || !gpio {
+	if found != want {
 		for _, d := range kept {
 			_ = d.Close()
 		}
-		return nil, errors.New("dot: expected mtk-kpd and gpio-keys input devices")
+		return nil, errors.New("dot: required board input groups are missing")
 	}
 	return kept, nil
+}
+
+func buttonGroup(name, phys string) uint8 {
+	if kernel61 {
+		// gpio_keys uses the platform node name, not its compatible string.
+		switch name {
+		case "mtk-pmic-keys":
+			return 1
+		case "keys":
+			return 2
+		case "action_key":
+			return 4
+		}
+		return 0
+	}
+	if strings.Contains(name, "mtk-kpd") {
+		return 1
+	}
+	if strings.Contains(name, "gpio-keys") || (name == "keys" && phys == "gpio-keys/input0") {
+		return 2
+	}
+	return 0
 }
 
 func buttons(ctx context.Context, d *input.Device, gate *linux.Privacy, engine *session.Engine, player *speaker) error {

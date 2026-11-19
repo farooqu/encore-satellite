@@ -3,10 +3,19 @@ package biscuit
 import (
 	"encoding/hex"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/farooqu/encore-satellite/core/presentation"
 )
+
+// The 6.1 driver latches PWM and current together. Every write must carry the
+// quarter-current setting: its legacy frame interface resets current to full.
+func scaledRingFrame(frame []byte) []byte {
+	out := append([]byte(nil), frame[:len(frame)-1]...)
+	out = append(out, strings.Repeat("03", 36)...)
+	return append(out, '\n')
+}
 
 // RingOptions selects the stock daytime current/PWM brightness curve, not
 // calibrated perceived brightness. Unknown night caps brightness at 50%.

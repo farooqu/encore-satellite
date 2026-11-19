@@ -1,0 +1,275 @@
+--- a/sound/soc/mediatek/mt8163-amzn-spi/amzn-mt-spi-pcm.c
++++ b/sound/soc/mediatek/mt8163-amzn-spi/amzn-mt-spi-pcm.c
+@@ -13,6 +13,7 @@
+ #include <linux/io.h>
+ #include <linux/ktime.h>
+ #include <linux/module.h>
++#include <linux/mutex.h>
+ #include <linux/of.h>
+ #include <linux/pinctrl/consumer.h>
+ #include <linux/platform_device.h>
+@@ -82,8 +83,12 @@
+ 	struct workqueue_struct *spi_wq;
+ 	struct work_struct spi_work;
+ 	struct snd_pcm_substream *substream;
+-	spinlock_t state_lock; /* protects running */
++	spinlock_t state_lock; /* protects running and read-and-clear loss */
+ 	spinlock_t write_lock; /* protects cur_write_offset */
++	struct mutex buffer_lock; /* serializes producer and copy_to_user */
++	u64 produced;
++	u64 consumed;
++	size_t read_offset;
+ 	size_t cur_write_offset;
+ 	size_t elapsed;
+ 	size_t kernel_overruns;
+@@ -110,6 +115,45 @@
+ static SOC_ENUM_SINGLE_EXT_DECL(spi_timestamp_enum, spi_timestamp_texts);
+ static bool transfer_timestamps;
+ 
++/* Loss survives STOP/prepare/START until userspace observes it. Saturate so
++ * an arbitrarily delayed read can never mistake wrapped counters for zero. */
++static void amzn_spi_loss(struct amzn_spi_priv *priv, bool fpga)
++{
++	unsigned long flags;
++	size_t *counter = fpga ? &priv->fpga_overruns : &priv->kernel_overruns;
++
++	spin_lock_irqsave(&priv->state_lock, flags);
++	if (*counter < LONG_MAX)
++		(*counter)++;
++	spin_unlock_irqrestore(&priv->state_lock, flags);
++}
++
++static int amzn_spi_loss_info(struct snd_kcontrol *kcontrol,
++			      struct snd_ctl_elem_info *info)
++{
++	info->type = SNDRV_CTL_ELEM_TYPE_INTEGER;
++	info->count = 1;
++	info->value.integer.min = 0;
++	info->value.integer.max = LONG_MAX;
++	return 0;
++}
++
++static int amzn_spi_loss_get(struct snd_kcontrol *kcontrol,
++			     struct snd_ctl_elem_value *value)
++{
++	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
++	struct amzn_spi_priv *priv = snd_soc_component_get_drvdata(component);
++	size_t *counter = kcontrol->private_value ?
++		&priv->fpga_overruns : &priv->kernel_overruns;
++	unsigned long flags;
++
++	spin_lock_irqsave(&priv->state_lock, flags);
++	value->value.integer.value[0] = *counter;
++	*counter = 0;
++	spin_unlock_irqrestore(&priv->state_lock, flags);
++	return 0;
++}
++
+ static int transfer_timestamps_get(struct snd_kcontrol *kcontrol,
+ 				   struct snd_ctl_elem_value *ucontrol)
+ {
+@@ -135,6 +179,19 @@
+ static const struct snd_kcontrol_new amzn_mt_spi_controls[] = {
+ 	SOC_ENUM_EXT("SpiTimeStamps", spi_timestamp_enum,
+ 		     transfer_timestamps_get, transfer_timestamps_set),
++	{
++		.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
++		.name = "FPGA Overruns",
++		.access = SNDRV_CTL_ELEM_ACCESS_READ | SNDRV_CTL_ELEM_ACCESS_VOLATILE,
++		.info = amzn_spi_loss_info, .get = amzn_spi_loss_get,
++		.private_value = 1,
++	},
++	{
++		.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
++		.name = "Kernel Overruns",
++		.access = SNDRV_CTL_ELEM_ACCESS_READ | SNDRV_CTL_ELEM_ACCESS_VOLATILE,
++		.info = amzn_spi_loss_info, .get = amzn_spi_loss_get,
++	},
+ };
+ 
+ static int amzn_spi_txrx(struct amzn_spi_priv *priv, const void *tx,
+@@ -275,15 +332,11 @@
+ 	rx_frame = kzalloc(sizeof(*rx_frame), GFP_KERNEL | GFP_DMA);
+ 	timestamp_frame = kmalloc(SPI_BYTES_PER_PERIOD, GFP_KERNEL);
+ 	if (!tx_frame || !rx_frame || !timestamp_frame) {
++		amzn_spi_loss(priv, false);
+ 		dev_err(&priv->spi->dev, "failed to allocate SPI frame buffers\n");
+ 		goto out;
+ 	}
+ 
+-	priv->elapsed = 0;
+-	priv->cur_write_offset = 0;
+-	priv->kernel_overruns = 0;
+-	priv->fpga_overruns = 0;
+-	amzn_spi_set_running(priv, true);
+ 	sched_set_fifo(current);
+ 
+ 	current_time = ktime_get_raw();
+@@ -299,6 +352,7 @@
+ 		ret = amzn_spi_txrx(priv, tx_frame, rx_frame,
+ 				    sizeof(*rx_frame));
+ 		if (ret) {
++			amzn_spi_loss(priv, false);
+ 			dev_err(&priv->spi->dev, "SPI audio receive failed: %d\n",
+ 				ret);
+ 			break;
+@@ -320,8 +374,10 @@
+ 		}
+ 
+ 		if (!amzn_spi_valid_fpga_rev(&priv->spi->dev,
+-					     rx_frame->dsf.fpga_rev))
++					     rx_frame->dsf.fpga_rev)) {
++			amzn_spi_loss(priv, true);
+ 			goto delay;
++		}
+ 
+ 		if (rx_frame->dsf.overrun) {
+ 			ktime_t after_spi = ktime_get_raw();
+@@ -331,15 +387,15 @@
+ 				goto delay;
+ 
+ 			cycle_us = amzn_spi_ktime_diff_us(after_spi, previous_time);
++			amzn_spi_loss(priv, true);
+ 			dev_err_ratelimited(&priv->spi->dev,
+-					    "FPGA overrun: mode=%u frames=%u timestamp=%u delta=%u cycle_us=%lu total=%zu\n",
++					    "FPGA overrun: mode=%u frames=%u timestamp=%u delta=%u cycle_us=%lu\n",
+ 					    rx_frame->dsf.mode,
+ 					    le16_to_cpu(rx_frame->dsf.num_audio_frames),
+ 					    le32_to_cpu(rx_frame->dsf.timestamp_48mhz),
+ 					    le32_to_cpu(rx_frame->dsf.timestamp_48mhz) -
+ 						previous_fpga_ts,
+-					    cycle_us,
+-					    ++priv->fpga_overruns);
++					    cycle_us);
+ 		}
+ 
+ 		if (!amzn_spi_is_running(priv))
+@@ -349,6 +405,7 @@
+ 			le32_to_cpu(rx_frame->dsf.timestamp_48mhz);
+ 		frame_count = le16_to_cpu(rx_frame->dsf.num_audio_frames);
+ 		if (frame_count > DOUGH_AUDIO_FRAME_BUF) {
++			amzn_spi_loss(priv, true);
+ 			dev_err_ratelimited(&priv->spi->dev,
+ 					    "invalid FPGA frame count %zu\n",
+ 					    frame_count);
+@@ -375,6 +432,9 @@
+ 		}
+ 		bytes_left = frame_count * SPI_BYTES_PER_FRAME;
+ 
++		mutex_lock(&priv->buffer_lock);
++		if (priv->produced - priv->consumed + bytes_left > runtime->dma_bytes)
++			amzn_spi_loss(priv, false);
+ 		while (bytes_left) {
+ 			unsigned long flags;
+ 			size_t bytes;
+@@ -393,6 +453,8 @@
+ 			bytes_left -= bytes;
+ 			copied += bytes;
+ 		}
++		priv->produced += copied;
++		mutex_unlock(&priv->buffer_lock);
+ 
+ 		priv->elapsed += copied;
+ 		while (priv->elapsed >= SPI_BYTES_PER_PERIOD) {
+@@ -520,6 +582,7 @@
+ 	case SNDRV_PCM_TRIGGER_PAUSE_RELEASE:
+ 		if (!priv->spi_wq)
+ 			return -EPIPE;
++		amzn_spi_set_running(priv, true);
+ 		queue_work(priv->spi_wq, &priv->spi_work);
+ 		return 0;
+ 	case SNDRV_PCM_TRIGGER_STOP:
+@@ -532,6 +595,36 @@
+ 	}
+ }
+ 
++static int amzn_mt_spi_pcm_sync_stop(struct snd_soc_component *component,
++				    struct snd_pcm_substream *substream)
++{
++	struct amzn_spi_priv *priv = snd_soc_component_get_drvdata(component);
++
++	amzn_spi_set_running(priv, false);
++	if (priv->spi_wq)
++		flush_workqueue(priv->spi_wq);
++	return 0;
++}
++
++static int amzn_mt_spi_pcm_prepare(struct snd_soc_component *component,
++				  struct snd_pcm_substream *substream)
++{
++	struct amzn_spi_priv *priv = snd_soc_component_get_drvdata(component);
++	unsigned long flags;
++
++	amzn_mt_spi_pcm_sync_stop(component, substream);
++	/* No worker can still publish pre-privacy samples after prepare. */
++	memset(substream->runtime->dma_area, 0, substream->runtime->dma_bytes);
++	priv->produced = 0;
++	priv->consumed = 0;
++	priv->read_offset = 0;
++	priv->elapsed = 0;
++	spin_lock_irqsave(&priv->write_lock, flags);
++	priv->cur_write_offset = 0;
++	spin_unlock_irqrestore(&priv->write_lock, flags);
++	return 0;
++}
++
+ static snd_pcm_uframes_t
+ amzn_mt_spi_pcm_pointer(struct snd_soc_component *component,
+ 			struct snd_pcm_substream *substream)
+@@ -557,22 +650,29 @@
+ {
+ 	struct amzn_spi_priv *priv = snd_soc_component_get_drvdata(component);
+ 	struct snd_pcm_runtime *runtime = substream->runtime;
+-	size_t end = pos + bytes;
++	int ret = 0;
+ 
+ 	if (pos >= runtime->dma_bytes || bytes > runtime->dma_bytes - pos)
+ 		return -EINVAL;
+ 
+-	if (priv->cur_write_offset > pos && priv->cur_write_offset < end) {
+-		priv->kernel_overruns++;
+-		dev_err_ratelimited(&priv->spi->dev,
+-				    "kernel capture overrun, total=%zu\n",
+-				    priv->kernel_overruns);
++	mutex_lock(&priv->buffer_lock);
++	if (priv->produced - priv->consumed > runtime->dma_bytes ||
++	    pos != priv->read_offset ||
++	    bytes > priv->produced - priv->consumed) {
++		amzn_spi_loss(priv, false);
++		ret = -EPIPE;
++		goto out;
+ 	}
+ 
+-	if (copy_to_user(dst, runtime->dma_area + pos, bytes))
+-		return -EFAULT;
+-
+-	return 0;
++	if (copy_to_user(dst, runtime->dma_area + pos, bytes)) {
++		ret = -EFAULT;
++		goto out;
++	}
++	priv->consumed += bytes;
++	priv->read_offset = (pos + bytes) % runtime->dma_bytes;
++out:
++	mutex_unlock(&priv->buffer_lock);
++	return ret;
+ }
+ 
+ static int amzn_mt_spi_pcm_construct(struct snd_soc_component *component,
+@@ -601,6 +701,8 @@
+ 	.close = amzn_mt_spi_pcm_close,
+ 	.hw_params = amzn_mt_spi_pcm_hw_params,
+ 	.hw_free = amzn_mt_spi_pcm_hw_free,
++	.prepare = amzn_mt_spi_pcm_prepare,
++	.sync_stop = amzn_mt_spi_pcm_sync_stop,
+ 	.trigger = amzn_mt_spi_pcm_trigger,
+ 	.pointer = amzn_mt_spi_pcm_pointer,
+ 	.copy_user = amzn_mt_spi_pcm_copy_user,
+@@ -785,6 +887,7 @@
+ 	priv->spi = spi;
+ 	spin_lock_init(&priv->state_lock);
+ 	spin_lock_init(&priv->write_lock);
++	mutex_init(&priv->buffer_lock);
+ 	spi_set_drvdata(spi, priv);
+ 
+ 	priv->reset_gpio = devm_gpiod_get(dev, NULL, GPIOD_ASIS);

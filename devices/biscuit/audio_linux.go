@@ -18,8 +18,6 @@ import (
 	"github.com/farooqu/encore-satellite/platforms/linux/alsa"
 )
 
-const privacyState = "/sys/devices/soc/10010000.keypad/amz_privacy/privacy_state"
-
 const (
 	speakerStartupSteps = 60
 	speakerMaxSteps     = 120
@@ -121,7 +119,20 @@ func AveragePCM(b []byte) ([]int16, error) {
 	return out, nil
 }
 
-func configureMixer(m *alsa.Mixer) error {
+func configureMixer(m interface {
+	SetEnum(string, string) error
+	SetInt(string, uint32) error
+}) error {
+	if kernel61 {
+		// Select before OpenPlayback: prepare loads the coefficients. Never
+		// inherit Radar's two-way crossover on Biscuit's single speaker.
+		if err := m.SetEnum("Ext_Speaker_Amp_Switch", "Off"); err != nil {
+			return err
+		}
+		if err := m.SetEnum("Speaker Codec Profile", "Flat"); err != nil {
+			return err
+		}
+	}
 	// Speaker-only route. No headphone switching, vendor DSP or boosted gain.
 	for _, c := range []struct{ name, value string }{
 		{"Ext_Speaker_Amp_Switch", "Off"}, {"Audio_DacMux_Setting", "On"},

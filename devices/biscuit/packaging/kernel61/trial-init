@@ -1,0 +1,3 @@
+#!/bin/busybox.static sh
+# Init owns the USB console independently of base/radio/application startup.
+exec /bin/busybox.static init
