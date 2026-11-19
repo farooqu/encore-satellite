@@ -16,8 +16,6 @@ $BB mount -t tmpfs -o mode=0755,size=4m tmpfs /run || rescue run
 $BB mkdir -p /dev/pts /run/encore || rescue directories
 $BB mount -t devpts devpts /dev/pts || rescue devpts
 $BB mdev -s || rescue mdev
-# Immutable image policy: rescue works without the store/rootfs or radios.
-if [ "@RESCUE_ONLY@" = 1 ]; then rescue operator-request; fi
 # Only the existing firmware/store partition is read. noload prevents ext4
 # journal replay even on a dirty filesystem. No data/MISC/recovery/expdb access.
 i=0

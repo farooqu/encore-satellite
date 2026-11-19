@@ -15,109 +15,10 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from kernel61 import arm64_assemble, assemble
+from kernel61 import arm64_assemble, rootfs, starter_build
 
 HERE = Path(__file__).resolve().parent
 BACKUP = HERE.parents[3] / ".amp/in/orb-backup"
-MAP = "c0008000 T _text\nc0d81ef0 B _end\n"
-
-
-def template(page=2048):
-    header = bytearray(page)
-    header[:8] = b"ANDROID!"
-    struct.pack_into("<10I", header, 8, 97, 0x40008000, 13, 0x43478000,
-                     0, 0x41000000, 0x48000000, page, 0, 0x12345678)
-    header[48:64] = b"offline-fixture!"
-    command = b"bootopt=64S3,32N2,32N2 console=ttyS0 root=/dev/old skip_initramfs"
-    header[64:64+len(command)] = command
-    # Extra command-line fields must be sanitized too, not silently ignored.
-    header[608:608+len(b" init=/evil dm=old resume=/dev/x")] = b" init=/evil dm=old resume=/dev/x"
-    oldkernel = bytearray(97)
-    struct.pack_into("<I", oldkernel, 36, 0x016F2818)
-    return bytes(header) + oldkernel.ljust(page, b"\0") + b"old initramfs".ljust(page, b"\0")
-
-
-class EnvelopeTests(unittest.TestCase):
-    def test_addresses_sections_command_and_android_id(self):
-        payload, ramdisk = b"new-kernel" * 301, gzip.compress(b"new ramdisk" * 83, mtime=0)
-        for page in (2048, 4096, 8192, 16384):
-            with self.subTest(page=page):
-                original = template(page)
-                result = assemble.boot_image(original, payload, ramdisk, MAP)
-                self.assertEqual(struct.unpack_from("<I", result, 12)[0], 0x40008000)
-                self.assertEqual(struct.unpack_from("<I", result, 20)[0], 0x43478000)
-                self.assertEqual(result[24:64], original[24:64])
-                self.assertEqual(result[64:576].split(b"\0")[0], b"bootopt=64S3,32N2,32N2 console=ttyS0 rdinit=/init")
-                self.assertEqual(result[608:1632], bytes(1024))
-                self.assertEqual(result[page:page+len(payload)], payload)
-                offset = page + ((len(payload) + page - 1) // page) * page
-                self.assertEqual(result[offset:offset+len(ramdisk)], ramdisk)
-                expected = hashlib.sha1(payload + struct.pack("<I", len(payload)) +
-                                        ramdisk + struct.pack("<I", len(ramdisk)) + bytes(4)).digest()
-                self.assertEqual(result[576:608], expected + bytes(12))
-
-    def test_rejects_unsafe_headers_memory_ranges_and_truncation(self):
-        for offset, value in ((8, 0), (12, 0x40010000), (20, 0x43020000),
-                              (20, 0x443FFFE0), (24, 8), (32, 0x43000000),
-                              (36, 1024), (40, 1), (40, 100)):
-            with self.subTest(offset=offset, value=value):
-                changed = bytearray(template())
-                struct.pack_into("<I", changed, offset, value)
-                with self.assertRaises(ValueError):
-                    assemble.boot_image(changed, b"kernel", b"r" * 65, MAP)
-        for original, symbols in ((template()[:-1], MAP),
-                                   (template().replace(b"bootopt=64S3,32N2,32N2", b"bootopt=64S3,64N2,64N2"), MAP),
-                                   (template().replace(struct.pack("<I", 0x016F2818), b"MTK!"), MAP),
-                                   (template(), "c0008000 T _text\nc3008001 B _end"),
-                                   (template(), "c0008000 T _text\n")):
-            with self.subTest(symbols=symbols, size=len(original)):
-                with self.assertRaises(ValueError):
-                    assemble.boot_image(original, b"kernel", b"ramdisk", symbols)
-
-    def test_ramdisk_avoids_both_reservations_tags_and_ram_end(self):
-        # 65 bytes distinguishes an exact end boundary from one-byte overlap.
-        for address, accepted in ((0x4302FFFF, False), (0x43030000, True),
-                                  (0x443FFFBF, True), (0x443FFFC0, False),
-                                  (0x44400000, False), (0x445FFFFF, False),
-                                  (0x44600000, True), (0x46000000, True),
-                                  (0x47FFFFBF, True), (0x47FFFFC0, False),
-                                  (0x48000000, False), (0x4800FFFF, False),
-                                  (0x48010000, True), (0x5FFFFFBF, True),
-                                  (0x5FFFFFC0, False)):
-            with self.subTest(address=hex(address)):
-                header = bytearray(template())
-                struct.pack_into("<I", header, 20, address)
-                if accepted:
-                    image = assemble.boot_image(header, b"kernel", b"r" * 65, MAP)
-                    self.assertEqual(struct.unpack_from("<I", image, 20)[0], address)
-                else:
-                    with self.assertRaises(ValueError):
-                        assemble.boot_image(header, b"kernel", b"r" * 65, MAP)
-
-    def test_header_only_requires_consistent_explicit_framing_evidence(self):
-        original = template()
-        header, prefix = original[:2048], original[2048:2096]
-        metadata = {"header_page_bytes": 2048, "header_page_sha256": assemble.sha(header),
-                    "full_saved_file_bytes": 6144, "full_saved_file_sha256": assemble.sha(original),
-                    "kernel_first48_hex": prefix.hex(), "kernel_first48_sha256": assemble.sha(prefix),
-                    "section_bounds": {"kernel": {"offset": 2048, "end": 2145, "aligned_end": 4096},
-                                       "ramdisk": {"offset": 4096, "end": 4109, "aligned_end": 6144},
-                                       "second": {"offset": 6144, "size": 0},
-                                       "all_sections_within_saved_file": True}}
-        expected = assemble.boot_image(original, b"new", b"ramdisk", MAP)
-        self.assertEqual(assemble.boot_image(header, b"new", b"ramdisk", MAP, metadata), expected)
-        self.assertEqual(expected[44:48], struct.pack("<I", 0x12345678))
-        with self.assertRaises(ValueError):
-            assemble.boot_image(header, b"new", b"ramdisk", MAP)
-        bad_prefix = prefix[:36] + b"MTK!" + prefix[40:]
-        for changes in ({"header_page_sha256": "0" * 64}, {"header_page_bytes": 4096},
-                        {"full_saved_file_bytes": 6143}, {"full_saved_file_sha256": "invalid"},
-                        {"kernel_first48_sha256": "0" * 64},
-                        {"kernel_first48_hex": bad_prefix.hex(), "kernel_first48_sha256": assemble.sha(bad_prefix)},
-                        {"section_bounds": {**metadata["section_bounds"], "second": {"offset": 6145, "size": 0}}}):
-            with self.subTest(changes=changes):
-                with self.assertRaises(ValueError):
-                    assemble.boot_image(header, b"new", b"ramdisk", MAP, {**metadata, **changes})
 
 
 class BootDecisionTests(unittest.TestCase):
@@ -168,7 +69,7 @@ exec "$BUSYBOX" "$@"
         for directory in ("dev", "proc", "sys", "run", "newroot", "store"):
             source = source.replace("/" + directory, str(self.root / directory))
         check = self.script("check", source)
-        for mode in ("ok", "rescue-only", "checksum", "extract", "-t ext4", "-t devtmpfs", "size=128m", "--move /proc"):
+        for mode in ("ok", "checksum", "extract", "-t ext4", "-t devtmpfs", "size=128m", "--move /proc"):
             with self.subTest(mode=mode):
                 (self.root / "events").write_text("")
                 path.write_bytes(archive if mode != "checksum" else archive + b"wrong")
@@ -177,7 +78,6 @@ exec "$BUSYBOX" "$@"
                     check.write_text(source.replace(hashlib.sha256(archive).hexdigest(), hashlib.sha256(b"not gzip").hexdigest()))
                 else:
                     check.write_text(source)
-                check.write_text(check.read_text().replace("@RESCUE_ONLY@", "1" if mode == "rescue-only" else "0"))
                 result = subprocess.run(["sh", str(check)], capture_output=True, text=True,
                                         env={**os.environ, "ROOT": str(self.root), "BUSYBOX": self.busybox, "FAIL": mode}, timeout=10)
                 self.assertEqual(result.returncode, 0, result.stderr)
@@ -186,9 +86,6 @@ exec "$BUSYBOX" "$@"
                 self.assertEqual("RESCUE" in events, mode != "ok", events)
                 if mode in ("ok", "checksum", "extract", "-t ext4", "size=128m"):
                     self.assertIn("-o ro,noload", events)
-                if mode == "rescue-only":
-                    self.assertNotIn("-t ext4", events)
-                    self.assertNotIn("size=128m", events)
                 self.assertNotIn("UNEXPECTED_SLEEP", events)
 
     def test_starter_uses_verified_fallback_without_spending_attempts(self):
@@ -278,12 +175,9 @@ exec "$BUSYBOX" "$@"
         gadget.parent.mkdir(parents=True)
         (self.root / "dev/ttyGS0").touch()
         (self.root / "etc/encore").mkdir(parents=True)
-        for mode in ("none", "ambiguous", "existing", "single", "dual", "ctty"):
+        for mode in ("none", "ambiguous", "existing", "single", "ctty"):
             with self.subTest(mode=mode):
-                for name in ("usb-consoles", "usb-ctty"):
-                    (self.root / "etc/encore" / name).unlink(missing_ok=True)
-                if mode == "dual":
-                    (self.root / "etc/encore/usb-consoles").write_text("2\n")
+                (self.root / "etc/encore/usb-ctty").unlink(missing_ok=True)
                 if mode == "ctty":
                     (self.root / "etc/encore/usb-ctty").touch()
                 shutil.rmtree(udcs)
@@ -300,14 +194,14 @@ exec "$BUSYBOX" "$@"
                 (self.root / "events").write_text("")
                 result = subprocess.run(["sh", str(check)], capture_output=True, text=True,
                                         env={**os.environ, "ROOT": str(self.root), "BUSYBOX": self.busybox}, timeout=10)
-                success = mode in ("single", "dual", "ctty")
+                success = mode in ("single", "ctty")
                 self.assertEqual(result.returncode, 88 if success else 1, result.stderr)
                 self.assertEqual((self.root / "events").read_text(), "CONSOLE\n" if success else "")
                 if success:
                     self.assertEqual((gadget / "UDC").read_text(), "controller-one\n")
                     self.assertEqual((gadget / "idProduct").read_text(), "0x4ee7\n")
                     self.assertTrue((gadget / "configs/c.1/acm.usb0").is_symlink())
-                    self.assertEqual((gadget / "configs/c.1/acm.usb1").is_symlink(), mode == "dual")
+                    self.assertEqual([p.name for p in (gadget / "functions").iterdir()], ["acm.usb0"])
                     # Configfs returns a relative link even when created absolute.
                     link = gadget / "configs/c.1/acm.usb0"
                     link.unlink()
@@ -406,11 +300,13 @@ touch "$ROOT/daemon"
 
 class RootfsTests(unittest.TestCase):
     def test_trial_replaces_release_composition_without_saved_state_or_legacy_idme(self):
-        elf = bytearray(52)
-        elf[:6] = b"\x7fELF\x01\x01"
-        struct.pack_into("<H", elf, 18, 40)
-        struct.pack_into("<HH", elf, 42, 32, 0)
-        tools = ("bin/busybox.static", "usr/local/bin/wmtup", "usr/local/bin/btbridge", "usr/local/bin/encore-sendspin",
+        elf = bytearray(120)
+        elf[:6] = b"\x7fELF\x02\x01"
+        struct.pack_into("<H", elf, 18, 183)
+        struct.pack_into("<Q", elf, 32, 64)
+        struct.pack_into("<HH", elf, 54, 56, 1)
+        struct.pack_into("<I", elf, 64, 1)
+        tools = ("bin/busybox.static", "usr/local/bin/wmtup", "usr/local/bin/btbridge",
                  "sbin/wpa_supplicant", "sbin/wpa_cli", "lib/apk/db/installed", "usr/bin/dbus-daemon",
                  "usr/bin/dbus-uuidgen", "usr/lib/bluetooth/bluetoothd", "usr/sbin/dropbear", "usr/bin/dropbearkey",
                  "usr/bin/flock", "usr/sbin/iptables-legacy", "usr/sbin/ip6tables-legacy",
@@ -426,7 +322,7 @@ class RootfsTests(unittest.TestCase):
                     t.addfile(info, io.BytesIO(elf))
             return buf.getvalue()
 
-        result, busybox = assemble.rootfs_archive(archive(), bytes(elf) + b"new-runtime", {})
+        result, busybox = rootfs.rootfs_archive(archive(), {})
         self.assertEqual(busybox, bytes(elf))
         with tarfile.open(fileobj=io.BytesIO(result), mode="r:gz") as t:
             for name in old:
@@ -434,14 +330,26 @@ class RootfsTests(unittest.TestCase):
             self.assertEqual(t.extractfile("etc/encore-base").read(), b"encore-biscuit-kernel61-trial-v1\n")
             self.assertIn(b"/sys/firmware/devicetree/base/idme/bt_mac_addr/value", t.extractfile("usr/local/sbin/encore-bluetooth").read())
             self.assertIn(b"exec /bin/busybox.static init", t.extractfile("sbin/init").read())
-            self.assertIn(b"::once:/etc/encore/boot.sh\n", t.extractfile("etc/inittab").read())
-            self.assertIn(b"::respawn:/usr/local/sbin/encore-console\n", t.extractfile("etc/inittab").read())
-            self.assertNotIn(b"sysinit", t.extractfile("etc/inittab").read())
-            self.assertEqual(t.extractfile("usr/local/bin/encore-satellite").read(), bytes(elf) + b"new-runtime")
+            self.assertEqual(t.extractfile("etc/inittab").read(), b"::respawn:/usr/local/sbin/usb-rescue\n")
+            self.assertNotIn("usr/local/bin/encore-satellite", t.getnames())
         for extra in ("data/encore/config.json", "store/encore/active", "../outside"):
             with self.subTest(extra=extra):
                 with self.assertRaises(ValueError):
-                    assemble.rootfs_archive(archive(extra), bytes(elf), {})
+                    rootfs.rootfs_archive(archive(extra), {})
+
+    def test_starter_replaces_sealed_bases_old_rescue_console(self):
+        archive = io.BytesIO()
+        with tarfile.open(fileobj=archive, mode="w:gz") as t:
+            for name in ("usr/local/sbin/usb-rescue", "usr/local/sbin/usb-console", "etc/encore/usb-consoles"):
+                data = b"obsolete"
+                member = tarfile.TarInfo(name)
+                member.size = len(data)
+                t.addfile(member, io.BytesIO(data))
+        packed = starter_build.starter_rootfs(archive.getvalue(), {})
+        with tarfile.open(fileobj=io.BytesIO(packed), mode="r:gz") as t:
+            self.assertEqual(t.extractfile("usr/local/sbin/usb-rescue").read(), (HERE / "usb-rescue").read_bytes())
+            self.assertNotIn("usr/local/sbin/usb-console", t.getnames())
+            self.assertNotIn("etc/encore/usb-consoles", t.getnames())
 
 
 if __name__ == "__main__":

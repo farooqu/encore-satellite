@@ -17,11 +17,16 @@ import sys
 import tarfile
 
 HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE.parent))
-from kernel61.build import COMMIT, SOURCE_SHA256, sha
 
+COMMIT = "5bc811d3cd7091e8d70f9faa0bc12c5cf4e77ae0"
+SOURCE_SHA256 = "2d763595ea9299add581aad7bac95749b82b0705ff9c992ddf1ed16d52747087"
 BUSYBOX_APK_SHA256 = "ee469aee2958feffd7f64dd96655704025ff60af614f77a1d7323dc237c34da2"
 BUSYBOX_SHA256 = "a6bb1e6e349cbdfa690a78cd0017413c5446bdae02ee003ceb682d4ae1a004ff"
+
+
+def sha(path):
+    with path.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
 def image_header(image):
@@ -75,7 +80,7 @@ def main():
                "playback-sram.patch", "stp-read.patch")
     inputs = {name: sha(HERE / name) for name in
               ("arm64_probe.py", "arm64-probe.fragment", "arm64-probe.dts",
-               "biscuit.dts", "encore.fragment", "build.py", *patches)}
+               "biscuit.dts", "encore.fragment", *patches)}
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
     env = dict(os.environ, ARCH="arm64", CROSS_COMPILE="aarch64-linux-gnu-",

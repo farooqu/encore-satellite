@@ -5,29 +5,11 @@ from pathlib import Path
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from kernel61.build import validate_payload
 from kernel61.arm64_probe import image_header, native_elf
 from package import arm_elf, validate_kernel
 
 
 class PayloadTest(unittest.TestCase):
-    def test_experimental_framing_does_not_relax_release_validator(self):
-        kernel = bytearray(97)
-        struct.pack_into("<I", kernel, 36, 0x016F2818)
-        dtb = struct.pack(">II", 0xD00DFEED, 43) + bytes(32) + b"abc"
-        payload = kernel + dtb.ljust(65536, b"\0")
-        validate_payload(kernel, dtb, payload)
-        with self.assertRaisesRegex(ValueError, "two complete appended device trees"):
-            validate_kernel(payload)
-        for k, d, p in ((kernel, dtb, payload[:-1]),
-                        (kernel, dtb, payload + dtb),
-                        (kernel, dtb[:-1], payload),
-                        (b"ANDROID!" + kernel, dtb, payload),
-                        (kernel, dtb, kernel + dtb)):
-            with self.subTest(lengths=(len(k), len(d), len(p))):
-                with self.assertRaises(ValueError):
-                    validate_payload(k, d, p)
-
     def test_arm64_probe_requires_native_bounded_4k_image(self):
         image = bytearray(97)
         image[56:60] = b"ARM\x64"

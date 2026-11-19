@@ -20,10 +20,9 @@ import tarfile
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[3]
 sys.path.insert(0, str(HERE.parent))
-from kernel61.arm64_probe import BUSYBOX_SHA256, image_header, native_busybox, native_elf
-from kernel61.assemble import rootfs_archive, sha
-from kernel61.build import COMMIT, SOURCE_SHA256
-from package import cpio
+from kernel61.arm64_probe import BUSYBOX_SHA256, COMMIT, SOURCE_SHA256, image_header, native_busybox, native_elf
+from kernel61.rootfs import TRIAL_FORMAT, rootfs_archive
+from package import cpio, sha
 
 TEMPLATE_SHA256 = "a948a28b3871674b1adabd4a9f47b5d0e6f877f5af8acf6faba6f0a37cb50dda"
 FPGA_SHA256 = "77a558bacdaaf9e343f02f2d74f27a5f2bb2dc8b6d66cc2499b60ed14ef62fe6"
@@ -96,7 +95,7 @@ def repack(data, replacements):
 
 
 def initramfs(busybox, rootfs_hash, microphone_firmware, store_rootfs=STORE_ROOTFS, *, starter=False):
-    init = (HERE / "init").read_text().replace("@RESCUE_ONLY@", "0").replace(
+    init = (HERE / "init").read_text().replace(
         "@ROOTFS_SHA256@", rootfs_hash).replace(
         "/store/encore/kernel61-trial/rootfs.tar.gz", store_rootfs)
     if starter:
@@ -140,7 +139,7 @@ if [ "$selected" != "$active" ]; then
 fi
 printf '%s\\n' "$selected" > /run/encore/slot || rescue booted-slot
 moved=
-''', 1).replace("encore-biscuit-kernel61-trial-v1", STARTER_FORMAT)
+''', 1).replace(TRIAL_FORMAT, STARTER_FORMAT)
     files = [(name, stat.S_IFDIR | 0o755, b"") for name in
              ("bin", "sbin", "usr", "usr/local", "usr/local/sbin", "dev", "dev/pts",
               "proc", "sys", "run", "store", "newroot", "lib", "lib/firmware")]
@@ -152,7 +151,7 @@ moved=
     return cpio(files)
 
 
-def runtime_files(directory, dual_acm=False):
+def runtime_files(directory):
     """Consume an audited private runtime without rebuilding its naming overlay."""
     manifest = json.loads((directory / "manifest.json").read_bytes())
     if (manifest["format"] != "encore-private-arm64-provision-runtime-v1" or
@@ -176,18 +175,14 @@ def runtime_files(directory, dual_acm=False):
              'chmod 600 /data/encore/config.json\n'
              'touch /run/encore/base-ready\n')
     inittab = b"::respawn:/usr/local/sbin/usb-rescue\n"
-    if dual_acm:
-        inittab += b"::respawn:/usr/local/sbin/usb-console\n"
     for name in ("base", "radio", "wifi", "dhcp", "bluetooth", "network", "app"):
         inittab += ("::respawn:/usr/local/sbin/runtime-service " + name + "\n").encode()
     files = {
         "usr/local/bin/encore-satellite": (runtime, 0o755),
         "usr/local/sbin/runtime-service": ((HERE / "runtime-service").read_bytes(), 0o755),
-        "usr/local/sbin/usb-console": ((HERE / "usb-console").read_bytes(), 0o755),
         "etc/encore/boot.sh": (boot.encode(), 0o755),
         "etc/encore/runtime-config.json": (b'{"schema":1,"name":"speaker-office"}\n', 0o600),
         "etc/encore/usb-ctty": (b"1\n", 0o644),
-        "etc/encore/usb-consoles": (b"2\n" if dual_acm else b"1\n", 0o644),
         "etc/inittab": (inittab, 0o644),
     }
     return files, manifest
@@ -204,11 +199,7 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--private-runtime", type=Path,
                         help="sealed pre-rename runtime directory; enables integrated init services")
-    parser.add_argument("--dual-acm", action="store_true",
-                        help="opt-in unqualified second ACM (runtime root only; rescue stays single)")
     args = parser.parse_args()
-    if args.dual_acm and not args.private_runtime:
-        parser.error("dual ACM requires an integrated private runtime")
     inputs = {path.name: sha(path.read_bytes()) for path in HERE.iterdir() if path.is_file()}
     service_sources = {str(path.relative_to(ROOT)): sha(path.read_bytes())
                        for path in HERE.parent.iterdir() if path.is_file()}
@@ -267,12 +258,10 @@ def main():
     if not release.startswith("3.22."):
         raise ValueError("hardware experiment must retain Alpine 3.22")
     base = repack(base, helpers)
-    rootfs, embedded_busybox = rootfs_archive(base, None, record, elf_check=native_elf)
+    rootfs, embedded_busybox = rootfs_archive(base, record)
     if sha(embedded_busybox) != BUSYBOX_SHA256:
         raise ValueError("base and initramfs BusyBox differ")
     rootfs = repack(rootfs, {
-        "sbin/init": ((HERE / "arm64-probe-init").read_bytes(), 0o755),
-        "etc/inittab": (b"::respawn:/usr/local/sbin/usb-rescue\n", 0o644),
         "etc/passwd": (b"root:x:0:0:root:/root:/bin/sh\nmessagebus:x:100:101:messagebus:/run/dbus:/sbin/nologin\n", 0o644),
         "etc/group": (b"root:x:0:root\nmessagebus:x:101:messagebus\n", 0o644),
         "etc/shadow": (b"root:!:0:0:99999:7:::\n", 0o600),
@@ -281,7 +270,7 @@ def main():
     runtime_manifest = None
     store_rootfs = STORE_ROOTFS
     if args.private_runtime:
-        replacements, runtime_manifest = runtime_files(args.private_runtime, args.dual_acm)
+        replacements, runtime_manifest = runtime_files(args.private_runtime)
         rootfs = repack(rootfs, replacements)
         store_rootfs = RUNTIME_ROOTFS
         with tarfile.open(fileobj=io.BytesIO(rootfs)) as archive:
@@ -307,13 +296,13 @@ def main():
                 "microphone_firmware": {"sha256": FPGA_SHA256, "source": "pinned Linux source firmware/i2s_to_spi_v34.bin",
                                         "redistribution": "unresolved license/source grant; private trial only"},
                 "kernel": record, "runtime_sources": sources, "store_rootfs": store_rootfs,
-                "private_runtime": runtime_manifest, "usb_ports": 2 if args.dual_acm else 1,
+                "private_runtime": runtime_manifest, "usb_ports": 1,
                 "inputs": inputs, "service_sources": service_sources,
                 "policy": ("RAM root; store ro,noload; independent USB; single-attempt init services; "
                            "pre-rename identity; no saved credentials; no automatic diagnostic PCM opens"
                            if runtime_manifest else
                            "RAM root; store ro,noload; USB rescue only"),
-                "unqualified": ["integrated physical boot/services and optional dual ACM", "SMP/CPU frequency/idle",
+                "unqualified": ["integrated physical boot/services", "SMP/CPU frequency/idle",
                                 "RF/association/Improv", "acoustic playback/microphone signal", "thermal policy"],
                 "files": {path.name: {"bytes": path.stat().st_size, "sha256": sha(path.read_bytes())}
                           for path in output.iterdir() if path.is_file()}}

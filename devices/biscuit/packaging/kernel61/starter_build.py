@@ -22,10 +22,9 @@ def starter_rootfs(base, binaries):
         **{"usr/local/bin/" + name: (data, 0o755) for name, data in binaries.items()},
         "etc/encore-base": ((FORMAT + "\n").encode(), 0o644),
         "etc/encore/held-start": (b"", 0o644),
-        "etc/encore/usb-consoles": (b"1\n", 0o644),
     }
     for source, target in (("runtime-service", "runtime-service"), ("stock-firmware", "encore-stock-firmware"),
-                           ("../run", "encore-run"),
+                           ("usb-rescue", "usb-rescue"), ("../run", "encore-run"),
                            ("../slotctl", "slotctl"), ("../health", "encore-health"),
                            ("../network", "encore-network"), ("../firewall", "encore-firewall")):
         files["usr/local/sbin/" + target] = ((HERE / source).read_bytes(), 0o755)
@@ -48,7 +47,7 @@ done''')
     files["etc/inittab"] = (inittab.encode(), 0o644)
     # The private diagnostic base contains no device data. Drop the diagnostic
     # entry points and its fixed naming overlay rather than ship hidden extras.
-    discard = {"etc/encore/runtime-config.json", "usr/local/bin/pcm-silence-check",
+    discard = {"etc/encore/runtime-config.json", "etc/encore/usb-consoles", "usr/local/bin/pcm-silence-check",
                "usr/local/bin/hwprobe", "usr/local/bin/encore-diagnostic",
                "usr/local/sbin/arm64-hardware-probe", "usr/local/sbin/usb-console",
                "usr/local/sbin/encore-ssh", "usr/local/bin/encore-sendspin"}

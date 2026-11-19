@@ -3,13 +3,6 @@
 # No partition writes, Android USB nodes or GPIO35 (microphone power) changes.
 set -eu
 BB=/bin/busybox.static
-# Runtime images may explicitly opt into a second, independent shell. The
-# initramfs and existing hardware image retain the qualified single ACM.
-ports=1
-if test -f /etc/encore/usb-consoles; then
-  ports=$($BB cat /etc/encore/usb-consoles)
-fi
-case "$ports" in 1|2) ;; *) exit 1;; esac
 # Only the console owner holds this lock; interactive children must not keep
 # it after a supervisor crash. Reuse our complete gadget on init respawn.
 $BB mkdir -p /run/encore
@@ -37,14 +30,12 @@ if test -e "$g"; then
   test "$( $BB cat "$g/strings/0x409/product" )" = 'Biscuit experimental rescue'
   test "$( $BB cat "$g/UDC" )" = "$udc"
   set -- "$g/functions/"*
-  test "$#" -eq "$ports" && test "$1" = "$g/functions/acm.usb0"
-  if test "$ports" = 2; then test "$2" = "$g/functions/acm.usb1"; fi
+  test "$#" -eq 1
+  test "$1" = "$g/functions/acm.usb0"
   set -- "$g/configs/"*
-  test "$#" -eq 1 && test "$1" = "$g/configs/c.1"
+  test "$#" -eq 1
+  test "$1" = "$g/configs/c.1"
   test "$( $BB readlink -f "$g/configs/c.1/acm.usb0" )" = "$g/functions/acm.usb0"
-  if test "$ports" = 2; then
-    test "$( $BB readlink -f "$g/configs/c.1/acm.usb1" )" = "$g/functions/acm.usb1"
-  fi
 else
   $BB mkdir "$g"
   echo 0x18d1 > "$g/idVendor"
@@ -56,10 +47,6 @@ else
   echo ACM > "$g/configs/c.1/strings/0x409/configuration"
   $BB mkdir "$g/functions/acm.usb0"
   $BB ln -s "$g/functions/acm.usb0" "$g/configs/c.1/acm.usb0"
-  if test "$ports" = 2; then
-    $BB mkdir "$g/functions/acm.usb1"
-    $BB ln -s "$g/functions/acm.usb1" "$g/configs/c.1/acm.usb1"
-  fi
   echo "$udc" > "$g/UDC"
 fi
 i=0
