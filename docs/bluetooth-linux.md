@@ -137,9 +137,11 @@ audited kernel/base approach, not an Encore-qualified kernel:
 On Linux 3.18, BlueZ may have GATT but no `LEAdvertisingManager1` because the
 kernel lacks Add Advertising. `Provision` uses narrowly scoped legacy HCI
 advertising in that case while BlueZ serves GATT. No arbitrary OS-version check
-selects it. Advertised Improv state changes update both modern and legacy
-advertising; legacy disconnect restarts advertising. There is no demonstrated
-need here to pin a different BlueZ version solely for that fallback.
+selects it. With BlueZ 5.82, Improv state changes update `ServiceData` on the
+existing advertisement via `PropertiesChanged`, without removing and re-adding
+it while a client is connected. The signal is not a controller acknowledgement;
+the GATT Current State characteristic remains authoritative for the client.
+Legacy HCI still updates the advertising data and restarts advertising on disconnect.
 
 ## Host API and sequencing
 

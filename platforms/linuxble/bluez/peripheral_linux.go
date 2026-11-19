@@ -222,16 +222,12 @@ func (p *Peripheral) Set(uuid string, value []byte) {
 		map[string]dbus.Variant{"Value": dbus.MakeVariant(value)}, []string{})
 }
 
-// SetServiceData re-registers advertising: BlueZ snapshots these properties at
-// registration and does not consume PropertiesChanged for advertisements.
-// The GATT application and any connected central remain registered.
+// SetServiceData updates the registered advertisement in place. BlueZ 5.82's
+// advertising property watcher refreshes ServiceData on the existing instance.
+// The signal does not acknowledge that the controller applied the update.
 func (p *Peripheral) SetServiceData(data map[string][]byte) error {
 	if !p.advertising {
 		return errors.New("bluez: advertising is owned by the legacy transport")
-	}
-	o := object(p.conn, p.adapter)
-	if err := o.Call(advertMgrIfc+".UnregisterAdvertisement", 0, p.advert).Err; err != nil {
-		return err
 	}
 	values := map[string]dbus.Variant{}
 	for uuid, b := range data {
@@ -240,7 +236,8 @@ func (p *Peripheral) SetServiceData(data map[string][]byte) error {
 	p.mu.Lock()
 	p.objects[p.advert][advertIfc]["ServiceData"] = ro(values)
 	p.mu.Unlock()
-	return o.Call(advertMgrIfc+".RegisterAdvertisement", 0, p.advert, map[string]dbus.Variant{}).Err
+	return p.conn.Emit(p.advert, propsIfc+".PropertiesChanged", advertIfc,
+		map[string]dbus.Variant{"ServiceData": dbus.MakeVariant(values)}, []string{})
 }
 
 // Close unregisters the advertisement and the service, and lets the bus go.

@@ -204,9 +204,11 @@ func TestPickAdapter(t *testing.T) {
 }
 
 type testPeripheralAdapter struct {
-	conn        *dbus.Conn
-	advertised  chan byte
-	application chan dbus.Sender
+	conn                *dbus.Conn
+	advertised          chan byte
+	application         chan dbus.Sender
+	advertUnregistered  chan struct{}
+	rejectUpdatedAdvert bool
 }
 
 func (a *testPeripheralAdapter) RegisterApplication(_ dbus.ObjectPath, _ map[string]dbus.Variant, sender dbus.Sender) *dbus.Error {
@@ -215,8 +217,13 @@ func (a *testPeripheralAdapter) RegisterApplication(_ dbus.ObjectPath, _ map[str
 	}
 	return nil
 }
-func (*testPeripheralAdapter) UnregisterApplication(dbus.ObjectPath) *dbus.Error   { return nil }
-func (*testPeripheralAdapter) UnregisterAdvertisement(dbus.ObjectPath) *dbus.Error { return nil }
+func (*testPeripheralAdapter) UnregisterApplication(dbus.ObjectPath) *dbus.Error { return nil }
+func (a *testPeripheralAdapter) UnregisterAdvertisement(dbus.ObjectPath) *dbus.Error {
+	if a.advertUnregistered != nil {
+		a.advertUnregistered <- struct{}{}
+	}
+	return nil
+}
 func (a *testPeripheralAdapter) RegisterAdvertisement(path dbus.ObjectPath, _ map[string]dbus.Variant, sender dbus.Sender) *dbus.Error {
 	var v dbus.Variant
 	if err := a.conn.Object(string(sender), path).Call(propsIfc+".Get", 0, advertIfc, "ServiceData").Store(&v); err != nil {
@@ -224,47 +231,10 @@ func (a *testPeripheralAdapter) RegisterAdvertisement(path dbus.ObjectPath, _ ma
 	}
 	data := v.Value().(map[string]dbus.Variant)["00004677-0000-1000-8000-00805f9b34fb"].Value().([]byte)
 	a.advertised <- data[0]
+	if a.rejectUpdatedAdvert && data[0] != byte(improv.AuthorizationRequired) {
+		return dbus.NewError("org.bluez.Error.Failed", []any{"Failed to register advertisement"})
+	}
 	return nil
-}
-
-func TestAdvertisementStateIsReregistered(t *testing.T) {
-	addr := privateBus(t)
-	t.Setenv("DBUS_SYSTEM_BUS_ADDRESS", addr)
-	server := connect(t, addr)
-	if _, err := server.RequestName(service, dbus.NameFlagDoNotQueue); err != nil {
-		t.Fatal(err)
-	}
-	adapter := dbus.ObjectPath("/org/bluez/hci0")
-	if err := server.Export(testObjects{map[dbus.ObjectPath]map[string]map[string]dbus.Variant{adapter: {adapterIfc: {}, gattMgrIfc: {}, advertMgrIfc: {}}}}, "/", objMgrIfc); err != nil {
-		t.Fatal(err)
-	}
-	a := &testPeripheralAdapter{conn: server, advertised: make(chan byte, 2)}
-	for _, ifc := range []string{gattMgrIfc, advertMgrIfc} {
-		if err := server.Export(a, adapter, ifc); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if _, err := prop.Export(server, adapter, prop.Map{adapterIfc: {"Powered": {Value: false, Writable: true}}}); err != nil {
-		t.Fatal(err)
-	}
-	uuid := "00004677-0000-1000-8000-00805f9b34fb"
-	p, err := OpenPeripheral("/org/encore/test", "00467768-6228-2272-4663-277478268000", nil, AdvertSpec{ServiceData: map[string][]byte{uuid: {1, 2, 0, 0, 0, 0}}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer p.Close()
-	if state := <-a.advertised; state != 1 {
-		t.Fatalf("initial state=%d", state)
-	}
-	if err := p.SetServiceData(map[string][]byte{uuid: {2, 2, 0, 0, 0, 0}}); err != nil {
-		t.Fatal(err)
-	}
-	if state := <-a.advertised; state != 2 {
-		t.Fatalf("updated state=%d", state)
-	}
-	if err := p.Close(); err != nil {
-		t.Fatal(err)
-	}
 }
 
 func TestProvisionWithoutProxyOverDBus(t *testing.T) {
@@ -278,7 +248,12 @@ func TestProvisionWithoutProxyOverDBus(t *testing.T) {
 	if err := server.Export(testObjects{map[dbus.ObjectPath]map[string]map[string]dbus.Variant{adapter: {adapterIfc: {}, gattMgrIfc: {}, advertMgrIfc: {}}}}, "/", objMgrIfc); err != nil {
 		t.Fatal(err)
 	}
-	a := &testPeripheralAdapter{conn: server, advertised: make(chan byte, 8), application: make(chan dbus.Sender, 1)}
+	// Reproduce the Dot's failure when bluetoothd is asked to register a new
+	// advertisement after Action, while the central is using GATT.
+	a := &testPeripheralAdapter{
+		conn: server, advertised: make(chan byte, 8), application: make(chan dbus.Sender, 1),
+		advertUnregistered: make(chan struct{}, 8), rejectUpdatedAdvert: true,
+	}
 	for _, ifc := range []string{gattMgrIfc, advertMgrIfc} {
 		if err := server.Export(a, adapter, ifc); err != nil {
 			t.Fatal(err)
@@ -317,9 +292,32 @@ func TestProvisionWithoutProxyOverDBus(t *testing.T) {
 	if err != nil || alias.Value() != "Encore Satellite Echo Dot" {
 		t.Fatalf("adapter alias %v: %v", alias, err)
 	}
-	name, err := server.Object(string(sender), "/org/encore/improv/advert").GetProperty(advertIfc + ".LocalName")
+	advertPath := dbus.ObjectPath("/org/encore/improv/advert")
+	name, err := server.Object(string(sender), advertPath).GetProperty(advertIfc + ".LocalName")
 	if err != nil || name.Value() != "Encore Satellite Echo Dot" {
 		t.Fatalf("advertised name %v: %v", name, err)
+	}
+	signals := make(chan *dbus.Signal, 8)
+	server.Signal(signals)
+	defer server.RemoveSignal(signals)
+	if err := server.AddMatchSignal(dbus.WithMatchObjectPath(advertPath), dbus.WithMatchInterface(propsIfc), dbus.WithMatchMember("PropertiesChanged")); err != nil {
+		t.Fatal(err)
+	}
+	readAdvertState := func(want byte) {
+		t.Helper()
+		select {
+		case sig := <-signals:
+			iface, changed := sig.Body[0].(string), sig.Body[1].(map[string]dbus.Variant)
+			v, _ := changed["ServiceData"].Value().(map[string]dbus.Variant)
+			data, _ := v[improv.ServiceDataUUID].Value().([]byte)
+			if iface != advertIfc || !bytes.Equal(data, []byte{want, 2, 0, 0, 0, 0}) {
+				t.Fatalf("advertisement change %v, want Improv state %d", sig.Body, want)
+			}
+		case err := <-done:
+			t.Fatalf("session ended while changing advertisement state to %d: %v", want, err)
+		case <-ctx.Done():
+			t.Fatalf("no advertisement change to state %d", want)
+		}
 	}
 	chars := map[string]dbus.ObjectPath{}
 	for path, ifcs := range objs {
@@ -365,9 +363,12 @@ func TestProvisionWithoutProxyOverDBus(t *testing.T) {
 	default:
 	}
 	auth <- struct{}{}
+	readAdvertState(2)
 	readUntil(improv.StateUUID, []byte{2})
 	write(frame[:4])
 	write(frame[4:])
+	readAdvertState(3)
+	readAdvertState(4)
 	readUntil(improv.StateUUID, []byte{4})
 	select {
 	case wifi := <-joined:
@@ -380,5 +381,8 @@ func TestProvisionWithoutProxyOverDBus(t *testing.T) {
 	cancel() // Do not wait through the ten-second result window in this transport test.
 	if err := <-done; !errors.Is(err, context.Canceled) {
 		t.Fatalf("provisioning shutdown: %v", err)
+	}
+	if len(a.advertised) != 1 || <-a.advertised != 1 || len(a.advertUnregistered) != 1 {
+		t.Fatal("advertisement must be registered once at startup and removed once at shutdown")
 	}
 }
