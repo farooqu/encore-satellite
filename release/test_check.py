@@ -61,6 +61,20 @@ class LedgerTests(unittest.TestCase):
     def setUp(self):
         self.registry, self.ledger = inventory()
 
+    def test_private_arm64_consumes_biscuit_revision_without_advancing_cohort(self):
+        previous = copy.deepcopy(self.ledger)
+        record = {"id": "private-arm64", "channel": "dev", "backend": "incubator",
+                  "core_version": "0.1.1-dev.5", "revisions": {"biscuit": 19},
+                  "private_arm64_zip_sha256": "ab" * 32}
+        self.ledger["reservations"].append(record)
+        self.registry["targets"][1]["package_revision"] = 19
+        check.validate_ledger(self.ledger, self.registry, previous)
+        for overrides in ({"private_arm64_zip_sha256": "invalid"}, {"revisions": {"biscuit": 18}},
+                          {"revisions": {"biscuit": 19, "android-generic": 6}}):
+            with self.subTest(overrides=overrides), self.assertRaises(ValueError):
+                self.ledger["reservations"][-1] = {**record, **overrides}
+                check.validate_ledger(self.ledger, self.registry, previous)
+
     def test_append_reserves_each_target_independently(self):
         previous = copy.deepcopy(self.ledger)
         record = copy.deepcopy(self.ledger["reservations"][-1])

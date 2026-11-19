@@ -185,6 +185,7 @@ def validate_source(receipt):
     registry = validate(json.loads(run("git", "show", f"{source}:release/targets.json")))
     ledger = validate_ledger(json.loads(run("git", "show", f"{source}:release/ledger.json")), registry)
     reservation = next(r for r in ledger["reservations"] if r["id"] == receipt["reservation"])
+    require("private_arm64_zip_sha256" not in reservation, "private install reservation cannot authorize release publication")
     target = next(t for t in registry["targets"] if t["id"] == receipt["target"])
     require(reservation["core_version"] == registry["core_version"] == receipt["core_version"]
             and reservation["revisions"][receipt["target"]] == receipt["revision"] == target["package_revision"],
@@ -209,6 +210,7 @@ def prepare(spec_path, output, aapt, apksigner):
     registry = validate(read_json(ROOT / "release/targets.json"))
     ledger = validate_ledger(read_json(ROOT / "release/ledger.json"), registry)
     reservation = next(r for r in ledger["reservations"] if r["id"] == spec["reservation"])
+    require("private_arm64_zip_sha256" not in reservation, "private install reservation cannot authorize a release receipt")
     revision = reservation["revisions"][spec["target"]]
     require(reservation["core_version"] == registry["core_version"], "reservation core differs from built source")
     paths = {"artifact": Path(spec["artifact"]), "evidence": Path(spec["evidence"])}

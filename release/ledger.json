@@ -65,6 +65,16 @@
         "biscuit": 21
       },
       "source_commit": "053cd7f51c2f7f9a1f89bf88f170849a29c4a0d0"
+    },
+    {
+      "id": "biscuit-arm64-private-r22",
+      "core_version": "0.1.1-dev.5",
+      "backend": "incubator",
+      "channel": "dev",
+      "revisions": {
+        "biscuit": 22
+      },
+      "private_arm64_zip_sha256": "333c154c24edc48bed9a4fe90c9f997240fb6310d49d06807d131dfbc43702bb"
     }
   ]
 }

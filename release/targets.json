@@ -30,7 +30,7 @@
         "platforms/linux/",
         "devices/biscuit/"
       ],
-      "package_revision": 21,
+      "package_revision": 22,
       "release_supported": false
     },
     {

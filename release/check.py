@@ -115,13 +115,22 @@ def validate_ledger(ledger, registry, previous=None):
         revisions = record.get("revisions")
         if not isinstance(revisions, dict) or not revisions:
             raise ValueError(f"{name}: explicit target revisions required")
+        private = "private_arm64_zip_sha256" in record
+        if private:
+            pin = record["private_arm64_zip_sha256"]
+            if (set(revisions) != {"biscuit"} or record["channel"] != "dev"
+                    or not isinstance(pin, str) or not re.fullmatch(r"[0-9a-f]{64}", pin)):
+                raise ValueError(f"{name}: private ARM64 requires a Biscuit-only dev reservation and exact ZIP SHA-256")
         for target, revision in revisions.items():
             if (target not in targets or targets[target]["status"] != "experimental"
                     or type(revision) is not int or revision <= highest.get(target, 0)
                     or (targets[target]["platform"] == "android" and revision > 2100000000)):
                 raise ValueError(f"{name}: revision must increase for each experimental target")
             highest[target] = revision
-            latest_core[target] = core
+            # Private installers consume the same revision space without
+            # advancing the shared build cohort or any other target.
+            if not private:
+                latest_core[target] = core
     for target in registry["targets"]:
         if target["status"] == "experimental" and (
                 target["id"] not in latest_core
