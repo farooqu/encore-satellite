@@ -151,6 +151,7 @@ class EncoreScreenTest {
         }
         compose.onNodeWithTag("voice-visual").assertIsDisplayed().assertContentDescriptionEquals("Live microphone waveform")
         compose.onNodeWithText("Remote microphone active").assertDoesNotExist()
+        compose.onNodeWithTag("open-settings").assertIsNotEnabled()
         capture("android-monitor-waveform")
         compose.runOnIdle {
             ShadowLooper.idleMainLooper(32, TimeUnit.MILLISECONDS)
@@ -194,29 +195,41 @@ class EncoreScreenTest {
         assertEquals("Dashboard does not fill the screen", compose.onAllNodes(isRoot()).onLast().fetchSemanticsNode().boundsInRoot,
             dashboardBounds)
         compose.onNodeWithTag("controls").assertDoesNotExist()
-        val talkBounds = compose.onNodeWithTag("talk").fetchSemanticsNode().boundsInRoot
-        val privacyBounds = compose.onNodeWithTag("privacy").fetchSemanticsNode().boundsInRoot
+        val talk = compose.onNodeWithTag("talk").assertContentDescriptionEquals("Trigger assistant")
+        val mic = compose.onNodeWithTag("privacy").assertContentDescriptionEquals("Mute mic")
+        val settings = compose.onNodeWithContentDescription("Settings").assertIsDisplayed()
+        val talkBounds = talk.fetchSemanticsNode().boundsInRoot
+        val privacyBounds = mic.fetchSemanticsNode().boundsInRoot
+        val settingsBounds = settings.fetchSemanticsNode().boundsInRoot
         assertEquals("Voice controls are not centered", dashboardBounds.center.x,
-            (talkBounds.center.x + privacyBounds.center.x) / 2, .5f)
+            (talkBounds.center.x + settingsBounds.center.x) / 2, .5f)
         assertEquals(talkBounds.bottom, privacyBounds.bottom, .5f)
+        assertEquals(talkBounds.bottom, settingsBounds.bottom, .5f)
+        capture("android-bottom-controls")
         compose.onNodeWithTag("talk").performTouchInput { click() }
         assertEquals(1, talks)
         for (unavailable in listOf(ready().copy(muted = true), ready().copy(connected = false), ready().copy(captureReady = false), ready().copy(talkAllowed = false))) {
             compose.runOnIdle { state.value = unavailable }
             compose.onNodeWithTag("talk").assertIsNotEnabled()
         }
-        compose.runOnIdle { state.value = EncoreState() }
-        compose.onNodeWithTag("talk").assertIsNotEnabled().performTouchInput { click() }
+        compose.runOnIdle { state.value = ready().copy(running = false) }
+        talk.assertIsNotEnabled().performTouchInput { click() }
+        compose.onNodeWithContentDescription("Start satellite").assertDoesNotExist()
         assertEquals(0, starts)
         assertEquals(1, talks)
+        capture("android-bottom-controls-stopped")
         compose.runOnIdle { state.value = ready() }
         compose.onNodeWithText("Talk").assertDoesNotExist()
-        compose.onNodeWithTag("controls-edge").performTouchInput {
-            swipe(start = center, end = center + androidx.compose.ui.geometry.Offset(180f, 0f))
-        }
+        settings.performTouchInput { click() }
+        advance(400)
+        compose.onNodeWithText("Satellite controls").assertIsDisplayed()
         compose.onNodeWithText("Talk").assertIsDisplayed()
+        assertEquals(1, talks)
+        assertFalse(privacy)
+        capture("android-settings-side-panel")
         compose.onNodeWithText("Close controls").performClick()
-        compose.runOnIdle { state.value = state.value.copy(phase = "listening", input = "listening", voiceActive = true, heard = "Switch on the lights.") }
+        compose.runOnIdle { state.value = state.value.copy(phase = "listening", input = "listening", voiceActive = true,
+            heard = "Switch on the lights.", waveform = List(64) { (.04 * sin(it * .34)).toFloat() }) }
         compose.onNodeWithText("Switch on the lights.").assertIsDisplayed()
         assertEquals("Voice resized the dashboard", dashboardBounds,
             compose.onNodeWithTag("dashboard-content").fetchSemanticsNode().boundsInRoot)
@@ -454,9 +467,10 @@ class EncoreScreenTest {
         advance(800)
         assertArrayEquals("Reduced-motion input drifted with a held level", held, pixels("braid-reduced-b"))
         val loud = traceHeight("braid-loud")
-        compose.runOnIdle { state.value = state.value.copy(waveform = List(64) { .1f }) }
+        compose.runOnIdle { state.value = state.value.copy(waveform = List(64) { .02f }) }
         advance(16)
-        assertTrue("Input strength did not control ribbon displacement", traceHeight("braid-soft") < loud / 2)
+        val quiet = traceHeight("braid-soft")
+        assertTrue("Quiet input was flat or exaggerated: $quiet vs $loud px", quiet >= 5 && quiet < loud / 2)
         compose.runOnIdle { reduced.value = false; state.value = state.value.copy(waveform = List(64) { .8f }) }
         advance(400)
         compose.runOnIdle { state.value = state.value.copy(waveform = List(64) { 0f }) }
@@ -512,8 +526,13 @@ class EncoreScreenTest {
             EncoreScreen(state.value, {}, {}, { stops++ }, { privacy = it }, { "" }, { "" }, {}, {}, {}, {}, reducedMotion = true)
         }
         val traceBounds = compose.onNodeWithTag("voice-visual").fetchSemanticsNode().boundsInRoot
-        compose.runOnIdle { state.value = state.value.copy(heard = "Turn on the kitchen lights.") }
+        compose.runOnIdle { state.value = state.value.copy(phase = "working", heard = "Turn on the kitchen lights.") }
+        compose.onNodeWithText("Turn on the kitchen lights.").assertIsDisplayed()
+        compose.onNodeWithText("The kitchen lights are on.").assertDoesNotExist()
         assertEquals("A short transcript moved the braid", traceBounds, compose.onNodeWithTag("voice-visual").fetchSemanticsNode().boundsInRoot)
+        compose.runOnIdle { state.value = state.value.copy(phase = "speaking", outputState = "queued", reply = "The kitchen lights are on.") }
+        compose.onNodeWithText("The kitchen lights are on.").assertIsDisplayed()
+        compose.onNodeWithTag("voice-visual").assertContentDescriptionEquals("Waiting for playback indicator")
         compose.runOnIdle {
             state.value = state.value.copy(phase = "speaking", outputState = "playing", playbackLevel = .7f,
                 heard = "Please turn on the kitchen lights. ".repeat(12), reply = "The kitchen lights are on.")

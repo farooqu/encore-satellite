@@ -372,9 +372,29 @@ func TestNativeWireEvidenceEndpointingDrainAndFollowUp(t *testing.T) {
 	if err := e.FinishInput(); err != session.ErrUnavailable {
 		t.Fatal("invented native half-close", err)
 	}
+	waitFor := func(ready func(presentation.State) bool) presentation.State {
+		t.Helper()
+		deadline := time.Now().Add(time.Second)
+		for {
+			state := e.Snapshot()
+			if ready(state) {
+				return state
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("missing native event", state)
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
 	send(t, c, 0x99, []byte("optional future extension"))
 	send(t, c, 0x12, []byte(`{"type":"recognized","data":{"text":"Actual upstream words"}}`))
+	if state := waitFor(func(s presentation.State) bool { return s.Heard != "" }); state.Heard != "Actual upstream words" || state.Reply != "" || state.Phase != "working" {
+		t.Fatal("transcript was not visible on its own", state)
+	}
 	send(t, c, 0x12, []byte(`{"type":"responding","data":{"text":"Actual reply"}}`))
+	if state := waitFor(func(s presentation.State) bool { return s.Reply != "" }); state.Reply != "Actual reply" || state.Output.State != "queued" || state.Output.Received {
+		t.Fatal("reply was not visible before audio", state)
+	}
 	send(t, c, 0x10, []byte{1, 0, 254, 255, 3, 0})
 	send(t, c, 0x11, nil)
 	select {
@@ -403,6 +423,16 @@ func TestNativeWireEvidenceEndpointingDrainAndFollowUp(t *testing.T) {
 	if follow["wake_word"] != "follow_up" || follow["preroll_bytes"] != float64(0) {
 		t.Fatal(follow)
 	}
+	if state := e.Snapshot(); state.Heard != "" || state.Reply != "" {
+		t.Fatal("follow-up inherited old captions", state)
+	}
+	send(t, c, 0x12, []byte(`{"type":"listening","data":{"stage":"listening"}}`))
+	send(t, c, 0x12, []byte(`{"type":"processing","data":{"speaker":"unknown"}}`))
+	send(t, c, 0x12, []byte(`{"type":"recognized","data":{"text":"Follow-up question","command":"answer"}}`))
+	send(t, c, 0x12, []byte(`{"type":"responding","data":{"text":""}}`))
+	if state := waitFor(func(s presentation.State) bool { return s.Phase == "speaking" }); state.Heard != "Follow-up question" || state.Reply != "" {
+		t.Fatal("empty response replaced or invented a caption", state)
+	}
 	send(t, c, 0x13, []byte(`{"reason":"answered_elsewhere","listen":true}`))
 	deadline = time.Now().Add(time.Second)
 	for e.Snapshot().Reason != "answered_elsewhere" {
@@ -417,6 +447,12 @@ func TestNativeWireEvidenceEndpointingDrainAndFollowUp(t *testing.T) {
 	next := object(t, receive(t, c, 0x02))
 	if next["wake_word"] != "manual" || next["preroll_bytes"] != float64(0) {
 		t.Fatal("loser followed up or reused old audio", next)
+	}
+	send(t, c, 0x12, []byte(`{"type":"listening","data":{"stage":"listening"}}`))
+	send(t, c, 0x12, []byte(`{"type":"processing","data":{"speaker":"unknown"}}`))
+	send(t, c, 0x12, []byte(`{"type":"not_recognized","data":{"heard":"Unmatched upstream words"}}`))
+	if state := waitFor(func(s presentation.State) bool { return s.Phase == "error" }); state.Heard != "Unmatched upstream words" || state.Reply != "" {
+		t.Fatal("discarded the unrecognized transcript", state)
 	}
 }
 

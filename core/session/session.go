@@ -789,6 +789,9 @@ func (e *Engine) Handle(generation uint64, event Event) error {
 		}
 	case "not_recognized", "wake_rejected":
 		if e.active {
+			if event.Kind == "not_recognized" && event.Text != "" {
+				e.state.Heard = event.Text
+			}
 			e.state.Phase, e.state.Reason = "error", event.Kind
 			e.state.Speaker = presentation.Speaker{}
 		}

@@ -126,7 +126,10 @@ internal val EncoreState.inputBraidColor: Color get() = if (speakerRGB.size == 3
 /** A level-reactive braid, not an oscilloscope or a speech/speaker detector. */
 @Composable private fun LevelBraid(raw: Float, available: Boolean, base: Color, direction: Float,
     reducedMotion: Boolean, observing: Boolean, modifier: Modifier) {
-    val latestLevel by rememberUpdatedState(raw)
+    // Compress the mic's visual range before smoothing, so quiet speech rises
+    // above a flat line without stretching the release or changing output gain.
+    val target = if (direction > 0f) sqrt(raw * (2f - raw)) else raw
+    val latestLevel by rememberUpdatedState(target)
     var level by remember { mutableFloatStateOf(0f) }
     var phase by remember { mutableFloatStateOf(0f) }
     LaunchedEffect(reducedMotion, observing, available) {
@@ -145,9 +148,8 @@ internal val EncoreState.inputBraidColor: Color get() = if (speakerRGB.size == 3
     }
     Canvas(modifier) {
         if (!available) return@Canvas
-        val energy = if (reducedMotion || !observing) raw else level
-        // Lift quieter speech without an idle floor or clipping loud input.
-        val strength = if (reducedMotion) energy else energy * 1.6f / (1f + .6f * energy)
+        val energy = if (reducedMotion || !observing) target else level
+        val strength = if (direction > 0f || reducedMotion) energy else energy * 1.6f / (1f + .6f * energy)
         val time = (if (reducedMotion || !observing) 0f else phase) + if (direction < 0) (PI / 2).toFloat() else 0f
         drawBraid(strength, time, reducedMotion,
             listOf(base, lerp(base, Color.White, .32f), lerp(base, Color.Black, .22f)))
