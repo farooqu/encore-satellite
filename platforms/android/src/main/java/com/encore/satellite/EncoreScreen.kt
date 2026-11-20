@@ -56,7 +56,8 @@ fun EncoreScreen(state: EncoreState, onStart: () -> Unit, onTalk: () -> Unit, on
     reducedMotion: Boolean = systemReducedMotion(),
     onMonitorOverlay: (Long, Boolean) -> Unit = { _, _ -> },
     onPairHomeAssistant: () -> Unit = {},
-    dashboardContent: @Composable () -> Unit = { Dashboard(state, onPairHomeAssistant) }) {
+    microphonePermissionGranted: Boolean = true,
+    dashboardContent: @Composable () -> Unit = { Dashboard(state, microphonePermissionGranted, onStart, onPairHomeAssistant) }) {
     var settings by remember { mutableStateOf(false) }
     val drawer = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
@@ -71,10 +72,9 @@ fun EncoreScreen(state: EncoreState, onStart: () -> Unit, onTalk: () -> Unit, on
                     verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text("Satellite controls", style = MaterialTheme.typography.titleLarge)
                     Text(state.status, Modifier.semantics { liveRegion = LiveRegionMode.Polite }, color = Muted)
-                    if (!state.running) TextButton(onClick = { onStart(); scope.launch { drawer.close() } }) { Text("Start satellite") }
-                    else if (!state.microphoneReady && !state.muted) TextButton(onClick = { onStart(); scope.launch { drawer.close() } }) { Text("Start microphone") }
+                    if (state.running && !state.microphoneReady && !state.muted) TextButton(onClick = { onStart(); scope.launch { drawer.close() } }) { Text("Start microphone") }
                     else TextButton(onClick = { onTalk(); scope.launch { drawer.close() } },
-                        enabled = state.voiceKnown && state.connected && state.microphoneReady && state.captureReady && !state.muted &&
+                        enabled = state.running && state.voiceKnown && state.connected && state.microphoneReady && state.captureReady && !state.muted &&
                             !state.inhibited && state.talkAllowed && state.talkReady && !state.interactionVisible) { Text("Talk") }
                     if (state.interactionVisible) TextButton(onClick = { onStop(); scope.launch { drawer.close() } }) { Text("Stop voice turn") }
                     TextButton(onClick = { onMuted(!state.muted) }, enabled = state.microphoneReady || state.muted) { Text(if (state.muted) "Unmute mic" else "Mute mic") }
@@ -120,18 +120,17 @@ fun EncoreScreen(state: EncoreState, onStart: () -> Unit, onTalk: () -> Unit, on
                 Row(Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(16.dp),
                     horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                     FilledIconButton(onClick = {
-                        if (state.interactionVisible) onStop() else if (!state.running || (!state.microphoneReady && !state.muted)) onStart() else onTalk()
-                    }, enabled = state.interactionVisible || !state.running || (!state.microphoneReady && !state.muted) ||
+                        if (state.interactionVisible) onStop() else if (!state.microphoneReady && !state.muted) onStart() else onTalk()
+                    }, enabled = state.interactionVisible || (state.running && !state.microphoneReady && !state.muted) ||
                         (state.voiceKnown && state.connected && state.microphoneReady && state.captureReady &&
-                            !state.muted && !state.inhibited && state.talkAllowed && state.talkReady),
+                            state.running && !state.muted && !state.inhibited && state.talkAllowed && state.talkReady),
                         colors = IconButtonDefaults.filledIconButtonColors(containerColor = Ink, contentColor = Mint,
                             disabledContainerColor = Color(0xff38434d), disabledContentColor = Color(0xff9ca8b1)),
                         modifier = Modifier.size(56.dp).clip(CircleShape)
                             .testTag(if (state.interactionVisible) "stop" else "talk").semantics {
                                 contentDescription = when {
                                     state.interactionVisible -> "Stop voice turn"
-                                    !state.running -> "Start satellite"
-                                    !state.microphoneReady && !state.muted -> "Start microphone"
+                                    state.running && !state.microphoneReady && !state.muted -> "Start microphone"
                                     else -> "Talk"
                                 }
                                 stateDescription = state.status
@@ -247,19 +246,25 @@ internal fun trustedNavigation(origin: String, value: String): Boolean {
 }
 
 @SuppressLint("SetJavaScriptEnabled")
-@Composable private fun Dashboard(state: EncoreState, onPairHomeAssistant: () -> Unit) {
-    if (state.needsHomeAssistantSetup) {
+@Composable private fun Dashboard(state: EncoreState, microphonePermissionGranted: Boolean,
+    onRequestPermission: () -> Unit, onPairHomeAssistant: () -> Unit) {
+    val needsPermission = !state.running && !microphonePermissionGranted
+    if (needsPermission || state.needsHomeAssistantSetup) {
         Box(Modifier.fillMaxSize().background(Color(0xff101d28)).padding(bottom = 88.dp), contentAlignment = Alignment.Center) {
             Column(Modifier.widthIn(max = 560.dp).verticalScroll(rememberScrollState()).padding(24.dp),
                 verticalArrangement = Arrangement.spacedBy(16.dp)) {
-                Text("Home Assistant setup", style = MaterialTheme.typography.headlineMedium, color = Color.White)
+                Text(if (needsPermission) "Set up Encore" else "Home Assistant setup",
+                    style = MaterialTheme.typography.headlineMedium, color = Color.White)
                 Text(when {
-                    !state.running -> "Start the satellite to set up its ESPHome controls."
+                    needsPermission -> "Allow microphone access for local wake-word detection. If Android asks to allow notifications, that's optional."
+                    !state.running -> if (state.problem.isEmpty()) "Starting Encore…" else "Reopen Encore to try again."
                     state.esphome == "waiting" -> "In Home Assistant, go to Settings → Devices & services and add ${state.name} under Discovered. You won't need to enter a key. The pairing window closes after two minutes."
                     state.esphome == "expired" -> "The pairing window expired. Start pairing again, then add the satellite in Home Assistant."
                     else -> "Pair on a trusted local network to add this satellite in Home Assistant without entering an encryption key."
                 }, Modifier.semantics { liveRegion = LiveRegionMode.Polite }, color = Muted)
-                if (state.running && state.esphome != "waiting") {
+                if (needsPermission) {
+                    Button(onClick = onRequestPermission) { Text("Allow microphone access") }
+                } else if (state.running && state.esphome != "waiting") {
                     Button(onClick = onPairHomeAssistant) { Text("Pair with Home Assistant") }
                 }
             }
