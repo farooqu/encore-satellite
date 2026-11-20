@@ -22,6 +22,8 @@
     <application android:label="Encore Incubator" android:theme="@android:style/Theme.Material.NoActionBar"
         android:icon="@drawable/ic_encore" android:allowBackup="false" android:usesCleartextTraffic="true">
         <meta-data android:name="com.encore.core_version" android:value="${coreVersion}" />
+        <meta-data android:name="com.encore.update_base_url" android:value="${updateBaseUrl}" />
+        <meta-data android:name="com.encore.update_public_key" android:value="${updatePublicKey}" />
         <!-- The paired ESPHome controller may explicitly choose an HTTP Dashboard URL. TLS failures are never bypassed. -->
         <activity android:name="com.encore.satellite.MainActivity" android:exported="true">
             <intent-filter>

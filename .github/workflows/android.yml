@@ -9,12 +9,6 @@ on:
         type: boolean
         default: false
         description: Build a signed candidate (no feed or release publication)
-      revision:
-        type: string
-        description: Centrally reserved monotonic package revision (versionCode)
-      version:
-        type: string
-        description: APK versionName
 
 permissions:
   contents: read
@@ -23,9 +17,13 @@ jobs:
   check:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    outputs:
+      core: ${{ steps.dev.outputs.core }}
+      revision: ${{ steps.dev.outputs.revision }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
@@ -63,33 +61,62 @@ jobs:
           export PATH="$ANDROID_HOME/build-tools/36.0.0:$PATH"
           python3 release/pipeline.py inspect-android devices/android-generic/app/build/outputs/apk/release/app-release.apk \
             --revision "$ENCORE_VERSION_CODE" --version "$ENCORE_VERSION_NAME" --certificate-sha256 "$cert"
+          python3 release/android_dev.py devices/android-generic/app/build/outputs/apk/release/app-release.apk
+      - name: Select an eligible verified main commit
+        id: dev
+        if: >-
+          github.repository == 'farooqu/encore-satellite' && github.ref == 'refs/heads/main' &&
+          github.ref_protected &&
+          (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.signed_candidate))
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if test "$GITHUB_EVENT_NAME" = push &&
+            ! jq -e '.automatic_dev_targets | index("android-generic") != null' release/dev-automation.json >/dev/null; then
+            exit 0
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA" --jq '.commit.verification.verified' | grep -Fx true
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          identity=$(python3 release/biscuit_dev.py "$GITHUB_SHA")
+          test -n "$identity" || exit 0
+          read -r core revision extra <<< "$identity"
+          [[ "$core" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "$revision" =~ ^[1-9][0-9]*$ &&
+            "$revision" -gt 8 && "$revision" -le 2100000000 && -z "$extra" ]]
+          printf 'core=%s\nrevision=%s\n' "$core" "$revision" >> "$GITHUB_OUTPUT"
 
   signed-candidate:
-    if: github.event_name == 'workflow_dispatch' && inputs.signed_candidate && github.ref == 'refs/heads/main'
     needs: check
-    # Owner must configure required reviewers and main-only deployment branches
-    # on this environment before storing signing secrets. Do not run for PR code.
-    environment: android-signing
+    if: needs.check.outputs.revision != ''
+    # Automatic Dev and the existing reviewed manual candidate use different environments.
+    environment: ${{ github.event_name == 'push' && 'android-dev-signing' || 'android-signing' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 90
+    outputs:
+      revision: ${{ needs.check.outputs.revision }}
+      receipt_sha256: ${{ steps.receipt.outputs.sha256 }}
+      signed_artifact: ${{ steps.receipt.outputs.signed_artifact }}
+      signed_feed_artifact: ${{ steps.receipt.outputs.signed_feed_artifact }}
     env:
-      ENCORE_VERSION_CODE: ${{ inputs.revision }}
-      ENCORE_VERSION_NAME: ${{ inputs.version }}
+      ENCORE_CORE_VERSION: ${{ needs.check.outputs.core }}
+      ENCORE_VERSION_CODE: ${{ needs.check.outputs.revision }}
+      ENCORE_VERSION_NAME: ${{ needs.check.outputs.core }}
       ENCORE_UPDATE_BASE_URL: ${{ vars.ANDROID_UPDATE_BASE_URL }}
       ANDROID_METADATA_PUBLIC_KEY_PEM: ${{ vars.ANDROID_METADATA_PUBLIC_KEY_PEM }}
+      ANDROID_CERTIFICATE_SHA256: ${{ vars.ANDROID_CERTIFICATE_SHA256 }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
           persist-credentials: false
       - name: Validate candidate identity and derive the APK's feed trust root
         run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           python3 release/check.py
           python3 - <<'PY'
-          import base64, json, os, subprocess
-          registry = json.load(open('release/targets.json'))
-          target = next(t for t in registry['targets'] if t['id'] == 'android-generic')
-          assert str(target['package_revision']) == os.environ['ENCORE_VERSION_CODE'], 'reserve the revision centrally before signing'
-          assert os.environ['ENCORE_VERSION_NAME'].strip(), 'explicit APK versionName required'
+          import base64, os, re, subprocess
+          assert re.fullmatch(r'[0-9a-f]{64}', os.environ['ANDROID_CERTIFICATE_SHA256']), 'expected pinned APK certificate SHA-256'
           der = subprocess.check_output(['openssl', 'pkey', '-pubin', '-outform', 'DER'],
                                         input=os.environ['ANDROID_METADATA_PUBLIC_KEY_PEM'].encode())
           prefix = bytes.fromhex('302a300506032b6570032100')  # RFC 8410 Ed25519 SPKI
@@ -116,7 +143,6 @@ jobs:
           ENCORE_STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
           ENCORE_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ENCORE_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-          EXPECTED_CERTIFICATE: ${{ vars.ANDROID_CERTIFICATE_SHA256 }}
         run: |
           set -euo pipefail
           umask 077
@@ -124,16 +150,102 @@ jobs:
           trap 'rm -f "$ENCORE_KEYSTORE"' EXIT
           test -n "$KEYSTORE_BASE64"
           printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$ENCORE_KEYSTORE"
-          devices/android-generic/build-android :app:assembleRelease
+          unset KEYSTORE_BASE64
           apk=devices/android-generic/app/build/outputs/apk/release/app-release.apk
           export PATH="$ANDROID_HOME/build-tools/36.0.0:$PATH"
-          python3 release/pipeline.py inspect-android "$apk" --revision "$ENCORE_VERSION_CODE" \
-            --version "$ENCORE_VERSION_NAME" --certificate-sha256 "$EXPECTED_CERTIFICATE"
-          sha256sum "$apk" > "$apk.sha256"
-          git rev-parse HEAD > "$apk.source"
+          if test "$GITHUB_EVENT_NAME" = push; then
+            work="$RUNNER_TEMP/android-build"
+            mkdir "$work"
+            devices/android-generic/build-android clean :app:assembleRelease --no-build-cache
+            cp "$apk" "$work/encore-android.apk"
+            # Recompile both native AEC ABIs, recreate the Go AAR and clean Gradle outputs.
+            rm -rf build/android/aec/{arm64-v8a,armeabi-v7a,jniLibs}
+            devices/android-generic/build-android clean :app:assembleRelease :app:collectReleaseDependencySources --no-build-cache
+            cp "$apk" "$work/repeat.apk"
+          else
+            devices/android-generic/build-android :app:assembleRelease
+            python3 release/pipeline.py inspect-android "$apk" --revision "$ENCORE_VERSION_CODE" \
+              --core-version "$ENCORE_CORE_VERSION" --version "$ENCORE_VERSION_NAME" \
+              --certificate-sha256 "$ANDROID_CERTIFICATE_SHA256"
+            python3 release/android_dev.py "$apk"
+            sha256sum "$apk" > "$apk.sha256"
+            git rev-parse HEAD > "$apk.source"
+          fi
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: github.event_name == 'workflow_dispatch'
         with:
-          name: android-incubator-candidate-${{ inputs.revision }}-${{ github.sha }}
+          name: android-incubator-candidate-${{ needs.check.outputs.revision }}-${{ github.run_attempt }}-${{ github.sha }}
           path: devices/android-generic/app/build/outputs/apk/release/app-release.apk*
           if-no-files-found: error
           retention-days: 30
+      - name: Verify the repeat build and prepare the release receipt
+        if: github.event_name == 'push'
+        id: receipt
+        run: |
+          set -euo pipefail
+          export PATH="$ANDROID_HOME/build-tools/36.0.0:$PATH"
+          python3 release/android_dev.py "$RUNNER_TEMP/android-build" "$RUNNER_TEMP/android-release"
+          sha=$(sha256sum "$RUNNER_TEMP/android-release/receipt.json" | cut -d ' ' -f 1)
+          printf 'sha256=%s\nsigned_artifact=android-dev-signed-%s\nsigned_feed_artifact=android-dev-signed-feed-%s\n' \
+            "$sha" "$GITHUB_RUN_ATTEMPT" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+      - name: Sign the Android receipt and Dev entry with the APK's OTA root
+        if: github.event_name == 'push'
+        env:
+          PRIVATE_KEY: ${{ secrets.ANDROID_METADATA_KEY_PEM }}
+          RECEIPT_SHA256: ${{ steps.receipt.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          umask 077
+          test -n "$PRIVATE_KEY"
+          key=$(mktemp "$RUNNER_TEMP/android-key.XXXXXX")
+          trap 'rm -f "$key"' EXIT
+          printf '%s\n' "$PRIVATE_KEY" > "$key"
+          unset PRIVATE_KEY
+          root="$RUNNER_TEMP/android-root.pem"
+          printf '%s\n' "$ANDROID_METADATA_PUBLIC_KEY_PEM" > "$root"
+          cmp -s <(openssl pkey -in "$key" -pubout -outform DER) <(openssl pkey -pubin -in "$root" -outform DER)
+          candidate="$RUNNER_TEMP/android-release"
+          feed="$RUNNER_TEMP/android-feed"
+          mkdir "$feed"
+          python3 release/pipeline.py sign-receipt "$candidate" --key "$key" --receipt-sha256 "$RECEIPT_SHA256"
+          python3 release/pipeline.py verify "$candidate" --public-key "$root" --receipt-sha256 "$RECEIPT_SHA256"
+          issued=$(date +%s)
+          python3 release/pipeline.py feed "$candidate" --key "$key" --public-key "$root" \
+            --receipt-sha256 "$RECEIPT_SHA256" --channel dev --issued "$issued" \
+            --expires "$((issued + 604800))" --output "$feed/dev.jws"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: github.event_name == 'push'
+        with:
+          name: ${{ steps.receipt.outputs.signed_artifact }}
+          path: ${{ runner.temp }}/android-release
+          if-no-files-found: error
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: github.event_name == 'push'
+        with:
+          name: ${{ steps.receipt.outputs.signed_feed_artifact }}
+          path: ${{ runner.temp }}/android-feed/dev.jws
+          if-no-files-found: error
+
+  retain-dev:
+    needs: signed-candidate
+    if: github.event_name == 'push' && needs.signed-candidate.outputs.receipt_sha256 != ''
+    permissions:
+      contents: write
+    uses: ./.github/workflows/retain-release.yml
+    with:
+      target: android-generic
+      signed_artifact: ${{ needs.signed-candidate.outputs.signed_artifact }}
+      receipt_sha256: ${{ needs.signed-candidate.outputs.receipt_sha256 }}
+
+  advance-dev:
+    needs: [signed-candidate, retain-dev]
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+    uses: ./.github/workflows/activate-feed.yml
+    with:
+      target: android-generic
+      revision: ${{ needs.signed-candidate.outputs.revision }}
+      signed_feed_artifact: ${{ needs.signed-candidate.outputs.signed_feed_artifact }}
+      receipt_sha256: ${{ needs.signed-candidate.outputs.receipt_sha256 }}

@@ -30,7 +30,8 @@ class ApkUpdates(private val context: Context, private val runtime: Runtime, pri
         var verifier: Updates? = null
     }
     private var worker: Worker? = null
-    private val installed = context.packageManager.getPackageInfo(context.packageName, signingFlags())
+    private val installed = context.packageManager.getPackageInfo(context.packageName, signingFlags() or PackageManager.GET_META_DATA)
+    private val updateTrust = installed.applicationInfo?.metaData
     private val current = BuildConfig.CORE_VERSION
     private val preferences = context.getSharedPreferences("updates", Context.MODE_PRIVATE)
 
@@ -75,7 +76,8 @@ class ApkUpdates(private val context: Context, private val runtime: Runtime, pri
                         clearPending()
                     }
                     runtime.updateStatus(channel, generation, "", if (install) "Downloading and verifying APK" else "Checking updates", false, install)
-                    active.verifier ?: Mobile.newUpdates(BuildConfig.UPDATE_BASE_URL, BuildConfig.UPDATE_PUBLIC_KEY, context.packageName,
+                    active.verifier ?: Mobile.newUpdates(updateTrust?.getString("com.encore.update_base_url").orEmpty(),
+                        updateTrust?.getString("com.encore.update_public_key").orEmpty(), context.packageName,
                         certificates(installed).single(), Build.SUPPORTED_ABIS.first(),
                         context.filesDir.resolve("updates/apks").absolutePath, BuildConfig.CORE_VERSION, revision(installed), Build.VERSION.SDK_INT.toLong())
                         .also { active.verifier = it }

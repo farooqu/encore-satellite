@@ -1,6 +1,9 @@
 import java.util.Base64
 import java.net.URI
 import groovy.json.JsonSlurper
+import org.gradle.api.artifacts.component.ModuleComponentIdentifier
+import org.gradle.api.attributes.Category
+import org.gradle.api.attributes.DocsType
 
 plugins {
     id("com.android.application")
@@ -11,8 +14,10 @@ val aecOutput = file("../../../build/android/aec")
 require(listOf("arm64-v8a", "armeabi-v7a").all { aecOutput.resolve("jniLibs/$it/libencore_aec.so").isFile }) {
     "Run devices/android-generic/build-android to build AEC3 before packaging the APK"
 }
-val coreVersion = (JsonSlurper().parse(file("../../../release/targets.json")) as Map<*, *>)["core_version"] as String
-fun quoted(value: String) = "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r") + "\""
+val coreVersion = env("ENCORE_CORE_VERSION").ifBlank {
+    (JsonSlurper().parse(file("../../../release/targets.json")) as Map<*, *>)["core_version"] as String
+}
+require(coreVersion.matches(Regex("[0-9A-Za-z.+-]+"))) { "Invalid core version" }
 abstract class EncoreLicenseAssets : Sync() {
     @get:OutputDirectory abstract val outputDirectory: DirectoryProperty
     init { into(outputDirectory) }
@@ -47,10 +52,10 @@ android {
         targetSdk = 35
         versionCode = env("ENCORE_VERSION_CODE").ifBlank { "3" }.toInt()
         versionName = env("ENCORE_VERSION_NAME").ifBlank { "0.1.2-incubator-dev" }
-        buildConfigField("String", "UPDATE_BASE_URL", quoted(env("ENCORE_UPDATE_BASE_URL")))
-        buildConfigField("String", "UPDATE_PUBLIC_KEY", quoted(env("ENCORE_UPDATE_PUBLIC_KEY")))
-        buildConfigField("String", "CORE_VERSION", quoted(coreVersion))
+        buildConfigField("String", "CORE_VERSION", "\"$coreVersion\"")
         manifestPlaceholders["coreVersion"] = coreVersion
+        manifestPlaceholders["updateBaseUrl"] = env("ENCORE_UPDATE_BASE_URL")
+        manifestPlaceholders["updatePublicKey"] = env("ENCORE_UPDATE_PUBLIC_KEY")
         // Match the Go engine; transitive AndroidX libraries also ship x86 binaries.
         ndk { abiFilters += setOf("arm64-v8a", "armeabi-v7a") }
     }
@@ -90,6 +95,33 @@ android {
 }
 androidComponents.onVariants { variant ->
     variant.sources.assets?.addGeneratedSourceDirectory(encoreLicenseAssets) { it.outputDirectory }
+}
+tasks.register("collectReleaseDependencySources") {
+    val runtime = configurations.named("releaseRuntimeClasspath")
+    val destination = layout.buildDirectory.dir("release-dependency-sources")
+    doLast {
+        val binaries = runtime.get().incoming.artifactView {
+            componentFilter { it is ModuleComponentIdentifier }
+        }.artifacts.artifacts.map {
+            it.id.componentIdentifier as ModuleComponentIdentifier
+        }.toSet()
+        val sources = runtime.get().incoming.artifactView {
+            withVariantReselection()
+            isLenient = true
+            componentFilter { it is ModuleComponentIdentifier }
+            attributes {
+                attribute(Category.CATEGORY_ATTRIBUTE, objects.named(Category.DOCUMENTATION))
+                attribute(DocsType.DOCS_TYPE_ATTRIBUTE, objects.named(DocsType.SOURCES))
+            }
+        }.artifacts.artifacts.groupBy { it.id.componentIdentifier }
+        val dir = destination.get().asFile
+        check(!dir.exists() || dir.deleteRecursively()) { "Could not clear previous dependency sources" }
+        for (id in binaries) {
+            val artifacts = sources[id].orEmpty()
+            check(artifacts.isNotEmpty()) { "No published runtime dependency sources for ${id.displayName}" }
+            for (artifact in artifacts) artifact.file.copyTo(dir.resolve("${id.group}/${id.module}/${id.version}/${artifact.file.name}"))
+        }
+    }
 }
 dependencies {
     implementation("androidx.core:core:1.15.0")
