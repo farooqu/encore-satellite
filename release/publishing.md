@@ -34,8 +34,15 @@ Release promotion is not implemented by the automatic dev workflow.
    `biscuit-arm64-probe.dtb`, `audited-header.bin`,
    `rootfs.tar.gz`, and `ca-certificates.crt`. Following successful Foundation
    checks for a same-repository main push, `biscuit-arm64-dev.yml` builds and
-   compares two ZIPs from that exact source. Both fields set to `null` skip
-   assembly. To change inputs, publish a new immutable tag and update the pin in
+   compares both the starter ZIP and standalone runtime archive across two
+   assemblies of that exact source. Each version's starter is a complete first
+   install on a supported Dot; it does not require an earlier Encore version.
+   Installs predating this release path use a one-time fresh install through
+   recovery/fastboot. They are not an OTA compatibility target.
+   The standalone archive is byte-for-byte the ZIP's `rootfs.tar.gz`, not a
+   delta from the previous build. It is an unsigned runtime OTA payload, not an
+   update offer, and does not update the recovery kernel. Both fields set to
+   `null` skip assembly. To change inputs, publish a new immutable tag and update the pin in
    a reviewed commit. Do not move the old tag or change a GitHub variable.
    Manual dispatch only produces an unsigned candidate, even after setup.
 2. Include `kernel-source.tar.gz` (matching Linux 6.1 source/config/patches)
@@ -69,16 +76,21 @@ The signing checkout must have the receipt commit in its
 Git object database for checks, but must not execute code from that commit
 unless separately reviewed. Then verify and preview `pipeline.py publish` in
 a separate keyless session; use `--execute` only after explicit publication
-approval. Do not activate an OTA feed for this ZIP. The public release tag is
-created only at publication.
+approval. The receipt binds both the ZIP and its exact extracted `rootfs.tar.gz`;
+the public release tag is created only at publication. Never feed the ZIP to
+the updater.
 
 To install, use `pipeline.py verify` from the release source checkout with the
 approved public key and reviewed receipt hash. Then pass the signed receipt's
 `artifact.sha256` for the ZIP to the existing guarded installer. See the
 [ARM64 install guide](../devices/biscuit/packaging/kernel61/README.md).
 Compatible signed **runtime** updates replace the rootfs in the inactive Encore
-slot without rewriting recovery or the stock partitions. Kernel or recovery
-init changes still need a separate recovery operation.
+slot without rewriting recovery or the stock partitions. Use the feed procedure
+below with the Biscuit signing root and `target=biscuit` in `activate-feed.yml`;
+enter the exact core version from the immutable `biscuit-<version>` tag. Feed URLs
+use `biscuit-arm64` and point at the standalone `rootfs.tar.gz` asset. Keep the
+offer limited to runtimes qualified with the installed recovery kernel. Kernel
+or recovery init changes still need a separate recovery operation.
 
 ## Android APK preparation
 
@@ -117,7 +129,7 @@ immutability first. The workflow intentionally refuses to overwrite/resume a
 draft automatically; finishing a matching partial draft requires a reviewed
 manual recovery. Different bytes require a new reservation, never `--clobber`.
 
-## Android feed selection, promotion and renewal
+## Feed selection, promotion and renewal
 
 Download the exact immutable release assets into a new directory and verify
 the receipt using the independently retained hash and platform public root.

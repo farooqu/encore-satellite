@@ -130,8 +130,11 @@ def main():
         for name, data in {"manifest.json": json.dumps(manifest, sort_keys=True).encode(), **members}.items():
             out.writestr(zipfile.ZipInfo(name), data)
     digest = sha(bundle.read_bytes())
-    load_bundle(bundle, digest)
+    _, verified_rootfs, _ = load_bundle(bundle, digest)
+    runtime = output / "rootfs.tar.gz"
+    runtime.write_bytes(verified_rootfs)
     print(f"{digest}  {bundle}")
+    print(f"{sha(verified_rootfs)}  {runtime}")
 
 
 if __name__ == "__main__":

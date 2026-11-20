@@ -81,7 +81,7 @@ jobs:
           (cd "$RUNNER_TEMP/inputs" && sha256sum --check --strict "$RUNNER_TEMP/source-sha256")
           # The builder checks the SHA-256 of each of these five files before
           # validating the complete assembled envelope.
-      - name: Assemble and compare two fresh-install ZIPs
+      - name: Assemble and compare starter and runtime OTA payloads
         id: assemble
         if: steps.inputs.outputs.tag != ''
         env:
@@ -98,16 +98,22 @@ jobs:
               --core-version "$version" --revision "$revision" --output "$RUNNER_TEMP/$attempt"
           done
           cmp "$RUNNER_TEMP/one/starter.zip" "$RUNNER_TEMP/two/starter.zip"
+          cmp "$RUNNER_TEMP/one/rootfs.tar.gz" "$RUNNER_TEMP/two/rootfs.tar.gz"
           asset="encore-biscuit-arm64-$version.zip"
+          runtime="encore-biscuit-arm64-$version-rootfs.tar.gz"
           mkdir -p build/biscuit-arm64-dev/{primary,repeat,sources}
-          cp "$RUNNER_TEMP/one/starter.zip" "build/biscuit-arm64-dev/primary/$asset"
-          cp "$RUNNER_TEMP/two/starter.zip" "build/biscuit-arm64-dev/repeat/$asset"
+          for pair in one:primary two:repeat; do
+            attempt=${pair%:*}
+            destination="build/biscuit-arm64-dev/${pair#*:}"
+            cp "$RUNNER_TEMP/$attempt/starter.zip" "$destination/$asset"
+            cp "$RUNNER_TEMP/$attempt/rootfs.tar.gz" "$destination/$runtime"
+          done
           mv "$inputs"/{kernel-source.tar.gz,alpine-go-source.tar.gz} build/biscuit-arm64-dev/sources/
           {
             printf 'Unsigned Biscuit ARM64 candidate %s\nSource: %s\nInputs: %s\n' "$version" "$SOURCE" "$INPUT_TAG"
             go version
             python3 --version
-            sha256sum build/biscuit-arm64-dev/{primary,repeat}/"$asset" build/biscuit-arm64-dev/sources/*.tar.gz
+            sha256sum build/biscuit-arm64-dev/{primary,repeat}/{"$asset","$runtime"} build/biscuit-arm64-dev/sources/*.tar.gz
           } | tee build/biscuit-arm64-dev/evidence.txt >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: steps.inputs.outputs.tag != ''

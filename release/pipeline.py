@@ -26,6 +26,7 @@ REPOSITORY = "farooqu/encore-satellite"
 RECEIPT_TYPE = "encore-release-receipt+jws"
 ANDROID_FEED_TYPE = "encore-android-update+jws"
 ARM64_STARTER = "encore-biscuit-arm64-starter-v1"
+ARM64_FEED_TYPE = "encore-linux-update+jws"
 BISCUIT_ARM64_ROOT = bytes.fromhex("302a300506032b6570032100") + base64.b64decode(
     "Ggx1WlubkJjSPNpKoaEDzPZYMzUxbiPunioZcmvxsuc=")  # Same root as BiscuitARM64Root in platforms/linuxupdate.
 
@@ -120,12 +121,14 @@ def record(path):
 def load_biscuit_starter(path, artifact_sha256):
     sys.path.insert(0, str(ROOT / "devices/biscuit/packaging"))
     from kernel61.starter_install import load_bundle
-    return load_bundle(path, artifact_sha256)[0]
+    return load_bundle(path, artifact_sha256)
 
 
 def inspect_artifact(receipt, path, aapt="aapt", apksigner="apksigner"):
     if receipt["target"] == "biscuit":
-        manifest = load_biscuit_starter(path, receipt["artifact"]["sha256"])
+        manifest, rootfs, _ = load_biscuit_starter(path, receipt["artifact"]["sha256"])
+        require(receipt["ota"] == {"name": "rootfs.tar.gz", "size": len(rootfs),
+                                  "sha256": hashlib.sha256(rootfs).hexdigest()}, "OTA bytes differ from starter rootfs")
         require(manifest.get("recovery_rearm") is True and manifest.get("api_key_provisioning") is True
                 and (manifest.get("core_version"), manifest["package_revision"]) ==
                 (receipt["core_version"], receipt["revision"]), "wrong ARM64 starter identity or install policy")
@@ -164,7 +167,12 @@ def validate_receipt(receipt):
                 "Biscuit requires an ARM64 starter named for its public dev version")
     require(set(receipt["sources"]) == required, "matching corresponding-source roles required")
     names = []
-    for item in [receipt["artifact"], receipt["evidence"], *receipt["sources"].values()]:
+    items = [receipt["artifact"], receipt["evidence"], *receipt["sources"].values()]
+    if arm64_starter(receipt):
+        require(receipt["ota"]["name"] == "rootfs.tar.gz" and receipt["ota"]["size"] <= 96 << 20,
+                "invalid Biscuit OTA asset")
+        items.append(receipt["ota"])
+    for item in items:
         name = item["name"]
         require(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", name) and name not in {"receipt.json", "receipt.jws"}, "unsafe/reserved asset name")
         require(type(item["size"]) is int and item["size"] > 0 and re.fullmatch(r"[0-9a-f]{64}", item["sha256"]), "invalid asset size/hash")
@@ -247,7 +255,8 @@ def prepare(spec_path, output, aapt, apksigner):
     receipt["sources"]["encore"] = {"name": "encore-source.tar.gz", "size": len(archive),
                                           "sha256": hashlib.sha256(archive).hexdigest()}
     if starter:
-        manifest = load_biscuit_starter(paths["artifact"], receipt["artifact"]["sha256"])
+        manifest, rootfs, _ = load_biscuit_starter(paths["artifact"], receipt["artifact"]["sha256"])
+        receipt["ota"] = {"name": "rootfs.tar.gz", "sha256": hashlib.sha256(rootfs).hexdigest(), "size": len(rootfs)}
         from kernel61.starter_build import source_hashes
         hashes = source_hashes()
         tracked = set(run("git", "ls-files", "-z").decode().split("\0"))
@@ -264,6 +273,8 @@ def prepare(spec_path, output, aapt, apksigner):
     output.mkdir(parents=True)
     for path in [*paths.values(), *sources.values()]:
         shutil.copyfile(path, output / path.name)
+    if starter:
+        (output / receipt["ota"]["name"]).write_bytes(rootfs)
     (output / "encore-source.tar.gz").write_bytes(archive)
     (output / "receipt.json").write_bytes(canonical(receipt) + b"\n")
     print(f"Retained {tag(receipt)}; receipt SHA256 {digest(output / 'receipt.json')}; not signed or published")
@@ -283,6 +294,8 @@ def verify(directory, public_key, expected):
 def verify_assets(directory, receipt, *, signed):
     """Check the same retained bytes before offline signing and after transfer."""
     items = [receipt["artifact"], receipt["evidence"], *receipt["sources"].values()]
+    if arm64_starter(receipt):
+        items.append(receipt["ota"])
     expected = {"receipt.json", *(i["name"] for i in items)}
     if signed:
         expected.add("receipt.jws")
@@ -298,10 +311,17 @@ def verify_assets(directory, receipt, *, signed):
 
 
 def metadata(receipt, channel, issued, expires):
-    require(receipt["target"] == "android-generic", "ARM64 fresh-install ZIP must not be published to an OTA feed")
     require(channel in {"dev", "stable"}, "invalid channel")
     require(channel != "stable" or "-" not in receipt["core_version"].split("+", 1)[0], "stable cannot advertise a prerelease")
     require(type(issued) is int and type(expires) is int and issued > 0 and 0 < expires - issued <= 7 * 86400, "invalid feed lifetime")
+    if arm64_starter(receipt):
+        ota = receipt["ota"]
+        return {"target": "biscuit-arm64", "backend": "incubator", "channel": channel,
+                "format": "encore-biscuit-arm64-rootfs-v1", "base_sha256": receipt["compatibility"]["base_sha256"],
+                "core_version": receipt["core_version"], "revision": receipt["revision"],
+                "url": asset_url(receipt, ota["name"]), "size": ota["size"], "sha256": ota["sha256"],
+                "issued": issued, "expires": expires}
+    require(receipt["target"] == "android-generic", "unsupported feed target")
     artifact = receipt["artifact"]
     result = {"target": receipt["target"], "backend": receipt["backend"], "channel": channel,
               "core_version": receipt["core_version"], "revision": receipt["revision"],
@@ -323,12 +343,14 @@ def core_key(version):
 
 def stage_feed(receipt, feed, public_key, site, channel, now=None):
     now = int(time.time()) if now is None else now
-    signed = verify_jws(feed, ANDROID_FEED_TYPE, public_key)
+    feed_type = ARM64_FEED_TYPE if arm64_starter(receipt) else ANDROID_FEED_TYPE
+    signed = verify_jws(feed, feed_type, public_key)
     require(len(feed.read_bytes()) <= 32 * 1024, "feed exceeds device limit")
     require(signed == metadata(receipt, channel, signed["issued"], signed["expires"]), "feed differs from retained artifact")
     require(signed["issued"] <= now + 300 and signed["expires"] > now, "future or expired feed")
-    destination = site / receipt["target"] / "incubator" / f"{channel}.jws"
-    history = site / "history" / receipt["target"] / channel / f"{signed['issued']}.jws"
+    target = signed["target"]
+    destination = site / target / "incubator" / f"{channel}.jws"
+    history = site / "history" / target / channel / f"{signed['issued']}.jws"
     previous_entries = list(history.parent.glob("*.jws"))
     if previous_entries:
         require(all(re.fullmatch(r"[1-9][0-9]*", p.stem) for p in previous_entries), "invalid feed history filename")
@@ -340,9 +362,9 @@ def stage_feed(receipt, feed, public_key, site, channel, now=None):
         if destination.read_bytes() == feed.read_bytes():
             require(history.is_file() and history.read_bytes() == feed.read_bytes(), "missing/changed feed history")
             return  # Retry a failed Pages deploy without changing a checkpoint.
-        previous = verify_jws(destination, ANDROID_FEED_TYPE, public_key)
+        previous = verify_jws(destination, feed_type, public_key)
         require((previous["target"], previous["backend"], previous["channel"]) ==
-                (receipt["target"], "incubator", channel), "previous feed identity mismatch")
+                (target, "incubator", channel), "previous feed identity mismatch")
         require(signed["revision"] >= previous["revision"] and signed["issued"] > previous["issued"], "feed revision/issue time must not roll back")
         if signed["revision"] == previous["revision"]:
             require({k: v for k, v in signed.items() if k not in {"issued", "expires"}} ==
@@ -362,7 +384,7 @@ def publish(directory, receipt, execute):
     changelog = f"release/changelogs/{receipt['core_version']}.md"
     if arm64_starter(receipt):
         source = receipt["source"]
-        notes = ("Biscuit ARM64 development fresh-install build. Not an OTA update or stable release.\n\n"
+        notes = ("Biscuit ARM64 development build. Use the ZIP for a fresh install; rootfs.tar.gz requires a signed runtime OTA feed.\n\n"
                  f"[Source commit](https://github.com/{REPOSITORY}/commit/{source}) · "
                  f"[Install guide](https://github.com/{REPOSITORY}/blob/{source}/devices/biscuit/packaging/kernel61/README.md)\n")
     elif run("git", "ls-tree", "--name-only", receipt["source"], "--", changelog).strip():
@@ -455,7 +477,11 @@ def main():
         if args.command == "publish":
             publish(args.directory, receipt, args.execute)
         elif args.command == "feed":
-            sign(metadata(receipt, args.channel, args.issued, args.expires), ANDROID_FEED_TYPE, args.key, args.output)
+            feed_type = ARM64_FEED_TYPE if arm64_starter(receipt) else ANDROID_FEED_TYPE
+            if arm64_starter(receipt):
+                require(run("openssl", "pkey", "-in", str(args.key), "-pubout", "-outform", "DER") ==
+                        BISCUIT_ARM64_ROOT, "wrong signing key for Biscuit ARM64")
+            sign(metadata(receipt, args.channel, args.issued, args.expires), feed_type, args.key, args.output)
         elif args.command == "stage-feed":
             stage_feed(receipt, args.feed, args.public_key, args.site, args.channel)
         else:

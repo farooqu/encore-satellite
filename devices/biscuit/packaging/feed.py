@@ -23,7 +23,9 @@ def encode(value):
     return base64.urlsafe_b64encode(value).rstrip(b"=")
 
 
-def arm64_metadata(starter, pin, url, issued, expires):
+def arm64_metadata(starter, pin, url, issued, expires, channel="stable"):
+    if channel not in ("stable", "dev"):
+        raise ValueError("expected stable or dev channel")
     parsed = urlsplit(url)
     if (parsed.scheme != "https" or not parsed.hostname or parsed.username is not None
             or parsed.password is not None or parsed.query or parsed.fragment):
@@ -32,10 +34,10 @@ def arm64_metadata(starter, pin, url, issued, expires):
         raise ValueError("invalid lifetime (maximum seven days)")
     manifest, rootfs, _ = load_arm64_starter(starter, pin)
     core = manifest.get("core_version")
-    if not core or "-" in core.split("+", 1)[0]:
-        raise ValueError("public ARM64 release requires an upgrade-capable starter with a stable version")
+    if not core or (channel == "stable" and "-" in core.split("+", 1)[0]):
+        raise ValueError("ARM64 feed requires an upgrade-capable starter; Stable may not use a prerelease")
     return {"target": "biscuit-arm64", "backend": "incubator", "format": "encore-biscuit-arm64-rootfs-v1",
-            "channel": "stable", "core_version": core, "revision": manifest["package_revision"],
+            "channel": channel, "core_version": core, "revision": manifest["package_revision"],
             "base_sha256": manifest["retained_base_sha256"], "url": url, "size": len(rootfs),
             "sha256": sha(rootfs), "issued": issued, "expires": expires}, rootfs
 
@@ -44,7 +46,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bundle", type=Path, required=True)
     parser.add_argument("--url", required=True)
-    parser.add_argument("--channel", choices=("stable",), required=True)
+    parser.add_argument("--channel", choices=("stable", "dev"), default="stable")
     parser.add_argument("--issued", type=int, default=int(time.time()))
     parser.add_argument("--expires", type=int, required=True)
     parser.add_argument("--key", type=Path, required=True)
@@ -53,7 +55,7 @@ def main():
     parser.add_argument("--arm64-rootfs-output", type=Path, required=True, help="write the exact archive to retain as the public asset")
     args = parser.parse_args()
     try:
-        release, rootfs = arm64_metadata(args.bundle, args.arm64_starter_sha256, args.url, args.issued, args.expires)
+        release, rootfs = arm64_metadata(args.bundle, args.arm64_starter_sha256, args.url, args.issued, args.expires, args.channel)
         header = b'{"alg":"EdDSA","typ":"encore-linux-update+jws"}'
         message = encode(header) + b"." + encode(json.dumps(release, sort_keys=True, separators=(",", ":")).encode())
         # Ed25519 OpenSSL one-shot signing needs a regular input file.

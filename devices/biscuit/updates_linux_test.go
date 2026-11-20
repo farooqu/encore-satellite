@@ -45,6 +45,12 @@ func testLinuxUpdates(t *testing.T, dir string) *linuxUpdates {
 }
 
 func TestARM64PublicUpdateRequiresConfirmationAndPreservesEnrollment(t *testing.T) {
+	for _, channel := range []string{"stable", "dev"} {
+		t.Run(channel, func(t *testing.T) { testARM64PublicUpdate(t, channel) })
+	}
+}
+
+func testARM64PublicUpdate(t *testing.T, channel string) {
 	dir := t.TempDir()
 	store := linuxupdate.ARM64Store{Directory: filepath.Join(dir, "cache/encore"), Booted: filepath.Join(dir, "run/slot")}
 	m := linuxupdate.BiscuitARM64Identity("0.1.1-dev.5", 22)
@@ -85,13 +91,13 @@ func TestARM64PublicUpdateRequiresConfirmationAndPreservesEnrollment(t *testing.
 	var metadata, downloads atomic.Int32
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/biscuit-arm64/incubator/stable.jws":
+		case "/biscuit-arm64/incubator/" + channel + ".jws":
 			mode := metadata.Load()
 			if mode == 0 {
 				http.NotFound(w, r)
 				return
 			}
-			rel := linuxupdate.Release{Target: m.Target, Format: m.Format, Channel: m.Channel, Backend: m.Backend,
+			rel := linuxupdate.Release{Target: m.Target, Format: m.Format, Channel: channel, Backend: m.Backend,
 				CoreVersion: "0.1.1", Revision: 23, BaseSHA256: m.BaseSHA256, Size: int64(len(update)), SHA256: digest(update),
 				URL: "https://" + r.Host + "/asset", Issued: time.Now().Unix() - 300, Expires: time.Now().Unix() + 300}
 			if mode == 3 {
@@ -113,11 +119,29 @@ func TestARM64PublicUpdateRequiresConfirmationAndPreservesEnrollment(t *testing.
 	}))
 	defer server.Close()
 	var reboots int
-	version := updateVersion(m.CoreVersion, m.Revision)
-	u := &linuxUpdates{arm64: &store, channel: m.Channel, jobs: make(chan updateRequest, 1),
-		state:         api.UpdateStateResponse{CurrentVersion: version, LatestVersion: version},
-		client:        linuxupdate.Client{Installed: m, Key: pub, HTTP: server.Client(), BaseURL: server.URL, Directory: filepath.Join(stateDir, "updates")},
-		beforeInstall: func() error { return nil }, reboot: func() error { reboots++; return nil }}
+	bootIdentity := filepath.Join(dir, "installed.json")
+	selection := filepath.Join(stateDir, "arm64-update-channel.json")
+	write(bootIdentity, []byte(`{"core_version":"0.1.1-dev.5","package_revision":22,"channel":"stable"}`))
+	legacy, err := newARM64Updates(selection, bootIdentity)
+	if err != nil || legacy.supportsChannelSelection() || legacy.selectChannel("dev") == nil {
+		t.Fatal("old recovery can select a Dev slot it cannot boot", err)
+	}
+	write(bootIdentity, []byte(`{"core_version":"0.1.1-dev.5","package_revision":22,"channel":"stable","update_channels":true}`))
+	u, err := newARM64Updates(selection, bootIdentity)
+	if err != nil || len(u.states()) != 2 || u.states()[0].(*api.SelectStateResponse).State != "stable" {
+		t.Fatal("new recovery did not expose Stable by default", err)
+	}
+	if err := u.selectChannel(channel); err != nil {
+		t.Fatal(err)
+	}
+	u, err = newARM64Updates(selection, bootIdentity)
+	if err != nil || u.states()[0].(*api.SelectStateResponse).State != channel {
+		t.Fatal("selection did not survive restart", err)
+	}
+	u.arm64 = &store
+	u.client = linuxupdate.Client{Installed: m, Key: pub, HTTP: server.Client(), BaseURL: server.URL, Directory: filepath.Join(stateDir, "updates")}
+	u.beforeInstall = func() error { return nil }
+	u.reboot = func() error { reboots++; return nil }
 	job := func(install bool) {
 		t.Helper()
 		u.request(install)
@@ -136,13 +160,13 @@ func TestARM64PublicUpdateRequiresConfirmationAndPreservesEnrollment(t *testing.
 	for _, mode := range []int32{0, 1} {
 		metadata.Store(mode)
 		job(false)
-		if s := u.states()[0].(*api.UpdateStateResponse); s.MissingState || s.LatestVersion != s.CurrentVersion {
+		if s := u.states()[1].(*api.UpdateStateResponse); s.MissingState || s.LatestVersion != s.CurrentVersion {
 			t.Fatalf("unexpected update offer: %v", s)
 		}
 	}
 	metadata.Store(2)
 	job(false)
-	if got := u.states()[0].(*api.UpdateStateResponse).LatestVersion; got != "0.1.1 (revision 23)" {
+	if got := u.states()[1].(*api.UpdateStateResponse).LatestVersion; got != "0.1.1 (revision 23)" {
 		t.Fatalf("missing verified offer: %q", got)
 	}
 	metadata.Store(3)
@@ -151,12 +175,34 @@ func TestARM64PublicUpdateRequiresConfirmationAndPreservesEnrollment(t *testing.
 	if downloads.Load() != 0 || reboots != 0 {
 		t.Fatal("a check or moved feed initiated installation")
 	}
+	if channel == "dev" {
+		guards := 0
+		u.beforeInstall = func() error {
+			guards++
+			if guards == 2 { // Download finished, but activation has not started.
+				if err := u.selectChannel("stable"); err != nil {
+					return err
+				}
+				return u.selectChannel("dev")
+			}
+			return nil
+		}
+		job(true)
+		assertFile(filepath.Join(store.Directory, "active"), "a\n")
+		assertFile(filepath.Join(store.Directory, "highest-revision"), "22\n")
+		if guards != 2 || downloads.Load() != 1 || reboots != 0 || u.offer != nil {
+			t.Fatal("channel switch did not invalidate the downloaded offer")
+		}
+		u.beforeInstall = func() error { return nil }
+		job(false)
+	}
+	beforeDownload := downloads.Load()
 	job(true)
 	assertFile(filepath.Join(store.Directory, "active"), "b\n")
 	assertFile(filepath.Join(store.Directory, "slots/b.state"), "update\n")
 	assertFile(filepath.Join(store.Directory, "highest-revision"), "24\n")
 	assertFile(filepath.Join(store.Directory, "slots/a/rootfs.tar.gz"), string(seed))
-	if downloads.Load() != 1 || reboots != 1 {
+	if downloads.Load() != beforeDownload+1 || reboots != 1 {
 		t.Fatalf("downloads=%d reboots=%d", downloads.Load(), reboots)
 	}
 	if got, err := store.VerifyBoot("b", digest(seed), m, pub); err != nil || got.Revision != 24 || got.CoreVersion != "0.1.2" {

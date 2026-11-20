@@ -79,6 +79,11 @@ func (s ARM64Store) VerifyBoot(slot, seedDigest string, seed Manifest, key ed255
 		return Manifest{}, err
 	}
 	r, err := VerifyRelease(proof, key, seed, seed.Channel)
+	if err != nil && seed.Channel == "stable" {
+		// Feed selection controls admission, not boot eligibility. A verified
+		// Dev slot remains bootable after the owner switches back to Stable.
+		r, err = VerifyRelease(proof, key, seed, "dev")
+	}
 	if err != nil || r.Revision <= seed.Revision || r.Revision > highest || !Newer(r.CoreVersion, seed.CoreVersion) {
 		return Manifest{}, errors.New("untrusted ARM64 slot release")
 	}
@@ -88,13 +93,16 @@ func (s ARM64Store) VerifyBoot(slot, seedDigest string, seed Manifest, key ed255
 
 // Install writes only the inactive ARM64 slot. The selector is the commit
 // point; prior errors can burn a revision, but cannot select a partial archive.
-func (s ARM64Store) Install(installed Manifest, key ed25519.PublicKey, proof, downloaded string) error {
+func (s ARM64Store) Install(installed Manifest, key ed25519.PublicKey, channel, proof, downloaded string) error {
+	if !Channel(channel) {
+		return errors.New("invalid selected ARM64 update channel")
+	}
 	lock := filepath.Join(s.Directory, ".install-lock")
 	if err := os.Mkdir(lock, 0700); err != nil {
 		return fmt.Errorf("ARM64 store locked: %w", err)
 	}
 	defer os.Remove(lock)
-	r, err := VerifyRelease([]byte(proof), key, installed, installed.Channel)
+	r, err := VerifyRelease([]byte(proof), key, installed, channel)
 	if err != nil {
 		return err
 	}

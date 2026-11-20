@@ -75,43 +75,54 @@ func newLinuxUpdates(selectionPath, manifestPath string) (*linuxUpdates, error) 
 	}
 	u.state = api.UpdateStateResponse{Key: linuxUpdateKey, Title: "Encore Echo Dot", MissingState: true, ReleaseSummary: "Check for updates; signed update trust must be provisioned locally"}
 	u.state.CurrentVersion = updateVersion(u.client.Installed.CoreVersion, u.client.Installed.Revision)
+	if err := u.loadSelection(u.client.Installed.Channel); err != nil {
+		return nil, err
+	}
+	return u, nil
+}
+
+func (u *linuxUpdates) loadSelection(defaultChannel string) error {
 	var saved updateSelection
-	b, err = os.ReadFile(selectionPath)
+	b, err := os.ReadFile(u.selectionPath)
 	if errors.Is(err, os.ErrNotExist) {
-		saved.Channel = u.client.Installed.Channel
+		saved.Channel = defaultChannel
 		if !linuxupdate.Channel(saved.Channel) {
-			return nil, errors.New("invalid installed update channel")
+			return errors.New("invalid installed update channel")
 		}
 		b, _ = json.Marshal(saved)
-		err = writePrivate(selectionPath, b)
+		err = writePrivate(u.selectionPath, b)
 	} else if err == nil {
 		err = json.Unmarshal(b, &saved)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("load/persist private update selection: %w", err)
+		return fmt.Errorf("load/persist private update selection: %w", err)
 	}
 	if !linuxupdate.Channel(saved.Channel) {
-		return nil, errors.New("invalid saved update channel")
+		return errors.New("invalid saved update channel")
 	}
 	u.channel, u.generation = saved.Channel, saved.Generation
-	return u, nil
+	return nil
 }
 func updateVersion(core string, revision int64) string {
 	return fmt.Sprintf("%s (revision %d)", core, revision)
 }
 
-func newARM64Updates() (*linuxUpdates, error) {
-	b, err := os.ReadFile("/run/encore/arm64-installed.json")
+func newARM64Updates(selectionPath, manifestPath string) (*linuxUpdates, error) {
+	b, err := os.ReadFile(manifestPath)
 	if err != nil {
 		return nil, err
 	}
-	var m linuxupdate.Manifest
-	if err = json.Unmarshal(b, &m); err != nil {
+	var boot struct {
+		linuxupdate.Manifest
+		UpdateChannels bool `json:"update_channels"`
+	}
+	if err = json.Unmarshal(b, &boot); err != nil {
 		return nil, err
 	}
+	m := boot.Manifest
 	version := updateVersion(m.CoreVersion, m.Revision)
-	return &linuxUpdates{
-		channel: m.Channel, jobs: make(chan updateRequest, 1),
+	u := &linuxUpdates{
+		channel: "stable", jobs: make(chan updateRequest, 1),
 		state: api.UpdateStateResponse{Key: linuxUpdateKey, Title: "Encore Biscuit", CurrentVersion: version, LatestVersion: version},
 		client: linuxupdate.Client{Installed: m, Key: linuxupdate.BiscuitARM64Root(), Directory: "/data/encore/updates",
 			BaseURL: "https://farooqu.github.io/encore-satellite"},
@@ -134,16 +145,25 @@ func newARM64Updates() (*linuxUpdates, error) {
 			}
 			return nil
 		},
-	}, nil
+	}
+	if boot.UpdateChannels {
+		u.selectionPath = selectionPath
+		if err := u.loadSelection("stable"); err != nil {
+			// Keep the runtime healthy and default to Stable without replacing
+			// a corrupt or unreadable preference.
+			u.state.ReleaseSummary = err.Error()
+		}
+	}
+	return u, nil
 }
 
-func (u *linuxUpdates) supportsChannelSelection() bool { return u.arm64 == nil }
+func (u *linuxUpdates) supportsChannelSelection() bool { return u.selectionPath != "" }
 
 func (u *linuxUpdates) selectChannel(channel string) error {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	if !u.supportsChannelSelection() {
-		return errors.New("ARM64 checks the public feed; no channel selection")
+		return errors.New("installed recovery does not support channel selection")
 	}
 	if !linuxupdate.Channel(channel) {
 		return errors.New("invalid update channel")
@@ -166,8 +186,13 @@ func (u *linuxUpdates) selectChannel(channel string) error {
 	if u.cancel != nil {
 		u.cancel()
 	}
-	u.state.LatestVersion = ""
-	u.state.MissingState = true
+	u.offer = nil
+	if u.arm64 != nil {
+		u.state.LatestVersion = u.state.CurrentVersion
+	} else {
+		u.state.LatestVersion = ""
+		u.state.MissingState = true
+	}
 	u.state.InProgress = false
 	u.state.ReleaseSummary = "Channel saved; check for updates (nothing installed)"
 	return nil
@@ -243,6 +268,9 @@ func (u *linuxUpdates) executeARM64(ctx context.Context, job updateRequest, chan
 	status := func(offer *linuxupdate.Release, summary string) {
 		u.mu.Lock()
 		defer u.mu.Unlock()
+		if job.channel != u.channel || job.generation != u.generation {
+			return
+		}
 		u.offer = offer
 		u.state.LatestVersion = u.state.CurrentVersion
 		if offer != nil {
@@ -257,7 +285,7 @@ func (u *linuxUpdates) executeARM64(ctx context.Context, job updateRequest, chan
 		fail(err)
 		return
 	}
-	r, err := u.client.Check(ctx, m.Channel, highest)
+	r, err := u.client.Check(ctx, job.channel, highest)
 	if err != nil {
 		fail(err)
 		return
@@ -290,15 +318,17 @@ func (u *linuxUpdates) executeARM64(ctx context.Context, job updateRequest, chan
 		status(r, err.Error())
 		return
 	}
-	if err := ctx.Err(); err != nil {
-		fail(err)
-		return
-	}
-	if err := u.arm64.Install(m, u.client.Key, r.Proof, file); err != nil {
-		fail(err)
-		return
-	}
 	u.mu.Lock()
+	if ctx.Err() != nil || job.channel != u.channel || job.generation != u.generation {
+		u.mu.Unlock()
+		return
+	}
+	// The channel cannot change between the final intent check and activation.
+	if err := u.arm64.Install(m, u.client.Key, job.channel, r.Proof, file); err != nil {
+		u.mu.Unlock()
+		fail(err)
+		return
+	}
 	u.activated = true
 	u.mu.Unlock()
 	status(nil, "Trial slot selected; reboot requested; health check pending")

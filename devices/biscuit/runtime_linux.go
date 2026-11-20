@@ -164,7 +164,7 @@ func Run(parent context.Context, c Config, probeReference bool) error {
 		return err
 	}
 	controls := &biscuitControls{Proxy: proxy, player: player, management: admin, ring: ringPolicy, announcements: newAnnouncementPlayer(engine, player), microphone: sensors.NewMicrophone(muted)}
-	if controls.updates, err = newARM64Updates(); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if controls.updates, err = newARM64Updates("/data/encore/arm64-update-channel.json", "/run/encore/arm64-installed.json"); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("read ARM64 boot identity: %w", err)
 	}
 	if packagedExecutable(musicExecutable) {

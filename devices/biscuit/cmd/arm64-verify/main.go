@@ -21,7 +21,12 @@ func main() {
 	store := linuxupdate.ARM64Store{Directory: os.Args[1]}
 	m, err := store.VerifyBoot(os.Args[2], os.Args[3], linuxupdate.BiscuitARM64Identity(os.Args[4], revision), linuxupdate.BiscuitARM64Root())
 	if err == nil {
-		err = json.NewEncoder(os.Stdout).Encode(m)
+		// A runtime from OTA can also run under pre-channel recovery. Only
+		// advertise Dev selection when this boot's verifier supports it.
+		err = json.NewEncoder(os.Stdout).Encode(struct {
+			linuxupdate.Manifest
+			UpdateChannels bool `json:"update_channels"`
+		}{m, true})
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)

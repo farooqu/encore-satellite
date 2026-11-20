@@ -140,21 +140,21 @@ The initial archive is trusted by the pinned private installer and recovery
 digest; later archives must have an Echo Dot Ed25519 signature. The legacy
 ARMv7 updater cannot update this slot layout.
 
-The ARM64 feed entry is `biscuit-arm64/incubator/stable.jws` below the Encore
-Pages base. `feed.py --arm64-starter-sha256 ... --arm64-rootfs-output ...`
-prepares an offline-signed entry and exact rootfs for immutable retention.
-Reserve the starter and release revisions from the same Biscuit ledger. The
-public version must be stable, newer than the private core, and compatible with
-the pinned ARM64 base. Production signing and public feed activation are
-separate from building or reviewing a private baseline. The existing legacy
-retention/activation workflow does not accept this ARM64 asset format.
+The default ARM64 feed is `biscuit-arm64/incubator/stable.jws` below the Encore
+Pages base. Starting with a recovery verifier that supports both channels, you
+can select Dev in Home Assistant; the Dot remembers the choice across reboots.
+Changing back to Stable does not downgrade a Dev install. A newer compatible
+Stable release must be available. An older recovery verifier stays Stable-only.
+See [release publishing](../../../../release/publishing.md) for signing and
+retaining the exact runtime archive from the starter ZIP and selecting it on a
+feed. Production feed activation is separate from a build or fresh install.
 
 Before approving the initial private install, implement and review the upgrade
 path and verify it offline with two different signed versions. Check package
 identity, a monotonic Biscuit revision ledger and authenticated feed/package
-verification using the existing Echo Dot Ed25519 public root. Private installs
-check the public feed by default, with no channel enrollment step. Until a
-compatible signed public release is available there is nothing to install. Test
+verification using the existing Echo Dot Ed25519 public root. No channel
+enrollment is required to check Stable. Until a compatible signed public
+release is available there is nothing to install. Test
 the ESPHome state in Home Assistant: a blank latest version can falsely show an
 available update. When there's no verified offer, report the installed version
 as the latest version and keep check errors separate from availability.

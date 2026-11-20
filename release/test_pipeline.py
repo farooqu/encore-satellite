@@ -214,6 +214,29 @@ class PipelineTests(unittest.TestCase):
         shutil.copyfile(site / "dev.jws", history / f"{previous['issued']}.jws")
         self.stage(good, "dev", success=False)
 
+    def test_biscuit_feed_serves_only_retained_rootfs(self):
+        receipt = {"target": "biscuit", "core_version": "0.1.42", "revision": 1000000041,
+                   "artifact": {"name": "encore-biscuit-arm64-0.1.42.zip", "size": 600, "sha256": "6" * 64},
+                   "ota": {"name": "rootfs.tar.gz", "size": 200, "sha256": "2" * 64},
+                   "compatibility": {"format": pipeline.ARM64_STARTER, "base_sha256": "1" * 64}}
+        site = self.build / "site"
+        for channel in ("dev", "stable"):
+            feed = self.build / f"biscuit-{channel}.jws"
+            payload = pipeline.metadata(receipt, channel, self.now, self.now + 3600)
+            self.assertEqual((payload["target"], payload["format"], payload["size"], payload["sha256"]),
+                             ("biscuit-arm64", "encore-biscuit-arm64-rootfs-v1", 200, "2" * 64))
+            self.assertEqual(payload["url"],
+                             "https://github.com/farooqu/encore-satellite/releases/download/biscuit-0.1.42/rootfs.tar.gz")
+            pipeline.sign(payload, pipeline.ARM64_FEED_TYPE, self.key, feed)
+            pipeline.stage_feed(receipt, feed, self.public, site, channel, self.now)
+            self.assertEqual((site / "biscuit-arm64/incubator" / f"{channel}.jws").read_bytes(), feed.read_bytes())
+        bad = self.build / "starter-as-ota.jws"
+        payload.update(url=payload["url"].replace("rootfs.tar.gz", receipt["artifact"]["name"]),
+                       size=600, sha256="6" * 64)
+        pipeline.sign(payload, pipeline.ARM64_FEED_TYPE, self.key, bad)
+        with self.assertRaisesRegex(ValueError, "feed differs from retained artifact"):
+            pipeline.stage_feed(receipt, bad, self.public, site, "stable", self.now)
+
     def test_android_inspection_contract_and_signed_feed(self):
         self.prepare()
         self.verified("verify")
