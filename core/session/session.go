@@ -430,6 +430,15 @@ func (e *Engine) ConfirmMonitor(id uint64) {
 	}
 }
 
+// HideMonitor ends only the recording whose host indicator was lost.
+func (e *Engine) HideMonitor(id uint64) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if id != 0 && id == e.state.MonitorID {
+		_ = e.stop()
+	}
+}
+
 // FinishInput is an explicit host endpoint, not local speech recognition.
 // Incubator owns endpointing upstream and has no equivalent half-close message.
 func (e *Engine) FinishInput() error {

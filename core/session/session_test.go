@@ -82,6 +82,43 @@ func fixture(t *testing.T) (*session.Engine, *link, *player, uint64) {
 	return e, l, p, g
 }
 
+func TestRemoteCaptureFollowsExactIndicator(t *testing.T) {
+	e, peer, _, generation := fixture(t)
+	old, err := e.SetMonitor(generation, true, false, 1)
+	if err != nil || old == 0 {
+		t.Fatalf("first monitor: id=%d err=%v", old, err)
+	}
+	id, err := e.SetMonitor(generation, true, true, 2)
+	if err != nil || id == 0 || id == old {
+		t.Fatalf("replacement monitor: id=%d err=%v", id, err)
+	}
+	var seq uint64
+	feed := func(sample int16) {
+		t.Helper()
+		seq++
+		if err := e.Capture(audio.Frame{Sequence: seq, CapturedAt: time.Duration(seq) * time.Millisecond, Samples: []int16{sample}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e.ConfirmMonitor(old)
+	feed(37)
+	e.ConfirmMonitor(id)
+	e.HideMonitor(old)
+	feed(61)
+	e.HideMonitor(id)
+	e.ConfirmMonitor(id)
+	feed(89)
+	var sent []int16
+	for _, cmd := range peer.commands {
+		if cmd.Kind == "monitor_audio" {
+			sent = append(sent, cmd.Samples...)
+		}
+	}
+	if !slices.Equal(sent, []int16{61}) || e.Snapshot().MonitorID != 0 {
+		t.Fatalf("remote audio sent %v, monitor=%d; want only the visible request's live sample", sent, e.Snapshot().MonitorID)
+	}
+}
+
 func TestVoiceActivityCoversListeningThroughPhysicalDrain(t *testing.T) {
 	for _, backend := range []session.Backend{session.Assist, session.Incubator} {
 		t.Run(string(backend), func(t *testing.T) {
