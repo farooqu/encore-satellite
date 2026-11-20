@@ -1,6 +1,10 @@
 name: Sign a reviewed Biscuit native candidate
 
 on:
+  workflow_run:
+    workflows: [Biscuit ARM64 dev builds]
+    types: [completed]
+    branches: [main]
   workflow_dispatch:
     inputs:
       operation:
@@ -18,7 +22,7 @@ on:
         description: For signing, reviewed unsigned receipt.json SHA256
         type: string
       channel:
-        description: Also sign a feed entry (never deploys it)
+        description: Also sign a feed entry; manual signing never publishes or deploys
         type: choice
         options: [none, stable, dev]
         default: none
@@ -28,16 +32,52 @@ permissions:
   contents: read
 
 jobs:
+  eligible-main-build:
+    if: >-
+      github.event_name == 'workflow_run' && github.repository == 'farooqu/encore-satellite' &&
+      github.ref == 'refs/heads/main' && github.ref_protected &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.event == 'workflow_run' && github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      eligible: ${{ steps.check.outputs.eligible }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Require armed policy and an actual unsigned release artifact
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_RUN: ${{ github.event.workflow_run.id }}
+        run: |
+          set -euo pipefail
+          if ! jq -e '.automatic_dev_targets | index("biscuit") != null' release/dev-automation.json >/dev/null; then
+            exit 0
+          fi
+          artifacts=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BUILD_RUN/artifacts")
+          if jq -e 'any(.artifacts[]; .name == "biscuit-native-unsigned" and .expired == false)' <<< "$artifacts" >/dev/null; then
+            echo 'eligible=true' >> "$GITHUB_OUTPUT"
+          fi
+
   sign:
-    if: github.repository == 'farooqu/encore-satellite' && github.ref == 'refs/heads/main' && github.ref_protected
+    needs: eligible-main-build
+    if: >-
+      !cancelled() && github.repository == 'farooqu/encore-satellite' && github.ref == 'refs/heads/main' && github.ref_protected &&
+      (github.event_name == 'workflow_dispatch' || needs.eligible-main-build.outputs.eligible == 'true')
     environment: biscuit-signing
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    outputs:
+      core_version: ${{ steps.release.outputs.core_version }}
+      receipt_sha256: ${{ steps.candidate.outputs.receipt_sha256 }}
     env:
-      BUILD_RUN: ${{ inputs.build_run }}
+      BUILD_RUN: ${{ github.event.workflow_run.id || inputs.build_run }}
       SOURCE: ${{ inputs.source }}
       RECEIPT_SHA256: ${{ inputs.receipt_sha256 }}
-      CHANNEL: ${{ inputs.channel }}
+      CHANNEL: ${{ github.event_name == 'workflow_run' && 'dev' || inputs.channel }}
     steps:
       - name: Confirm environment approval without accessing secrets
         if: inputs.operation == 'check-gate'
@@ -45,29 +85,37 @@ jobs:
       # Run only the separately approved signing workflow's code, never check
       # out the input candidate SHA or run code from the candidate artifact.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        if: inputs.operation == 'sign'
+        if: github.event_name == 'workflow_run' || inputs.operation == 'sign'
         with:
           fetch-depth: 0
           persist-credentials: false
       - name: Download the exact reviewed candidate from this repository
-        if: inputs.operation == 'sign'
+        id: candidate
+        if: github.event_name == 'workflow_run' || inputs.operation == 'sign'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          [[ "$BUILD_RUN" =~ ^[1-9][0-9]*$ && "$SOURCE" =~ ^[0-9a-f]{40}$ && "$RECEIPT_SHA256" =~ ^[0-9a-f]{64}$ ]]
-          git rev-list --first-parent HEAD | grep -Fx "$SOURCE" > /dev/null
-          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BUILD_RUN" | jq -e --arg repo "$GITHUB_REPOSITORY" '
+          [[ "$BUILD_RUN" =~ ^[1-9][0-9]*$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BUILD_RUN" | jq -e --arg repo "$GITHUB_REPOSITORY" --arg event "$GITHUB_EVENT_NAME" '
             .path == ".github/workflows/biscuit-arm64-dev.yml" and .head_repository.full_name == $repo and
             .head_branch == "main" and .conclusion == "success" and
-            (.event == "workflow_run" or .event == "workflow_dispatch")' > /dev/null
+            (.event == "workflow_run" or ($event == "workflow_dispatch" and .event == "workflow_dispatch"))' > /dev/null
           gh run download "$BUILD_RUN" --repo "$GITHUB_REPOSITORY" --name biscuit-native-unsigned --dir "$RUNNER_TEMP/candidate"
           receipt="$RUNNER_TEMP/candidate/receipt.json"
+          if test "$GITHUB_EVENT_NAME" = workflow_run; then
+            SOURCE=$(jq -er '.source' "$receipt")
+            RECEIPT_SHA256=$(sha256sum "$receipt" | cut -d ' ' -f 1)
+          fi
+          [[ "$SOURCE" =~ ^[0-9a-f]{40}$ && "$RECEIPT_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          git rev-list --first-parent HEAD | grep -Fx "$SOURCE" > /dev/null
           printf '%s  %s\n' "$RECEIPT_SHA256" "$receipt" | sha256sum -c -
           jq -e --arg source "$SOURCE" '.target == "biscuit" and .source == $source and
             .compatibility.format == "encore-biscuit-native-ab-v1"' "$receipt" > /dev/null
+          printf 'SOURCE=%s\nRECEIPT_SHA256=%s\n' "$SOURCE" "$RECEIPT_SHA256" >> "$GITHUB_ENV"
+          printf 'receipt_sha256=%s\n' "$RECEIPT_SHA256" >> "$GITHUB_OUTPUT"
       - name: Sign the receipt and optional feed with the pinned Ed25519 root
-        if: inputs.operation == 'sign'
+        if: steps.candidate.outputs.receipt_sha256 != ''
         env:
           PRIVATE_KEY: ${{ secrets.BISCUIT_METADATA_PRIVATE_KEY_PEM }}
           PUBLIC_KEY: ${{ vars.BISCUIT_METADATA_PUBLIC_KEY_PEM }}
@@ -94,17 +142,48 @@ jobs:
             none) ;;
             *) exit 1 ;;
           esac
-          printf 'Signed Biscuit native candidate `%s` from `%s`. Receipt SHA256: `%s`. Nothing published or activated.\n' \
+          printf 'Signed Biscuit native candidate `%s` from `%s`. Receipt SHA256: `%s`.\n' \
             "$BUILD_RUN" "$SOURCE" "$RECEIPT_SHA256" >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        if: inputs.operation == 'sign'
+        if: steps.candidate.outputs.receipt_sha256 != ''
         with:
           name: biscuit-native-signed
           path: ${{ runner.temp }}/candidate
           if-no-files-found: error
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        if: inputs.operation == 'sign' && inputs.channel != 'none'
+        if: steps.candidate.outputs.receipt_sha256 != '' && env.CHANNEL != 'none'
         with:
           name: biscuit-native-signed-feed
           path: ${{ runner.temp }}/signed-feed
           if-no-files-found: error
+      - name: Route the verified release
+        id: release
+        if: github.event_name == 'workflow_run'
+        run: |
+          set -euo pipefail
+          core=$(jq -er '.core_version' "$RUNNER_TEMP/candidate/receipt.json")
+          printf 'core_version=%s\n' "$core" >> "$GITHUB_OUTPUT"
+
+  retain-dev:
+    needs: sign
+    if: github.event_name == 'workflow_run'
+    permissions:
+      contents: write
+    uses: ./.github/workflows/retain-release.yml
+    with:
+      signed_artifact: biscuit-native-signed
+      target: biscuit
+      receipt_sha256: ${{ needs.sign.outputs.receipt_sha256 }}
+
+  advance-dev:
+    needs: [sign, retain-dev]
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+    uses: ./.github/workflows/activate-feed.yml
+    with:
+      signed_feed_artifact: biscuit-native-signed-feed
+      target: biscuit
+      revision: ${{ needs.sign.outputs.core_version }}
+      receipt_sha256: ${{ needs.sign.outputs.receipt_sha256 }}

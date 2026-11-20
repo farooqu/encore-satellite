@@ -1,6 +1,18 @@
-name: Retain an approved release (manual)
+name: Retain an approved release
 
 on:
+  workflow_call:
+    inputs:
+      signed_artifact:
+        description: Same-run artifact from the protected release signer
+        required: true
+        type: string
+      target:
+        required: true
+        type: string
+      receipt_sha256:
+        required: true
+        type: string
   workflow_dispatch:
     inputs:
       staging_tag:
@@ -24,13 +36,15 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: release-publication
-  cancel-in-progress: false
-
 jobs:
   retain:
-    if: github.ref == 'refs/heads/main'
+    if: >-
+      github.repository == 'farooqu/encore-satellite' && github.ref == 'refs/heads/main' && github.ref_protected &&
+      (github.event_name == 'workflow_dispatch' || (inputs.signed_artifact != '' &&
+       (github.event_name == 'workflow_run' || github.event_name == 'push')))
+    concurrency:
+      group: release-publication
+      queue: max
     environment: release-publication
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -41,7 +55,8 @@ jobs:
       STAGING_TAG: ${{ inputs.staging_tag }}
       TARGET: ${{ inputs.target }}
       RECEIPT_SHA256: ${{ inputs.receipt_sha256 }}
-      PUBLISH: ${{ inputs.publish }}
+      PUBLISH: ${{ inputs.signed_artifact != '' || inputs.publish }}
+      SIGNED_ARTIFACT: ${{ inputs.signed_artifact }}
       SETUP_APPROVED: ${{ vars.RELEASE_SETUP_APPROVED }}
       BISCUIT_PUBLIC_KEY: ${{ vars.BISCUIT_METADATA_PUBLIC_KEY_PEM }}
       ANDROID_PUBLIC_KEY: ${{ vars.ANDROID_METADATA_PUBLIC_KEY_PEM }}
@@ -58,8 +73,18 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - name: Confirm checked-in publication approval
-        if: inputs.publish
-        run: python3 -c "import json; assert json.load(open('release/dev-automation.json'))['publishing_enabled'] is True, 'Publishing is disabled in checked-in policy'"
+        if: env.PUBLISH == 'true'
+        run: |
+          if test -n "$SIGNED_ARTIFACT"; then
+            jq -e --arg target "$TARGET" '.automatic_dev_targets | index($target) != null' release/dev-automation.json >/dev/null
+          else
+            jq -e '.publishing_enabled == true' release/dev-automation.json >/dev/null
+          fi
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        if: inputs.signed_artifact != ''
+        with:
+          name: ${{ inputs.signed_artifact }}
+          path: ${{ runner.temp }}/candidate
       - name: Download and verify the exact staged candidate
         run: |
           set -euo pipefail
@@ -70,9 +95,11 @@ jobs:
           esac
           test -n "$public_key"
           printf '%s\n' "$public_key" > "$RUNNER_TEMP/root.pem"
-          # REST's by-tag endpoint finds published releases, not staging drafts.
-          gh release view "$STAGING_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq '.isDraft' | grep -Fx true
-          gh release download "$STAGING_TAG" --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/candidate"
+          if test -z "$SIGNED_ARTIFACT"; then
+            # REST's by-tag endpoint finds published releases, not staging drafts.
+            gh release view "$STAGING_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq '.isDraft' | grep -Fx true
+            gh release download "$STAGING_TAG" --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/candidate"
+          fi
           export CANDIDATE="$RUNNER_TEMP/candidate"
           python3 - <<'PY'
           import json, os, subprocess
@@ -82,9 +109,9 @@ jobs:
           if r['target'] == 'android-generic':
               assert r['compatibility']['certificate_sha256'] == os.environ['EXPECTED_CERTIFICATE'], 'unexpected APK signer'
           subprocess.run(['git', 'merge-base', '--is-ancestor', r['source'], 'HEAD'], check=True)
-          if r['target'] == 'biscuit':
+          if r['target'] == 'biscuit' or os.environ['SIGNED_ARTIFACT']:
               history = subprocess.check_output(['git', 'rev-list', '--first-parent', 'HEAD'], text=True).splitlines()
-              assert r['source'] in history, 'Biscuit ARM64 source must be a first-parent main commit'
+              assert r['source'] in history, 'Release source must be a first-parent main commit'
           PY
           python3 release/check.py --base origin/main --head HEAD
           python3 release/pipeline.py verify "$CANDIDATE" --public-key "$RUNNER_TEMP/root.pem" --receipt-sha256 "$RECEIPT_SHA256"

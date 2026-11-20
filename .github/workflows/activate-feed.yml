@@ -1,6 +1,21 @@
-name: Select or renew a release channel feed (manual)
+name: Select or renew a release channel feed
 
 on:
+  workflow_call:
+    inputs:
+      signed_feed_artifact:
+        description: Same-run artifact containing the protected signer's dev.jws
+        required: true
+        type: string
+      target:
+        required: true
+        type: string
+      revision:
+        required: true
+        type: string
+      receipt_sha256:
+        required: true
+        type: string
   workflow_dispatch:
     inputs:
       target:
@@ -13,7 +28,7 @@ on:
         type: string
         required: true
       channel:
-        description: Dev can be activated; Stable is verification-only
+        description: Stable activation requires explicit promotion
         type: choice
         options: [dev, stable]
         required: true
@@ -29,17 +44,23 @@ on:
         description: Push feed checkpoints and deploy Pages; false validates locally only
         type: boolean
         default: false
+      promote_stable:
+        description: Explicitly select this exact release for Stable (also requires activate)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
-concurrency:
-  group: release-publication
-  cancel-in-progress: false
-
 jobs:
   select:
-    if: github.ref == 'refs/heads/main'
+    if: >-
+      github.repository == 'farooqu/encore-satellite' && github.ref == 'refs/heads/main' && github.ref_protected &&
+      (github.event_name == 'workflow_dispatch' || (inputs.signed_feed_artifact != '' &&
+       (github.event_name == 'workflow_run' || github.event_name == 'push')))
+    concurrency:
+      group: release-publication
+      queue: max
     environment: release-feeds
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -51,7 +72,10 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       TARGET: ${{ inputs.target }}
       REVISION: ${{ inputs.revision }}
-      CHANNEL: ${{ inputs.channel }}
+      CHANNEL: ${{ inputs.signed_feed_artifact != '' && 'dev' || inputs.channel }}
+      ACTIVATE: ${{ inputs.signed_feed_artifact != '' || inputs.activate }}
+      PROMOTE_STABLE: ${{ inputs.promote_stable }}
+      SIGNED_FEED_ARTIFACT: ${{ inputs.signed_feed_artifact }}
       STAGING_TAG: ${{ inputs.staging_tag }}
       RECEIPT_SHA256: ${{ inputs.receipt_sha256 }}
       ANDROID_PUBLIC_KEY: ${{ vars.ANDROID_METADATA_PUBLIC_KEY_PEM }}
@@ -59,13 +83,18 @@ jobs:
       EXPECTED_CERTIFICATE: ${{ vars.ANDROID_CERTIFICATE_SHA256 }}
       SETUP_APPROVED: ${{ vars.RELEASE_SETUP_APPROVED }}
     steps:
-      - name: Require Dev and owner-approved setup for activation
-        if: inputs.activate
+      - name: Require owner-approved setup and explicit Stable promotion
+        if: env.ACTIVATE == 'true'
         run: |
-          if test "$CHANNEL" != dev; then
-            echo '::error::Only the Dev feed can be activated. Stable is verification-only.'
-            exit 1
-          fi
+          case "$CHANNEL" in
+            dev) ;;
+            stable)
+              if test "$PROMOTE_STABLE" != true || test -n "$SIGNED_FEED_ARTIFACT"; then
+                echo '::error::Stable requires explicit promotion of the reviewed release.'
+                exit 1
+              fi ;;
+            *) exit 1 ;;
+          esac
           if test "$SETUP_APPROVED" != true; then
             echo '::error::Activation is disabled until RELEASE_SETUP_APPROVED is explicitly configured.'
             exit 1
@@ -75,8 +104,18 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - name: Confirm checked-in publication approval
-        if: inputs.activate
-        run: python3 -c "import json; assert json.load(open('release/dev-automation.json'))['publishing_enabled'] is True, 'Publishing is disabled in checked-in policy'"
+        if: env.ACTIVATE == 'true'
+        run: |
+          if test -n "$SIGNED_FEED_ARTIFACT"; then
+            jq -e --arg target "$TARGET" '.automatic_dev_targets | index($target) != null' release/dev-automation.json >/dev/null
+          else
+            jq -e '.publishing_enabled == true' release/dev-automation.json >/dev/null
+          fi
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        if: inputs.signed_feed_artifact != ''
+        with:
+          name: ${{ inputs.signed_feed_artifact }}
+          path: ${{ runner.temp }}/feed
       - name: Verify immutable release and signed channel selection
         run: |
           set -euo pipefail
@@ -97,9 +136,11 @@ jobs:
           printf '%s\n' "$public_key" > "$RUNNER_TEMP/root.pem"
           gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" --jq '.immutable == true and .draft == false' | grep -Fx true
           gh release download "$tag" --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/candidate"
-          # Draft lookup must use the CLI's draft-aware release discovery.
-          gh release view "$STAGING_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq '.isDraft' | grep -Fx true
-          gh release download "$STAGING_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$CHANNEL.jws" --dir "$RUNNER_TEMP/feed"
+          if test -z "$SIGNED_FEED_ARTIFACT"; then
+            # Draft lookup must use the CLI's draft-aware release discovery.
+            gh release view "$STAGING_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq '.isDraft' | grep -Fx true
+            gh release download "$STAGING_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$CHANNEL.jws" --dir "$RUNNER_TEMP/feed"
+          fi
           export CANDIDATE="$RUNNER_TEMP/candidate"
           python3 - <<'PY'
           import json, os, subprocess
@@ -120,7 +161,7 @@ jobs:
             --public-key "$RUNNER_TEMP/root.pem" --receipt-sha256 "$RECEIPT_SHA256" \
             --channel "$CHANNEL" --feed "$RUNNER_TEMP/feed/$CHANNEL.jws" --site build/feed-site
       - name: Explicitly save feed checkpoints and stage Pages
-        if: inputs.activate
+        if: env.ACTIVATE == 'true'
         run: |
           set -euo pipefail
           git -C build/feed-site config user.name github-actions[bot]
@@ -134,8 +175,8 @@ jobs:
           mkdir "$RUNNER_TEMP/pages"
           git -C build/feed-site archive HEAD | tar -x -C "$RUNNER_TEMP/pages"
       - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
-        if: inputs.activate
+        if: env.ACTIVATE == 'true'
         with:
           path: ${{ runner.temp }}/pages
       - uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
-        if: inputs.activate
+        if: env.ACTIVATE == 'true'

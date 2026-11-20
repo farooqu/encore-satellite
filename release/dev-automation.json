@@ -1,3 +1,4 @@
 {
-  "publishing_enabled": false
+  "publishing_enabled": false,
+  "automatic_dev_targets": ["biscuit"]
 }

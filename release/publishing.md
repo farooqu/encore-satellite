@@ -5,9 +5,10 @@ build and mixed Biscuit/Android cohort workflows are retired. Old reservations
 and provenance remain historical records, not authorization to ship an old ZIP.
 
 Building, signing, publishing immutable assets and activating an update feed
-are separate steps. Biscuit's main-push workflow prepares unsigned candidates
-only, once approved inputs are pinned. Android has its own APK checks and
-protected signing workflow. Neither workflow activates a feed.
+are separate steps. Only eligible release builds from `main` can automatically
+advance Dev; PR/check artifacts cannot. Signing stays restricted to protected
+`main` with verified commits. Stable always selects an exact qualified version
+manually.
 
 ## Biscuit native A/B GitHub signing
 
@@ -22,26 +23,29 @@ protected `main`, with the build run ID, exact source SHA and the separately
 reviewed receipt SHA256. Provide `BISCUIT_METADATA_PRIVATE_KEY_PEM` as an
 environment secret and `BISCUIT_METADATA_PUBLIC_KEY_PEM` as a variable in
 `biscuit-signing`. The key must match the Ed25519 root compiled into Biscuit.
-Restrict the environment to exact `main`, require approval and disable
-administrator deployment bypass. Before adding the key, dispatch
-`operation=check-gate` and verify it waits for environment approval; after
-approval that run performs no checkout, download or secret access.
-Then use `operation=sign` on reviewed workflow code.
+Restrict the environment to exact `main` and disable administrator deployment
+bypass. `operation=check-gate` exercises the environment without checkout,
+download or secret access. Use `operation=sign` for a reviewed manual pilot.
 
 The pilot uses an owner-approved solo trust model: append-only `main`, owner
-review in Amp before direct pushes, and an owner-approved environment gate
-that permits self-review. This is not independent review or protection from
-compromise of that account; anyone allowed to push to main can change signing
-code. Before adding other writers, require reviewed changes and independent
-approval or move signing to a separately controlled repository or service.
+review in Amp before direct pushes, and verified commits. The owner approved
+unattended key use under these constraints. This is not independent review or
+protection from compromise of that account; anyone allowed to push to main
+can change signing code. Before adding other writers, require reviewed changes
+and independent approval or move signing to a separately controlled repository
+or service.
 
 The signing job never runs candidate code. It uploads `biscuit-native-signed`
-with the seed, OTA and signed receipt. Select `stable` or `dev` to also produce
-a separate signed feed artifact for that channel; select `none` for the base
-if it does not need a feed. GitHub signing does not publish the release or
-activate the feed. The existing retain and activate workflows accept the new
-receipt format with target `biscuit` and core version; native feeds are stored
-under `biscuit-native-ab/incubator/` so they cannot affect recovery installs.
+with the seed, OTA and signed receipt. Select `none` to sign without a feed or
+`stable` to prepare a separate feed artifact for manual promotion. With
+publishing armed, a successful main-push release build containing the unsigned
+native artifact queues the protected signer automatically, for Dev only.
+Check-only runs and manual rebuilds do not queue signing. After successful
+automatic signing, Dev retention and activation are chained using that run's
+artifacts, subject to the publication and feed environment policies.
+Manual signing never publishes, regardless of the publication switch.
+Native feeds are stored under `biscuit-native-ab/incubator/` so they cannot
+affect recovery installs.
 
 For the pilot, install the first exact signed seed with the
 [native installer](../devices/biscuit/packaging/kernel61/README.md#signed-native-ab-pilot).
@@ -187,10 +191,12 @@ is signed. For stable, change `--channel stable` and the output filename; it
 rejects prerelease cores, including **0.1.1-dev.1**. Stable promotion signs a new
 entry selecting the same already-reviewed bytes/revision, without rebuilding,
 rewriting the receipt, changing APK identity or relabelling bundle provenance.
-Stable can be verified with `activate=false`, but this workflow refuses to
-activate it even if publication is enabled. Retaining release assets does not
-select a channel. Enabling Stable requires a separate policy change and
-safety/support qualification.
+Stable can be verified with `activate=false`. Seed Stable only with a
+signature-verified, install-qualified baseline. For the initial selection and
+all later Stable promotions, manually dispatch with `channel=stable`,
+`activate=true` and `promote_stable=true` for the exact retained release and
+receipt hash, then approve the protected deployment. The automatic path only
+accepts Dev. Retaining release assets does not by itself select a channel.
 
 Before the first feed dry run, confirm `refs/heads/release-feeds` does not
 exist. With separate approval, bootstrap it with a parentless empty commit,
@@ -214,10 +220,11 @@ Android revision or Biscuit core version, channel, staging tag and receipt hash,
 initially `activate=false`.
 It requires a published immutable matching artifact, re-downloads/verifies all
 its sources/assets, validates the signed entry against the receipt and root,
-and checks freshness and existing per-channel checkpoints. Actual Dev activation
-also requires `publishing_enabled=true`, `RELEASE_SETUP_APPROVED=true` in
-`release-feeds`, and the environment approval. Only an explicitly approved
-`activate=true` dispatch commits history and deploys Pages.
+and checks freshness and existing per-channel checkpoints. Manual activation
+requires `publishing_enabled=true`; automatic Dev activation instead requires
+the target in `automatic_dev_targets`. Both require `RELEASE_SETUP_APPROVED=true`
+in `release-feeds` and environment approval before committing history and
+deploying Pages.
 
 Entries live at `<base>/<target>/incubator/{dev,stable}.jws`. Other channels and
 targets remain untouched. Revisions and core precedence cannot decrease on a
