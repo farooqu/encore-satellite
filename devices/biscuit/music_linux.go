@@ -13,6 +13,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/farooqu/encore-satellite/backends/bluetooth"
+	"github.com/farooqu/encore-satellite/backends/esphome/controls"
 	"github.com/farooqu/encore-satellite/backends/esphome/sensors"
 	"github.com/farooqu/encore-satellite/core/music"
 	"github.com/farooqu/encore-satellite/internal/esphomepairing"
@@ -208,12 +209,11 @@ type biscuitControls struct {
 }
 
 var (
-	speakerVolumeKey = (&esphome.Base{ObjectID: "speaker_volume"}).Key()
-	speakerMuteKey   = (&esphome.Base{ObjectID: "speaker_mute"}).Key()
-	musicKey         = (&esphome.Switch{Base: esphome.Base{ObjectID: "sendspin"}}).Key()
-	musicURLKey      = (&esphome.Text{Base: esphome.Base{ObjectID: "sendspin_url"}}).Key()
-	musicPlayKey     = (&esphome.Button{Base: esphome.Base{ObjectID: "sendspin_play"}}).Key()
-	musicStopKey     = (&esphome.Button{Base: esphome.Base{ObjectID: "sendspin_stop"}}).Key()
+	speakerVolume    = controls.SpeakerVolume(speakerMaxPercent, 1.0/120*100)
+	speakerVolumeKey = speakerVolume.Key()
+	speakerMuteKey   = controls.SpeakerMute.Key()
+	musicKey         = controls.Sendspin.Key()
+	musicURLKey      = controls.SendspinURL.Key()
 )
 
 func (d *biscuitControls) sensorSources() sensors.Sources {
@@ -227,40 +227,102 @@ func (d *biscuitControls) sensorSources() sensors.Sources {
 	return sources
 }
 
+func (d *biscuitControls) writable() controls.Bindings {
+	var bindings controls.Bindings
+	report := func(err error) error {
+		if err != nil {
+			return err
+		}
+		return d.broadcast()
+	}
+	bindings = append(bindings,
+		speakerVolume.Bind(func(_ *esphome.Conn, v *api.NumberCommandRequest) error {
+			return report(d.player.setOutputVolume(v.State))
+		}),
+		controls.SpeakerMute.Bind(func(_ *esphome.Conn, v *api.SwitchCommandRequest) error {
+			d.player.setOutputMute(v.State)
+			return d.broadcast()
+		}),
+	)
+	if d.announcements != nil {
+		bindings = append(bindings, controls.Announcements.Bind(func(c *esphome.Conn, v *api.MediaPlayerCommandRequest) error {
+			if v.DeviceId != 0 {
+				return nil
+			}
+			return d.announcements.command(c, v)
+		}))
+	}
+	if d.ring != nil {
+		bindings = append(bindings,
+			controls.RingBrightness.Bind(func(_ *esphome.Conn, v *api.NumberCommandRequest) error {
+				return report(d.ring.configure(&v.State, nil))
+			}),
+			controls.RingMotion.Bind(func(_ *esphome.Conn, v *api.SwitchCommandRequest) error {
+				return report(d.ring.configure(nil, &v.State))
+			}),
+		)
+	}
+	if d.updates != nil {
+		if d.updates.supportsChannelSelection() {
+			bindings = append(bindings, controls.LinuxChannel.Bind(func(_ *esphome.Conn, v *api.SelectCommandRequest) error {
+				return report(d.updates.selectChannel(v.State))
+			}))
+		}
+		bindings = append(bindings,
+			controls.LinuxCheck.Bind(func(_ *esphome.Conn, _ *api.ButtonCommandRequest) error {
+				d.updates.request(false)
+				return d.broadcast()
+			}),
+			controls.LinuxUpdate.Bind(func(_ *esphome.Conn, v *api.UpdateCommandRequest) error {
+				if v.DeviceId != 0 {
+					return nil
+				}
+				switch v.Command {
+				case api.UpdateCommand_UPDATE_COMMAND_CHECK:
+					d.updates.request(false)
+				case api.UpdateCommand_UPDATE_COMMAND_UPDATE:
+					d.updates.request(true)
+				}
+				return d.broadcast()
+			}),
+		)
+	}
+	if d.management != nil && d.management.ssh != nil {
+		bindings = append(bindings, controls.SSHEnabled.Bind(func(_ *esphome.Conn, v *api.SwitchCommandRequest) error {
+			return report(d.management.ssh.setEnabled(v.State))
+		}))
+	}
+	if d.music != nil {
+		bindings = append(bindings,
+			controls.Sendspin.Bind(func(_ *esphome.Conn, v *api.SwitchCommandRequest) error {
+				return report(d.music.configure(&v.State, nil))
+			}),
+			controls.SendspinURL.Bind(func(_ *esphome.Conn, v *api.TextCommandRequest) error {
+				return report(d.music.configure(nil, &v.State))
+			}),
+			controls.SendspinPlay.Bind(func(_ *esphome.Conn, _ *api.ButtonCommandRequest) error {
+				d.music.command(music.Play)
+				return nil
+			}),
+			controls.SendspinStop.Bind(func(_ *esphome.Conn, _ *api.ButtonCommandRequest) error {
+				d.music.command(music.Stop)
+				return nil
+			}),
+		)
+	}
+	return bindings
+}
+
 func (d *biscuitControls) Handle(ctx context.Context, c *esphome.Conn, msg proto.Message) error {
+	if controls.IsCommand(msg) {
+		if handled, err := d.writable().Handle(c, msg); handled {
+			return err
+		}
+	}
 	switch v := msg.(type) {
 	case *api.ListEntitiesRequest:
-		if d.announcements != nil {
-			if err := d.announcements.list(c); err != nil {
-				return err
-			}
-		}
-		if d.ring != nil {
-			if err := d.ring.list(c); err != nil {
-				return err
-			}
-		}
-		if d.updates != nil {
-			if err := d.updates.list(c); err != nil {
-				return err
-			}
-		}
-		entities := []proto.Message{
-			&api.ListEntitiesNumberResponse{Key: speakerVolumeKey, ObjectId: "speaker_volume", Name: "Speaker volume", Icon: "mdi:volume-high", MinValue: 0, MaxValue: speakerMaxPercent, Step: 1.0 / 120 * 100, UnitOfMeasurement: "%"},
-			&api.ListEntitiesSwitchResponse{Key: speakerMuteKey, ObjectId: "speaker_mute", Name: "Speaker mute", Icon: "mdi:volume-off"},
-		}
-		if d.music != nil {
-			entities = append(entities,
-				&api.ListEntitiesSwitchResponse{Key: musicKey, ObjectId: "sendspin", Name: "Sendspin music", Icon: "mdi:music", EntityCategory: esphome.CategoryConfig},
-				&api.ListEntitiesTextResponse{Key: musicURLKey, ObjectId: "sendspin_url", Name: "Sendspin server", Icon: "mdi:server", EntityCategory: esphome.CategoryConfig, MinLength: 0, MaxLength: 255},
-				&api.ListEntitiesButtonResponse{Key: musicPlayKey, ObjectId: "sendspin_play", Name: "Resume music", Icon: "mdi:play"},
-				&api.ListEntitiesButtonResponse{Key: musicStopKey, ObjectId: "sendspin_stop", Name: "Stop music", Icon: "mdi:stop"},
-			)
-		}
-		for _, ent := range entities {
-			if err := c.Send(ent); err != nil {
-				return err
-			}
+		if err := d.writable().List(c.Send); err != nil {
+			return err
 		}
 		if err := d.sensorSources().List(c.Send); err != nil {
 			return err
@@ -271,7 +333,8 @@ func (d *biscuitControls) Handle(ctx context.Context, c *esphome.Conn, msg proto
 			if err := c.Send(&api.ListEntitiesSwitchResponse{ObjectId: "bluetooth_proxy", Key: (&esphome.Base{ObjectID: "bluetooth_proxy"}).Key(), Name: "Bluetooth proxy", Icon: "mdi:bluetooth", EntityCategory: esphome.CategoryConfig}); err != nil {
 				return err
 			}
-			return d.management.list(ctx, c)
+			// Management actions terminate the combined entity list exactly once.
+			return d.management.actions.Handle(ctx, c, msg)
 		}
 	case *api.SubscribeStatesRequest:
 		d.mu.Lock()
@@ -282,83 +345,6 @@ func (d *biscuitControls) Handle(ctx context.Context, c *esphome.Conn, msg proto
 		d.mu.Unlock()
 		if err := d.state(c); err != nil {
 			return err
-		}
-	case *api.MediaPlayerCommandRequest:
-		if d.announcements != nil && v.Key == announcementKey && v.DeviceId == 0 {
-			return d.announcements.command(c, v)
-		}
-	case *api.SelectCommandRequest:
-		if d.updates != nil && v.Key == updateChannelKey {
-			if err := d.updates.selectChannel(v.State); err != nil {
-				return err
-			}
-			return d.broadcast()
-		}
-	case *api.UpdateCommandRequest:
-		if d.updates != nil && v.Key == linuxUpdateKey && v.DeviceId == 0 {
-			switch v.Command {
-			case api.UpdateCommand_UPDATE_COMMAND_CHECK:
-				d.updates.request(false)
-			case api.UpdateCommand_UPDATE_COMMAND_UPDATE:
-				d.updates.request(true)
-			}
-			return d.broadcast()
-		}
-	case *api.SwitchCommandRequest:
-		if v.Key == speakerMuteKey {
-			d.player.setOutputMute(v.State)
-			return d.broadcast()
-		}
-		if d.ring != nil && v.Key == ringMotionKey {
-			if err := d.ring.configure(nil, &v.State); err != nil {
-				return err
-			}
-			return d.broadcast()
-		}
-		if d.management != nil && d.management.ssh != nil && v.Key == sshEnabledKey {
-			if err := d.management.ssh.setEnabled(v.State); err != nil {
-				return err
-			}
-			return d.broadcast()
-		}
-		if d.music != nil && v.Key == musicKey {
-			if err := d.music.configure(&v.State, nil); err != nil {
-				return err
-			}
-			return d.broadcast()
-		}
-	case *api.NumberCommandRequest:
-		if v.Key == speakerVolumeKey {
-			if err := d.player.setOutputVolume(v.State); err != nil {
-				return err
-			}
-			return d.broadcast()
-		}
-		if d.ring != nil && v.Key == ringBrightnessKey {
-			if err := d.ring.configure(&v.State, nil); err != nil {
-				return err
-			}
-			return d.broadcast()
-		}
-	case *api.TextCommandRequest:
-		if d.music != nil && v.Key == musicURLKey {
-			if err := d.music.configure(nil, &v.State); err != nil {
-				return err
-			}
-			return d.broadcast()
-		}
-	case *api.ButtonCommandRequest:
-		if d.updates != nil && v.Key == checkUpdatesKey {
-			d.updates.request(false)
-			return d.broadcast()
-		}
-		if d.music != nil && v.Key == musicPlayKey {
-			d.music.command(music.Play)
-			return nil
-		}
-		if d.music != nil && v.Key == musicStopKey {
-			d.music.command(music.Stop)
-			return nil
 		}
 	case *api.ExecuteServiceRequest:
 		if d.management != nil {
@@ -376,41 +362,26 @@ func (d *biscuitControls) state(c *esphome.Conn) error {
 	d.stateMu.Lock()
 	defer d.stateMu.Unlock()
 	volume, muted := d.player.outputState()
-	for _, state := range []proto.Message{
+	states := []proto.Message{
 		&api.NumberStateResponse{Key: speakerVolumeKey, State: volume},
 		&api.SwitchStateResponse{Key: speakerMuteKey, State: muted},
-	} {
-		if err := c.Send(state); err != nil {
-			return err
-		}
 	}
 	if d.announcements != nil {
-		if err := c.Send(d.announcements.state()); err != nil {
-			return err
-		}
+		states = append(states, d.announcements.state())
 	}
 	if d.ring != nil {
-		for _, state := range d.ring.states() {
-			if err := c.Send(state); err != nil {
-				return err
-			}
-		}
+		states = append(states, d.ring.states()...)
 	}
 	if d.updates != nil {
-		for _, state := range d.updates.states() {
-			if err := c.Send(state); err != nil {
-				return err
-			}
-		}
+		states = append(states, d.updates.states()...)
 	}
 	if d.music != nil {
 		enabled, url, _ := d.music.snapshot()
-		if err := c.Send(&api.SwitchStateResponse{Key: musicKey, State: enabled}); err != nil {
-			return err
-		}
-		if err := c.Send(&api.TextStateResponse{Key: musicURLKey, State: url}); err != nil {
-			return err
-		}
+		states = append(states, &api.SwitchStateResponse{Key: musicKey, State: enabled}, &api.TextStateResponse{Key: musicURLKey, State: url})
+	}
+	bindings := d.writable()
+	if err := bindings.SendStates(c.Send, states); err != nil {
+		return err
 	}
 	if d.microphone != nil {
 		if err := d.microphone.Send(c.Send); err != nil {
@@ -425,11 +396,12 @@ func (d *biscuitControls) state(c *esphome.Conn) error {
 			}
 		}
 		if ssh != nil {
-			return c.Send(ssh)
+			return bindings.SendStates(c.Send, []proto.Message{ssh})
 		}
 	}
 	return nil
 }
+
 func (d *biscuitControls) broadcast() error { return d.sendToSubscribers(d.state) }
 
 func (d *biscuitControls) sendToSubscribers(send func(*esphome.Conn) error) error {

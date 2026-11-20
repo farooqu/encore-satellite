@@ -63,6 +63,9 @@ func TestFailedMuteSurvivesUnrelatedSaveAndReopen(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Cleanup(r.Close)
+			if err := r.ConfigureDashboard(); err != nil {
+				t.Fatal(err)
+			}
 			if err := r.Start(); err != nil {
 				t.Fatal(err)
 			}
@@ -100,6 +103,21 @@ func TestFailedMuteSurvivesUnrelatedSaveAndReopen(t *testing.T) {
 			}
 			if err := r.Handle(context.Background(), nil, command); err != nil {
 				t.Fatal(err)
+			}
+			if setting == "dashboard" {
+				var snapshot struct {
+					Dashboard string `json:"dashboard"`
+					Reload    int    `json:"reload"`
+				}
+				if err := json.Unmarshal([]byte(r.Snapshot(false)), &snapshot); err != nil || snapshot.Dashboard != "https://dashboard.example.test" || snapshot.Reload != 1 {
+					t.Fatalf("dashboard command did not reach renderer snapshot: %+v (%v)", snapshot, err)
+				}
+				if err := r.Handle(context.Background(), nil, &api.ButtonCommandRequest{Key: 0x454e4302}); err != nil {
+					t.Fatal(err)
+				}
+				if err := json.Unmarshal([]byte(r.Snapshot(false)), &snapshot); err != nil || snapshot.Reload != 2 {
+					t.Fatalf("reload command did not reach renderer snapshot: %+v (%v)", snapshot, err)
+				}
 			}
 			r.Close()
 			r, err = mobile.Open(directory, output{})

@@ -73,6 +73,26 @@ contain Android host code; an Android APK must not contain Dot hardware code.
 Static profiles do not implement dependency isolation; the existing import-boundary
 check and future package-content inspection have separate roles.
 
+For Home Assistant, the [ESPHome sensor adapter](../../backends/esphome/sensors/sensors.go)
+owns entity identities and discovery/state encoding. Each target supplies only
+the sensor capabilities it implements. A display or speaker label does not
+imply a fixed sensor set: for example, illuminance is listed only when a target
+provides a light monitor backed by supported hardware. Temporary read failures
+do not remove a supported sensor from the entity list.
+
+The [writable ESPHome adapter](../../backends/esphome/controls/controls.go) likewise
+lists, routes and publishes state only for entities with a device-supplied
+command implementation. For example, a renderer opts into dashboard URL and
+reload controls; a screen alone does not imply a dashboard. The shared
+microphone reporter handles state publication, not the device's privacy gate.
+
+Outside ESPHome, use the same ownership rule: derive advertised support and
+command eligibility from the supplying implementation. Share behavior that has
+the same contract on multiple targets, such as signed update verification and
+music command eligibility, while keeping installation and audio integration
+with the platform. Keep capability separate from permissions, temporary
+readiness and persisted user intent.
+
 ## Incubator-first, single-backend packages
 
 The default device package uses native Voice Incubator, not just for the first

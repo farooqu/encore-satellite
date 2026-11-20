@@ -52,7 +52,7 @@ class EncoreService : Service() {
         super.onCreate()
         audio = AudioIo(this)
         bluetooth = BluetoothHost(this)
-        runCatching { Mobile.open(filesDir.resolve("engine").absolutePath, audio) }
+        runCatching { Mobile.open(filesDir.resolve("engine").absolutePath, audio).also { it.configureDashboard() } }
             .onSuccess { runtime = it; bluetooth.attach(it); mutable.value = mutable.value.copy(name = it.name()); updates = ApkUpdates(this, it, scope) }
             .onFailure { problem("Engine could not start: ${it.message}") }
         scope.launch {

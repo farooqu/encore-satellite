@@ -13,11 +13,12 @@ import (
 	esphome "github.com/ygelfand/go-esphome-device"
 	"github.com/ygelfand/go-esphome-device/api"
 
+	"github.com/farooqu/encore-satellite/backends/esphome/controls"
 	"github.com/farooqu/encore-satellite/core/audio"
 	"github.com/farooqu/encore-satellite/core/session"
 )
 
-var announcementKey = (&esphome.Base{ObjectID: "announcements"}).Key()
+var announcementKey = controls.Announcements.Key()
 
 type mediaRequest struct {
 	url      string
@@ -41,17 +42,6 @@ type announcementPlayer struct {
 
 func newAnnouncementPlayer(engine *session.Engine, player *speaker) *announcementPlayer {
 	return &announcementPlayer{engine: engine, player: player, client: &http.Client{Timeout: 3 * time.Minute}, requests: make(chan mediaRequest, 1), changed: make(chan struct{}, 1)}
-}
-
-func (*announcementPlayer) list(c *esphome.Conn) error {
-	return c.Send(&api.ListEntitiesMediaPlayerResponse{
-		Key: announcementKey, ObjectId: "announcements", Name: "Announcements", Icon: "mdi:speaker-message",
-		FeatureFlags: uint32(esphome.MediaPlayerFeaturePlayMedia | esphome.MediaPlayerFeatureAnnounce | esphome.MediaPlayerFeatureStop),
-		SupportedFormats: []*api.MediaPlayerSupportedFormat{
-			{Format: "wav", SampleRate: audio.SampleRate, NumChannels: 1, SampleBytes: 2},
-			{Format: "wav", SampleRate: audio.SampleRate, NumChannels: 1, SampleBytes: 2, Purpose: api.MediaPlayerFormatPurpose_MEDIA_PLAYER_FORMAT_PURPOSE_ANNOUNCEMENT},
-		},
-	})
 }
 
 func (m *announcementPlayer) state() *api.MediaPlayerStateResponse {

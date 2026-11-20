@@ -9,7 +9,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	esphome "github.com/ygelfand/go-esphome-device"
+	"github.com/farooqu/encore-satellite/backends/esphome/controls"
 	"github.com/ygelfand/go-esphome-device/api"
 	"google.golang.org/protobuf/proto"
 )
@@ -85,21 +85,9 @@ func (r *ringSettings) configure(brightness *float32, reduced *bool) error {
 }
 
 var (
-	ringBrightnessKey = (&esphome.Base{ObjectID: "ring_brightness"}).Key()
-	ringMotionKey     = (&esphome.Base{ObjectID: "ring_reduced_motion"}).Key()
+	ringBrightnessKey = controls.RingBrightness.Key()
+	ringMotionKey     = controls.RingMotion.Key()
 )
-
-func (r *ringSettings) list(c *esphome.Conn) error {
-	for _, entity := range []proto.Message{
-		&api.ListEntitiesNumberResponse{Key: ringBrightnessKey, ObjectId: "ring_brightness", Name: "Ring brightness", Icon: "mdi:brightness-6", EntityCategory: esphome.CategoryConfig, MinValue: 1, MaxValue: 100, Step: 1, UnitOfMeasurement: "%"},
-		&api.ListEntitiesSwitchResponse{Key: ringMotionKey, ObjectId: "ring_reduced_motion", Name: "Ring reduced motion", Icon: "mdi:animation-outline", EntityCategory: esphome.CategoryConfig},
-	} {
-		if err := c.Send(entity); err != nil {
-			return err
-		}
-	}
-	return nil
-}
 
 func (r *ringSettings) states() []proto.Message {
 	s := r.snapshot()

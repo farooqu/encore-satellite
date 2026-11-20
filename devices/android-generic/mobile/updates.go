@@ -7,6 +7,7 @@ import (
 	"errors"
 	"sync"
 
+	"github.com/farooqu/encore-satellite/backends/esphome/controls"
 	"github.com/farooqu/encore-satellite/platforms/android/update"
 	"github.com/ygelfand/go-esphome-device/api"
 	"google.golang.org/protobuf/proto"
@@ -17,9 +18,8 @@ type UpdateHost interface {
 	RequestUpdate(channel string, generation int64, install bool)
 }
 
-const updateKey uint32 = 0x454e4303
-const channelKey uint32 = 0x454e4304
-const checkKey uint32 = 0x454e4305
+const updateKey = controls.AndroidUpdateKey
+const channelKey = controls.AndroidChannelKey
 
 func (r *Runtime) ConfigureUpdates(host UpdateHost, current string) {
 	r.mu.Lock()
@@ -43,7 +43,7 @@ func (r *Runtime) UpdateGeneration() int64 {
 // UpdateStatus reports failures as unknown, not a falsely up-to-date package.
 func (r *Runtime) UpdateStatus(channel string, generation int64, latest, status string, known, busy bool) {
 	r.mu.Lock()
-	if r.config.Channel != channel || r.config.ChannelGeneration != generation || r.updateState == nil {
+	if r.config.Channel != channel || r.config.ChannelGeneration != generation || r.updateState == nil || r.updater == nil {
 		r.mu.Unlock()
 		return
 	}

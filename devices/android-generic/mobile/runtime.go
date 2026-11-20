@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/farooqu/encore-satellite/backends/bluetooth"
+	"github.com/farooqu/encore-satellite/backends/esphome/controls"
 	"github.com/farooqu/encore-satellite/backends/esphome/sensors"
 	"github.com/farooqu/encore-satellite/backends/incubator"
 	"github.com/farooqu/encore-satellite/core/audio"
@@ -58,7 +59,7 @@ type Runtime struct {
 	sequence            uint64
 	samples             int64
 	captureMu           sync.Mutex
-	reload              int
+	dashboard           *dashboard
 	problem             string
 	updater             UpdateHost
 	updateState         *api.UpdateStateResponse
@@ -238,9 +239,14 @@ func dashboardURL(value string) (string, error) {
 // The host must pass false for unknown, stopped, silenced or stale capture.
 func (r *Runtime) Snapshot(captureReady bool) string {
 	r.mu.Lock()
-	c, rev, problem := r.config, r.reload, r.problem
+	var url string
+	var rev int
+	if r.dashboard != nil {
+		url, rev = r.config.Dashboard, r.dashboard.reload
+	}
+	problem := r.problem
 	r.mu.Unlock()
-	b, _ := json.Marshal(map[string]any{"voice": r.voice.Snapshot(captureReady), "models": r.voice.ModelCount(), "dashboard": c.Dashboard, "reload": rev, "problem": problem})
+	b, _ := json.Marshal(map[string]any{"voice": r.voice.Snapshot(captureReady), "models": r.voice.ModelCount(), "dashboard": url, "reload": rev, "problem": problem})
 	return string(b)
 }
 
@@ -250,33 +256,71 @@ func (r *Runtime) DismissProblem() {
 	r.mu.Unlock()
 }
 
-const dashboardKey uint32 = 0x454e4301
-const reloadKey uint32 = 0x454e4302
+const dashboardKey = controls.DashboardKey
+
+type dashboard struct{ reload int }
+
+// ConfigureDashboard opts a renderer using Snapshot into the URL and reload
+// controls. A runtime without a dashboard renderer leaves them unbound.
+func (r *Runtime) ConfigureDashboard() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.cancel != nil {
+		return errors.New("dashboard capability must be set before startup")
+	}
+	if r.dashboard == nil {
+		r.dashboard = &dashboard{}
+	}
+	return nil
+}
 
 func (r *Runtime) sensors() sensors.Sources {
 	return sensors.Sources{Illuminance: r.light, MicrophoneMuted: r.microphone.Muted}
 }
 
+func (r *Runtime) writable() controls.Bindings {
+	bindings := controls.Bindings{controls.AndroidChannel.Bind(r.setUpdateChannel)}
+	r.mu.Lock()
+	dashboard := r.dashboard
+	hasUpdater := r.updater != nil
+	r.mu.Unlock()
+	if dashboard != nil {
+		bindings = append(bindings, controls.Dashboard.Bind(r.setDashboard),
+			controls.ReloadDashboard.Bind(func(_ *esphome.Conn, _ *api.ButtonCommandRequest) error {
+				r.mu.Lock()
+				dashboard.reload++
+				r.mu.Unlock()
+				return nil
+			}),
+		)
+	}
+	if hasUpdater {
+		bindings = append(bindings,
+			controls.AndroidUpdate.Bind(func(_ *esphome.Conn, m *api.UpdateCommandRequest) error {
+				if m.Command == api.UpdateCommand_UPDATE_COMMAND_UPDATE || m.Command == api.UpdateCommand_UPDATE_COMMAND_CHECK {
+					r.requestUpdate(m.Command == api.UpdateCommand_UPDATE_COMMAND_UPDATE)
+				}
+				return nil
+			}),
+			controls.AndroidCheck.Bind(func(_ *esphome.Conn, _ *api.ButtonCommandRequest) error { r.requestUpdate(false); return nil }),
+		)
+	}
+	return bindings
+}
+
 func (r *Runtime) Handle(ctx context.Context, c *esphome.Conn, msg proto.Message) error {
-	switch m := msg.(type) {
+	if controls.IsCommand(msg) {
+		if handled, err := r.writable().Handle(c, msg); handled {
+			return err
+		}
+	}
+	switch msg.(type) {
 	case *api.ListEntitiesRequest:
 		if err := r.sensors().List(c.Send); err != nil {
 			return err
 		}
-		if err := c.Send(&api.ListEntitiesTextResponse{ObjectId: "dashboard_url", Key: dashboardKey, Name: "Dashboard URL", EntityCategory: esphome.CategoryConfig, MaxLength: 1024}); err != nil {
+		if err := r.writable().List(c.Send); err != nil {
 			return err
-		}
-		if err := c.Send(&api.ListEntitiesButtonResponse{ObjectId: "reload_dashboard", Key: reloadKey, Name: "Reload dashboard", EntityCategory: esphome.CategoryConfig}); err != nil {
-			return err
-		}
-		for _, entity := range []proto.Message{
-			&api.ListEntitiesUpdateResponse{ObjectId: "apk_update", Key: updateKey, Name: "APK update", DeviceClass: "firmware", EntityCategory: esphome.CategoryConfig},
-			&api.ListEntitiesSelectResponse{ObjectId: "update_channel", Key: channelKey, Name: "Update channel", Options: []string{"dev", "stable"}, EntityCategory: esphome.CategoryConfig},
-			&api.ListEntitiesButtonResponse{ObjectId: "check_updates", Key: checkKey, Name: "Check for updates", EntityCategory: esphome.CategoryConfig},
-		} {
-			if err := c.Send(entity); err != nil {
-				return err
-			}
 		}
 		return r.proxy.Handle(ctx, c, msg)
 	case *api.SubscribeStatesRequest:
@@ -291,88 +335,76 @@ func (r *Runtime) Handle(ctx context.Context, c *esphome.Conn, msg proto.Message
 		r.mu.Lock()
 		v := r.config.Dashboard
 		channel := r.config.Channel
-		state := &api.UpdateStateResponse{Key: updateKey, MissingState: true}
-		if r.updateState != nil {
+		var state *api.UpdateStateResponse
+		if r.updater != nil && r.updateState != nil {
 			state = proto.Clone(r.updateState).(*api.UpdateStateResponse)
 		}
 		r.mu.Unlock()
-		if err := c.Send(&api.SelectStateResponse{Key: channelKey, State: channel}); err != nil {
-			return err
+		states := []proto.Message{&api.SelectStateResponse{Key: channelKey, State: channel}}
+		if state != nil {
+			states = append(states, state)
 		}
-		if err := c.Send(state); err != nil {
-			return err
-		}
-		if err := c.Send(&api.TextStateResponse{Key: dashboardKey, State: v}); err != nil {
+		states = append(states, &api.TextStateResponse{Key: dashboardKey, State: v})
+		if err := r.writable().SendStates(c.Send, states); err != nil {
 			return err
 		}
 		return r.proxy.Handle(ctx, c, msg)
-	case *api.SelectCommandRequest:
-		if m.Key != channelKey || (m.State != "dev" && m.State != "stable") {
-			return nil
-		}
-		r.mu.Lock()
-		next := r.config
-		next.Channel = m.State
-		if next.Channel != r.config.Channel {
-			next.ChannelGeneration++
-		}
-		if err := r.save(next); err != nil {
-			r.mu.Unlock()
-			return err
-		}
-		r.config = next
-		if r.updateState != nil {
-			r.updateState.LatestVersion = ""
-			r.updateState.MissingState = true
-			r.updateState.InProgress = false
-		}
-		host := r.updater
-		r.mu.Unlock()
-		if err := r.control.Broadcast(&api.SelectStateResponse{Key: channelKey, State: m.State}); err != nil {
-			return err
-		}
-		r.UpdateStatus(m.State, next.ChannelGeneration, "", "Checking selected channel", false, false)
-		if host != nil {
-			host.RequestUpdate(m.State, next.ChannelGeneration, false)
-		}
-	case *api.UpdateCommandRequest:
-		if m.Key == updateKey && (m.Command == api.UpdateCommand_UPDATE_COMMAND_UPDATE || m.Command == api.UpdateCommand_UPDATE_COMMAND_CHECK) {
-			r.requestUpdate(m.Command == api.UpdateCommand_UPDATE_COMMAND_UPDATE)
-		}
-	case *api.TextCommandRequest:
-		if m.Key != dashboardKey {
-			return nil
-		}
-		r.mu.Lock()
-		v, err := dashboardURL(m.State)
-		if err == nil {
-			next := r.config
-			next.Dashboard = v
-			err = r.save(next)
-			if err == nil {
-				r.config = next
-				r.reload++
-			}
-		}
-		if err != nil {
-			r.problem = fmt.Sprintf("Dashboard configuration: %s", err)
-		} else {
-			r.problem = ""
-		}
-		v = r.config.Dashboard
-		r.mu.Unlock()
-		return r.control.Broadcast(&api.TextStateResponse{Key: dashboardKey, State: v})
-	case *api.ButtonCommandRequest:
-		if m.Key == checkKey {
-			r.requestUpdate(false)
-		}
-		if m.Key == reloadKey {
-			r.mu.Lock()
-			r.reload++
-			r.mu.Unlock()
-		}
 	}
 	return r.proxy.Handle(ctx, c, msg)
+}
+
+func (r *Runtime) setDashboard(_ *esphome.Conn, m *api.TextCommandRequest) error {
+	r.mu.Lock()
+	v, err := dashboardURL(m.State)
+	if err == nil {
+		next := r.config
+		next.Dashboard = v
+		err = r.save(next)
+		if err == nil {
+			r.config = next
+			r.dashboard.reload++
+		}
+	}
+	if err != nil {
+		r.problem = fmt.Sprintf("Dashboard configuration: %s", err)
+	} else {
+		r.problem = ""
+	}
+	v = r.config.Dashboard
+	r.mu.Unlock()
+	return r.control.Broadcast(&api.TextStateResponse{Key: dashboardKey, State: v})
+}
+
+func (r *Runtime) setUpdateChannel(_ *esphome.Conn, m *api.SelectCommandRequest) error {
+	if m.State != "dev" && m.State != "stable" {
+		return nil
+	}
+	r.mu.Lock()
+	next := r.config
+	next.Channel = m.State
+	if next.Channel != r.config.Channel {
+		next.ChannelGeneration++
+	}
+	if err := r.save(next); err != nil {
+		r.mu.Unlock()
+		return err
+	}
+	r.config = next
+	if r.updateState != nil {
+		r.updateState.LatestVersion = ""
+		r.updateState.MissingState = true
+		r.updateState.InProgress = false
+	}
+	host := r.updater
+	r.mu.Unlock()
+	if err := r.control.Broadcast(&api.SelectStateResponse{Key: channelKey, State: m.State}); err != nil {
+		return err
+	}
+	r.UpdateStatus(m.State, next.ChannelGeneration, "", "Checking selected channel", false, false)
+	if host != nil {
+		host.RequestUpdate(m.State, next.ChannelGeneration, false)
+	}
+	return nil
 }
 
 func (r *Runtime) requestUpdate(install bool) {

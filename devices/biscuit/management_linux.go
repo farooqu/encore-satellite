@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"time"
 
+	"github.com/farooqu/encore-satellite/backends/esphome/controls"
 	"github.com/farooqu/encore-satellite/backends/esphome/sensors"
 	esphome "github.com/ygelfand/go-esphome-device"
 	"github.com/ygelfand/go-esphome-device/api"
@@ -19,8 +20,6 @@ type management struct {
 	actions *esphome.Entities
 	args    map[uint32]int
 }
-
-var sshEnabledKey = (&esphome.Base{ObjectID: "ssh_enabled"}).Key()
 
 func newManagement(ssh *sshManager) (*management, error) {
 	m := &management{ssh: ssh, wifi: newWiFiManager(), actions: esphome.NewEntities(), args: make(map[uint32]int)}
@@ -99,14 +98,15 @@ func (m *management) sensorSources() sensors.Sources {
 	return sources
 }
 
-func (m *management) list(ctx context.Context, c *esphome.Conn) error {
-	if m.ssh != nil {
-		if err := c.Send(&api.ListEntitiesSwitchResponse{Key: sshEnabledKey, ObjectId: "ssh_enabled", Name: "SSH enabled", Icon: "mdi:console-network", EntityCategory: esphome.CategoryConfig}); err != nil {
-			return err
-		}
+func (m *management) states() ([]proto.Message, *api.SwitchStateResponse) {
+	sources := m.sensorSources()
+	if m.ssh == nil {
+		return sources.States(), nil
 	}
-	// Exactly one ListEntitiesDone, after music, Bluetooth and management.
-	return m.actions.Handle(ctx, c, &api.ListEntitiesRequest{})
+	// The writable switch and diagnostics must describe the same SSH snapshot.
+	status, err := m.ssh.status()
+	sources.SSH = func() (bool, []string, error) { return status.Running, status.Fingerprints, err }
+	return sources.States(), &api.SwitchStateResponse{Key: controls.SSHEnabled.Key(), State: status.Enabled, MissingState: err != nil}
 }
 
 func (m *management) execute(ctx context.Context, c *esphome.Conn, r *api.ExecuteServiceRequest) error {
@@ -118,17 +118,6 @@ func (m *management) execute(ctx context.Context, c *esphome.Conn, r *api.Execut
 		return nil
 	}
 	return m.actions.Handle(ctx, c, r)
-}
-
-func (m *management) states() ([]proto.Message, *api.SwitchStateResponse) {
-	sources := m.sensorSources()
-	if m.ssh == nil {
-		return sources.States(), nil
-	}
-	// The writable switch and diagnostics must describe the same SSH snapshot.
-	status, err := m.ssh.status()
-	sources.SSH = func() (bool, []string, error) { return status.Running, status.Fingerprints, err }
-	return sources.States(), &api.SwitchStateResponse{Key: sshEnabledKey, State: status.Enabled, MissingState: err != nil}
 }
 
 func (d *biscuitControls) watchManagement(ctx context.Context) {

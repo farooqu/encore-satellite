@@ -214,6 +214,7 @@ listing:
 		}
 	}
 	// Cached commands for removed controls must not reach a missing worker.
+	sshEnabledKey := (&esphome.Base{ObjectID: "ssh_enabled"}).Key()
 	peer.send(&api.SwitchCommandRequest{Key: sshEnabledKey, State: true})
 	peer.send(&api.SwitchCommandRequest{Key: musicKey, State: true})
 	peer.send(&api.SwitchCommandRequest{Key: speakerMuteKey, State: true})

@@ -8,6 +8,7 @@ import (
 	"net"
 	"time"
 
+	"github.com/farooqu/encore-satellite/backends/esphome/controls"
 	"github.com/farooqu/encore-satellite/backends/esphome/sensors"
 	"github.com/farooqu/encore-satellite/core/session"
 	esphome "github.com/ygelfand/go-esphome-device"
@@ -35,10 +36,7 @@ var modeNames = map[session.Backend]string{
 	session.Assist: "Home Assistant Assist", session.Incubator: "Voice Incubator",
 }
 
-var (
-	modeKey  = (&esphome.Select{Base: esphome.Base{ObjectID: "voice_mode"}}).Key()
-	applyKey = (&esphome.Button{Base: esphome.Base{ObjectID: "apply_voice_mode"}}).Key()
-)
+var voiceModeControl = controls.VoiceMode(modeNames[session.Assist], modeNames[session.Incubator])
 
 func (s *voiceControls) Features() esphome.BluetoothFeature {
 	if s.Bluetooth != nil {
@@ -71,17 +69,43 @@ func (s *voiceControls) Serve(ctx context.Context, listener net.Listener, info e
 	return (&esphome.Server{Info: info, PSK: &key, Handler: s, WriteTimeout: 2 * time.Second}).Serve(ctx, listener)
 }
 
-func (s *voiceControls) Handle(ctx context.Context, c *esphome.Conn, message proto.Message) error {
-	sources := sensors.Sources{RunningVoiceMode: func() string { return modeNames[s.RunningMode] }}
-	switch m := message.(type) {
-	case *api.ListEntitiesRequest:
-		for _, entity := range []proto.Message{
-			&api.ListEntitiesSelectResponse{ObjectId: "voice_mode", Key: modeKey, Name: "Voice mode (restart required)", EntityCategory: esphome.CategoryConfig, Options: []string{modeNames[session.Assist], modeNames[session.Incubator]}},
-			&api.ListEntitiesButtonResponse{ObjectId: "apply_voice_mode", Key: applyKey, Name: "Apply and restart", Icon: "mdi:restart", EntityCategory: esphome.CategoryConfig},
-		} {
-			if err := c.Send(entity); err != nil {
-				return err
+func (s *voiceControls) writable() controls.Bindings {
+	var bindings controls.Bindings
+	if s.Mode != nil && s.SaveMode != nil {
+		bindings = append(bindings, voiceModeControl.Bind(func(c *esphome.Conn, m *api.SelectCommandRequest) error {
+			for mode, name := range modeNames {
+				if name == m.State {
+					if err := s.SaveMode(mode); err != nil {
+						return err
+					}
+					return c.Send(&api.SelectStateResponse{Key: voiceModeControl.Key(), State: name})
+				}
 			}
+			return errors.New("controls: unknown voice mode")
+		}))
+	}
+	if s.Mode != nil && s.Restart != nil {
+		bindings = append(bindings, controls.ApplyVoiceMode.Bind(func(_ *esphome.Conn, _ *api.ButtonCommandRequest) error {
+			if s.Mode() != s.RunningMode {
+				s.Restart()
+			}
+			return nil
+		}))
+	}
+	return bindings
+}
+
+func (s *voiceControls) Handle(ctx context.Context, c *esphome.Conn, message proto.Message) error {
+	if controls.IsCommand(message) {
+		if handled, err := s.writable().Handle(c, message); handled {
+			return err
+		}
+	}
+	sources := sensors.Sources{RunningVoiceMode: func() string { return modeNames[s.RunningMode] }}
+	switch message.(type) {
+	case *api.ListEntitiesRequest:
+		if err := s.writable().List(c.Send); err != nil {
+			return err
 		}
 		if err := sources.List(c.Send); err != nil {
 			return err
@@ -91,32 +115,15 @@ func (s *voiceControls) Handle(ctx context.Context, c *esphome.Conn, message pro
 			return c.Send(&api.ListEntitiesDoneResponse{})
 		}
 	case *api.SubscribeStatesRequest:
-		if err := c.Send(&api.SelectStateResponse{Key: modeKey, State: modeNames[s.Mode()]}); err != nil {
-			return err
+		if s.Mode != nil && s.SaveMode != nil {
+			if err := c.Send(&api.SelectStateResponse{Key: voiceModeControl.Key(), State: modeNames[s.Mode()]}); err != nil {
+				return err
+			}
 		}
 		for _, state := range sources.States() {
 			if err := c.Send(state); err != nil {
 				return err
 			}
-		}
-	case *api.SelectCommandRequest:
-		if m.Key == modeKey {
-			for mode, name := range modeNames {
-				if name == m.State {
-					if err := s.SaveMode(mode); err != nil {
-						return err
-					}
-					return c.Send(&api.SelectStateResponse{Key: modeKey, State: name})
-				}
-			}
-			return errors.New("controls: unknown voice mode")
-		}
-	case *api.ButtonCommandRequest:
-		if m.Key == applyKey {
-			if s.Mode() != s.RunningMode {
-				s.Restart()
-			}
-			return nil
 		}
 	}
 	if s.Bluetooth != nil {

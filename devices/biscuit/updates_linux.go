@@ -17,16 +17,16 @@ import (
 	"sync"
 	"time"
 
+	"github.com/farooqu/encore-satellite/backends/esphome/controls"
 	"github.com/farooqu/encore-satellite/platforms/linuxupdate"
-	esphome "github.com/ygelfand/go-esphome-device"
 	"github.com/ygelfand/go-esphome-device/api"
 	"google.golang.org/protobuf/proto"
 )
 
 var (
-	linuxUpdateKey   = (&esphome.Base{ObjectID: "linux_update"}).Key()
-	updateChannelKey = (&esphome.Base{ObjectID: "update_channel"}).Key()
-	checkUpdatesKey  = (&esphome.Base{ObjectID: "check_updates"}).Key()
+	linuxUpdateKey   = controls.LinuxUpdate.Key()
+	updateChannelKey = controls.LinuxChannel.Key()
+	checkUpdatesKey  = controls.LinuxCheck.Key()
 )
 
 type updateRequest struct {
@@ -137,10 +137,12 @@ func newARM64Updates() (*linuxUpdates, error) {
 	}, nil
 }
 
+func (u *linuxUpdates) supportsChannelSelection() bool { return u.arm64 == nil }
+
 func (u *linuxUpdates) selectChannel(channel string) error {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	if u.arm64 != nil {
+	if !u.supportsChannelSelection() {
 		return errors.New("ARM64 checks the public feed; no channel selection")
 	}
 	if !linuxupdate.Channel(channel) {
@@ -196,28 +198,11 @@ func (u *linuxUpdates) request(install bool) {
 func (u *linuxUpdates) states() []proto.Message {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	if u.arm64 != nil {
+	if !u.supportsChannelSelection() {
 		return []proto.Message{proto.Clone(&u.state)}
 	}
 	return []proto.Message{&api.SelectStateResponse{Key: updateChannelKey, State: u.channel, MissingState: !linuxupdate.Channel(u.channel)}, proto.Clone(&u.state)}
 }
-func (u *linuxUpdates) list(c *esphome.Conn) error {
-	if u.arm64 == nil {
-		if err := c.Send(&api.ListEntitiesSelectResponse{Key: updateChannelKey, ObjectId: "update_channel", Name: "Update channel", Options: []string{"dev", "stable"}, EntityCategory: esphome.CategoryConfig}); err != nil {
-			return err
-		}
-	}
-	for _, m := range []proto.Message{
-		&api.ListEntitiesButtonResponse{Key: checkUpdatesKey, ObjectId: "check_updates", Name: "Check for updates", EntityCategory: esphome.CategoryConfig},
-		&api.ListEntitiesUpdateResponse{Key: linuxUpdateKey, ObjectId: "linux_update", Name: "Linux update", DeviceClass: "firmware", EntityCategory: esphome.CategoryConfig},
-	} {
-		if err := c.Send(m); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func (u *linuxUpdates) run(ctx context.Context, changed func() error) {
 	tick := time.NewTicker(time.Hour)
 	defer tick.Stop()

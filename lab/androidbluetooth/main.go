@@ -61,6 +61,9 @@ func main() {
 		log.Fatal(err)
 	}
 	defer r.Close()
+	if err := r.ConfigureDashboard(); err != nil {
+		log.Fatal(err)
+	}
 	n := &native{}
 	if err := r.ConfigureBluetooth(n, *sdk, *hardware); err != nil {
 		log.Fatal(err)
