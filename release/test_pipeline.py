@@ -254,5 +254,20 @@ class PipelineTests(unittest.TestCase):
             path.write_text(original)
 
 
+class NativeMetadataTests(unittest.TestCase):
+    def test_feed_addresses_only_native_ota_on_selected_channel(self):
+        receipt = {"target": "biscuit", "core_version": "0.1.42", "revision": 1000000041,
+                   "artifact": {"name": "encore-biscuit-arm64-0.1.42-native-seed.zip", "size": 600, "sha256": "6" * 64},
+                   "ota": {"name": "encore-biscuit-arm64-0.1.42-native-ota.zip", "size": 200, "sha256": "2" * 64},
+                   "compatibility": {"format": pipeline.NATIVE_STARTER, "base_sha256": "1" * 64}}
+        now = 1_800_000_000
+        for channel in ("stable", "dev"):
+            self.assertEqual(pipeline.metadata(receipt, channel, now, now + 3600), {
+                "target": "biscuit-native-ab", "backend": "incubator", "format": "encore-biscuit-native-ab-v1",
+                "base_sha256": "1" * 64, "channel": channel, "core_version": "0.1.42", "revision": 1000000041,
+                "url": "https://github.com/farooqu/encore-satellite/releases/download/biscuit-0.1.42/encore-biscuit-arm64-0.1.42-native-ota.zip",
+                "size": 200, "sha256": "2" * 64, "issued": now, "expires": now + 3600})
+
+
 if __name__ == "__main__":
     unittest.main()

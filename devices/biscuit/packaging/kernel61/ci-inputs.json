@@ -1,4 +1,12 @@
 {
-  "release_tag": null,
-  "source_sha256": null
+  "external_bundle_tag": null,
+  "sha256": {
+    "alpine-apks.tar.gz": "f2934f6b940cc5269f8f7b1e9fa5ecefb23b83efdd9cef0b785142f04aa9a34b",
+    "alpine-source.tar.gz": "57af988138a9d1d109d6c77d5acb12f4f3ce7f4a97be06b8930c3b3e288fed82",
+    "apk-tools-static.apk": "d78d2a9ebadc8179b3b9063c3316e948f594c833db51eaeabe67f1d044245527",
+    "audited-header.bin": "a948a28b3871674b1adabd4a9f47b5d0e6f877f5af8acf6faba6f0a37cb50dda",
+    "go-linux-amd64.tar.gz": "7226736c2339719cda28fbf3a54d71aa63bcefe376e98cef00034268dab24840",
+    "go-source.tar.gz": "73cfb8571aec0c01177687db87163d46aa20e9779672772891aa17654d9a6099",
+    "linux-source.tar.gz": "2d763595ea9299add581aad7bac95749b82b0705ff9c992ddf1ed16d52747087"
+  }
 }

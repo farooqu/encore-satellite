@@ -6,6 +6,10 @@ on:
     types: [completed]
     branches: [main]
   workflow_dispatch:
+    inputs:
+      source:
+        description: Exact first-parent main SHA to rebuild (defaults to current main)
+        type: string
 
 # Direct pushes to main can change this workflow. It must never have access
 # to the Echo Dot signing key or a privileged publication credential.
@@ -21,11 +25,40 @@ jobs:
         github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' &&
         github.event.workflow_run.head_repository.full_name == github.repository)
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
+    container:
+      image: debian:13.7-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
+    defaults:
+      run:
+        shell: bash
     env:
       GH_TOKEN: ${{ github.token }}
-      SOURCE: ${{ github.event.workflow_run.head_sha || github.sha }}
+      SOURCE: ${{ github.event.workflow_run.head_sha || inputs.source || github.sha }}
     steps:
+      - name: Install release build tools
+        run: |
+          # Bootstrap HTTPS, then install build dependencies from signed, dated indexes.
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates
+          cat >/etc/apt/sources.list.d/debian.sources <<'EOF'
+          Types: deb
+          URIs: https://snapshot.debian.org/archive/debian/20261120T000000Z/
+          Suites: trixie trixie-updates
+          Components: main
+          Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+          Check-Valid-Until: no
+
+          Types: deb
+          URIs: https://snapshot.debian.org/archive/debian-security/20261120T000000Z/
+          Suites: trixie-security
+          Components: main
+          Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+          Check-Valid-Until: no
+          EOF
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            git gh make gcc gcc-aarch64-linux-gnu libc6-dev libssl-dev libelf-dev \
+            bc patch curl perl python3 flex bison
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ env.SOURCE }}
@@ -37,32 +70,20 @@ jobs:
           [[ "$SOURCE" =~ ^[0-9a-f]{40}$ ]]
           test "$(git rev-parse HEAD)" = "$SOURCE"
           git rev-list --first-parent origin/main | grep -Fx "$SOURCE" > /dev/null
-      - name: Read the input release pinned by this commit
+      - name: Read the external-input lock from this commit
         id: inputs
         run: |
           set -euo pipefail
-          tag=$(jq -er '
-            if has("release_tag") and has("source_sha256") and .release_tag == null and .source_sha256 == null then ""
-            elif (.release_tag | strings | test("\\A[a-zA-Z0-9][a-zA-Z0-9._-]*\\z")) and
-                 (.source_sha256 | objects | keys == ["alpine-go-source.tar.gz", "kernel-source.tar.gz"] and
-                  all(.[]; type == "string" and test("\\A[0-9a-f]{64}\\z"))) then .release_tag
-            else error("expected an immutable release tag and both source SHA-256 pins, or null for both") end
-          ' devices/biscuit/packaging/kernel61/ci-inputs.json)
+          tag=$(PYTHONPATH=devices/biscuit/packaging/kernel61 python3 -c '
+          from locked_build import HERE, read_lock
+          print(read_lock((HERE / "ci-inputs.json").read_bytes())["external_bundle_tag"] or "")
+          ')
           if [[ -z "$tag" ]]; then
-            echo '::notice::No approved ARM64 input release is pinned in this commit; skipping assembly.'
+            echo '::notice::No approved external bundle is available; skipping assembly.'
             exit 0
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
-        if: steps.inputs.outputs.tag != ''
-        with:
-          go-version: '1.27.4'
-          cache: false
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        if: steps.inputs.outputs.tag != ''
-        with:
-          python-version: '3.12'
-      - name: Fetch immutable ARM64 inputs and verify source archives
+      - name: Fetch the locked external inputs (no prebuilt Encore assets)
         if: steps.inputs.outputs.tag != ''
         env:
           INPUT_TAG: ${{ steps.inputs.outputs.tag }}
@@ -70,55 +91,50 @@ jobs:
           set -euo pipefail
           gh api "repos/$GITHUB_REPOSITORY/releases/tags/$INPUT_TAG" \
             --jq '.immutable == true and .draft == false' | grep -Fx true
-          args=()
-          for file in Image biscuit-arm64-probe.dtb audited-header.bin rootfs.tar.gz ca-certificates.crt \
-              kernel-source.tar.gz alpine-go-source.tar.gz; do
-            args+=(--pattern "$file")
-          done
-          gh release download "$INPUT_TAG" --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/inputs" "${args[@]}"
-          jq -r '.source_sha256 | to_entries[] | "\(.value)  \(.key)"' \
-            devices/biscuit/packaging/kernel61/ci-inputs.json > "$RUNNER_TEMP/source-sha256"
-          (cd "$RUNNER_TEMP/inputs" && sha256sum --check --strict "$RUNNER_TEMP/source-sha256")
-          # The builder checks the SHA-256 of each of these five files before
-          # validating the complete assembled envelope.
-      - name: Assemble and compare starter and runtime OTA payloads
+          inputs="$RUNNER_TEMP/inputs"
+          gh release download "$INPUT_TAG" --repo "$GITHUB_REPOSITORY" --dir "$inputs" \
+            --pattern alpine-apks.tar.gz --pattern alpine-source.tar.gz \
+            --pattern apk-tools-static.apk --pattern audited-header.bin
+          curl --fail --silent --show-error --location --output "$inputs/linux-source.tar.gz" \
+            https://api.github.com/repos/aslater3/LibreEcho-Linux/tarball/5bc811d3cd7091e8d70f9faa0bc12c5cf4e77ae0
+          curl --fail --silent --show-error --location --output "$inputs/go-linux-amd64.tar.gz" \
+            https://go.dev/dl/go1.27.4.linux-amd64.tar.gz
+          curl --fail --silent --show-error --location --output "$inputs/go-source.tar.gz" \
+            https://go.dev/dl/go1.27.4.src.tar.gz
+      - name: Build starter, OTA, unsigned native A/B candidates and source kits from this commit
         id: assemble
         if: steps.inputs.outputs.tag != ''
-        env:
-          INPUT_TAG: ${{ steps.inputs.outputs.tag }}
         run: |
           set -euo pipefail
           identity=$(python3 release/biscuit_dev.py "$SOURCE")
           read -r version revision <<< "$identity"
           echo "version=$version" >> "$GITHUB_OUTPUT"
-          inputs="$RUNNER_TEMP/inputs"
-          for attempt in one two; do
-            python3 devices/biscuit/packaging/kernel61/starter_build.py \
-              --sealed-base "$inputs" --ca-bundle "$inputs/ca-certificates.crt" \
-              --core-version "$version" --revision "$revision" --output "$RUNNER_TEMP/$attempt"
-          done
-          cmp "$RUNNER_TEMP/one/starter.zip" "$RUNNER_TEMP/two/starter.zip"
-          cmp "$RUNNER_TEMP/one/rootfs.tar.gz" "$RUNNER_TEMP/two/rootfs.tar.gz"
-          asset="encore-biscuit-arm64-$version.zip"
-          runtime="encore-biscuit-arm64-$version-rootfs.tar.gz"
-          mkdir -p build/biscuit-arm64-dev/{primary,repeat,sources}
-          for pair in one:primary two:repeat; do
-            attempt=${pair%:*}
-            destination="build/biscuit-arm64-dev/${pair#*:}"
-            cp "$RUNNER_TEMP/$attempt/starter.zip" "$destination/$asset"
-            cp "$RUNNER_TEMP/$attempt/rootfs.tar.gz" "$destination/$runtime"
-          done
-          mv "$inputs"/{kernel-source.tar.gz,alpine-go-source.tar.gz} build/biscuit-arm64-dev/sources/
-          {
-            printf 'Unsigned Biscuit ARM64 candidate %s\nSource: %s\nInputs: %s\n' "$version" "$SOURCE" "$INPUT_TAG"
-            go version
-            python3 --version
-            sha256sum build/biscuit-arm64-dev/{primary,repeat}/{"$asset","$runtime"} build/biscuit-arm64-dev/sources/*.tar.gz
-          } | tee build/biscuit-arm64-dev/evidence.txt >> "$GITHUB_STEP_SUMMARY"
+          python3 devices/biscuit/packaging/kernel61/locked_build.py \
+            --inputs "$RUNNER_TEMP/inputs" --output build/biscuit-arm64-dev \
+            --version "$version" --revision "$revision"
+          git diff --exit-code
+          cat build/biscuit-arm64-dev/evidence.txt >> "$GITHUB_STEP_SUMMARY"
+      - name: Prepare unsigned native A/B candidate for independent review
+        if: steps.inputs.outputs.tag != ''
+        run: |
+          set -euo pipefail
+          python3 release/pipeline.py prepare-native-ci build/biscuit-arm64-dev \
+            --output "$RUNNER_TEMP/native-candidate" | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: steps.inputs.outputs.tag != ''
+        with:
+          name: biscuit-native-unsigned
+          path: ${{ runner.temp }}/native-candidate
+          if-no-files-found: error
+          retention-days: 30
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: steps.inputs.outputs.tag != ''
         with:
           name: biscuit-arm64-${{ steps.assemble.outputs.version }}
-          path: build/biscuit-arm64-dev
+          path: |
+            build/biscuit-arm64-dev/primary
+            build/biscuit-arm64-dev/repeat
+            build/biscuit-arm64-dev/sources
+            build/biscuit-arm64-dev/evidence.txt
           if-no-files-found: error
           retention-days: 30

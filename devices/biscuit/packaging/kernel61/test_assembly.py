@@ -3,6 +3,7 @@ import fcntl
 import gzip
 import hashlib
 import io
+import json
 import os
 from pathlib import Path
 import re
@@ -15,7 +16,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from kernel61 import arm64_assemble, rootfs, starter_build
+from kernel61 import arm64_assemble, locked_build, rootfs, starter_build
 
 HERE = Path(__file__).resolve().parent
 BACKUP = HERE.parents[3] / ".amp/in/orb-backup"
@@ -39,6 +40,15 @@ class BootDecisionTests(unittest.TestCase):
         result.write_text("#!/bin/sh\n" + source)
         result.chmod(0o755)
         return result
+
+    def test_external_lock_rejects_prebuilt_outputs_and_substituted_inputs(self):
+        lock = locked_build.read_lock((HERE / "ci-inputs.json").read_bytes())
+        (self.root / "alpine-apks.tar.gz").write_bytes(b"substitute external bytes")
+        with self.assertRaisesRegex(ValueError, "external input changed: alpine-apks.tar.gz"):
+            locked_build.verify_inputs(self.root, lock["sha256"])
+        lock["sha256"]["Image"] = "0" * 64
+        with self.assertRaisesRegex(ValueError, "invalid Biscuit external-input lock"):
+            locked_build.read_lock(json.dumps(lock))
 
     def remap_paths(self, source, *directories):
         # Rewrite only root path components, without rescanning fixture paths.
@@ -160,11 +170,12 @@ exec "$BUSYBOX" "$@"
                 member = tarfile.TarInfo(name)
                 member.mode, member.size = 0o755, len(contents)
                 tar.addfile(member, io.BytesIO(contents))
+        compatibility = hashlib.sha256(b"separate kernel and device tree identity").hexdigest()
         ramdisk = arm64_assemble.initramfs(b"", hashlib.sha256(archive.read_bytes()).hexdigest(), b"",
-                                          starter=True, signed=("0.1.1-dev.5", 22, b""), recovery_rearm=True)
+                                          starter=True, signed=("0.1.1-dev.5", 22, b"", compatibility), recovery_rearm=True)
         subprocess.run([self.busybox, "cpio", "-i", "init"], input=gzip.decompress(ramdisk),
                        cwd=self.root, capture_output=True, check=True)
-        verify = self.script("verify", '[ "$MODE" != unverified ]\n')
+        verify = self.script("verify", f'[ "$5" = 22 ] && [ "$6" = {compatibility} ] && [ "$MODE" != unverified ]\n')
         bb = self.script("bb", '''
 case "$1" in
 mount|umount|mdev|sync) exit 0;;
