@@ -45,7 +45,7 @@ jobs:
     concurrency:
       group: release-publication
       queue: max
-    environment: release-publication
+    environment: ${{ inputs.signed_artifact != '' && 'release-dev-publication' || 'release-publication' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:

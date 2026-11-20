@@ -61,7 +61,7 @@ jobs:
     concurrency:
       group: release-publication
       queue: max
-    environment: release-feeds
+    environment: ${{ inputs.signed_feed_artifact != '' && 'release-dev-feeds' || 'release-feeds' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:

@@ -42,19 +42,24 @@ publishing armed, a successful main-push release build containing the unsigned
 native artifact queues the protected signer automatically, for Dev only.
 Check-only runs and manual rebuilds do not queue signing. After successful
 automatic signing, Dev retention and activation are chained using that run's
-artifacts, subject to the publication and feed environment policies.
+artifacts through the unattended, exact-main environments
+`release-dev-publication` and `release-dev-feeds`. The manual environments
+`release-publication` and `release-feeds` retain their reviewer gates.
 Manual signing never publishes, regardless of the publication switch.
 Native feeds are stored under `biscuit-native-ab/incubator/` so they cannot
 affect recovery installs.
 
-For the pilot, install the first exact signed seed with the
-[native installer](../devices/biscuit/packaging/kernel61/README.md#signed-native-ab-pilot).
-After fresh enrollment, retain a newer ordinary release and activate its
-signed **native** feed on the selected channel. Install through Home Assistant.
+Publish ordinary signed Dev releases before the device pilot; do not reserve a
+separate pilot version. Install the first retained Dev release's exact signed
+seed with the [native installer](../devices/biscuit/packaging/kernel61/README.md#signed-native-ab-pilot).
+After fresh enrollment, apply the next retained Dev release through Home Assistant.
 USB verification checks that the new version is running and confirmed, that
 the former slot still holds its previous version, and that enrollment survives
 a further reboot. A later ordinary update writes the opposite slot. Do not
 mirror the new version onto both slots; that discards the rollback version.
+After qualification, explicitly select the verified immutable release for the
+initial Stable feed; do not rebuild it. Dev is a feed channel, not a prerelease
+suffix on the version.
 
 ## Biscuit ARM64 public dev starter
 
@@ -223,8 +228,8 @@ its sources/assets, validates the signed entry against the receipt and root,
 and checks freshness and existing per-channel checkpoints. Manual activation
 requires `publishing_enabled=true`; automatic Dev activation instead requires
 the target in `automatic_dev_targets`. Both require `RELEASE_SETUP_APPROVED=true`
-in `release-feeds` and environment approval before committing history and
-deploying Pages.
+in the applicable feed environment before committing history and deploying
+Pages. Manual activation additionally requires environment review.
 
 Entries live at `<base>/<target>/incubator/{dev,stable}.jws`. Other channels and
 targets remain untouched. Revisions and core precedence cannot decrease on a
