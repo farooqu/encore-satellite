@@ -5,21 +5,16 @@ package update
 import (
 	"context"
 	"crypto/ed25519"
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
 
+	"github.com/farooqu/encore-satellite/core/updateverify"
 	"golang.org/x/mod/semver"
 )
 
@@ -64,40 +59,6 @@ type Client struct {
 	HTTP                                                      *http.Client
 }
 
-func secureURL(value string) bool {
-	u, err := url.Parse(value)
-	return err == nil && u.Scheme == "https" && u.Hostname() != "" && u.User == nil && u.Fragment == ""
-}
-
-func (c *Client) get(ctx context.Context, address string) (*http.Response, error) {
-	if !secureURL(address) {
-		return nil, errors.New("updates require HTTPS")
-	}
-	h := http.Client{Timeout: 5 * time.Minute}
-	if c.HTTP != nil {
-		h = *c.HTTP
-	}
-	h.CheckRedirect = func(r *http.Request, via []*http.Request) error {
-		if len(via) >= 5 || !secureURL(r.URL.String()) {
-			return errors.New("unsafe update redirect")
-		}
-		return nil
-	}
-	req, err := http.NewRequestWithContext(ctx, "GET", address, nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := h.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode != http.StatusOK {
-		resp.Body.Close()
-		return nil, fmt.Errorf("update HTTP %d", resp.StatusCode)
-	}
-	return resp, nil
-}
-
 var digestPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 var sourcePattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
@@ -116,24 +77,13 @@ func (c *Client) Check(ctx context.Context, channel string) (*Release, error) {
 	if !corePattern.MatchString(c.InstalledCore) {
 		return nil, errors.New("installed core SemVer not provisioned")
 	}
-	resp, err := c.get(ctx, strings.TrimRight(c.BaseURL, "/")+"/android-generic/incubator/"+channel+".jws")
+	metadata, err := updateverify.FetchMetadata(ctx, c.HTTP, strings.TrimRight(c.BaseURL, "/")+"/android-generic/incubator/"+channel+".jws")
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-	b, err := io.ReadAll(io.LimitReader(resp.Body, 32*1024+1))
-	if err != nil || len(b) > 32*1024 {
-		return nil, errors.New("invalid metadata size")
-	}
-	parts := strings.Split(strings.TrimSpace(string(b)), ".")
-	if len(parts) != 3 {
-		return nil, errors.New("invalid JWS")
-	}
-	header, e1 := base64.RawURLEncoding.DecodeString(parts[0])
-	payload, e2 := base64.RawURLEncoding.DecodeString(parts[1])
-	sig, e3 := base64.RawURLEncoding.DecodeString(parts[2])
-	if e1 != nil || e2 != nil || e3 != nil || string(header) != Header || !ed25519.Verify(c.Key, []byte(parts[0]+"."+parts[1]), sig) {
-		return nil, errors.New("invalid update signature")
+	payload, _, err := updateverify.VerifyJWS(metadata, c.Key, Header)
+	if err != nil {
+		return nil, err
 	}
 	var r Release
 	if err = json.Unmarshal(payload, &r); err != nil {
@@ -143,13 +93,13 @@ func (c *Client) Check(ctx context.Context, channel string) (*Release, error) {
 	if r.Target != "android-generic" || r.Backend != "incubator" || r.Channel != channel || r.ApplicationID != c.ApplicationID || r.CertificateSHA256 != c.CertificateSHA256 {
 		return nil, errors.New("update identity mismatch")
 	}
-	if r.Revision <= 0 || r.Revision > 2100000000 || r.Version == "" || !corePattern.MatchString(r.CoreVersion) || r.Toolchain == "" || !sourcePattern.MatchString(r.Source) || !digestPattern.MatchString(r.SHA256) || !secureURL(r.URL) || r.Size <= 0 || r.Size > MaxAPK {
+	if r.Revision <= 0 || r.Revision > 2100000000 || r.Version == "" || !corePattern.MatchString(r.CoreVersion) || r.Toolchain == "" || !sourcePattern.MatchString(r.Source) || !digestPattern.MatchString(r.SHA256) || !updateverify.SecureURL(r.URL) || r.Size <= 0 || r.Size > MaxAPK {
 		return nil, errors.New("invalid release metadata")
 	}
 	if channel == "stable" && strings.Contains(strings.SplitN(r.CoreVersion, "+", 2)[0], "-") {
 		return nil, errors.New("stable core must not be a prerelease")
 	}
-	if r.Issued <= 0 || r.Issued > now+300 || r.Expires <= now || r.Expires <= r.Issued || r.Expires-r.Issued > int64((7*24*time.Hour)/time.Second) {
+	if !updateverify.Fresh(now, r.Issued, r.Expires) {
 		return nil, errors.New("expired or invalid metadata lifetime")
 	}
 	compatible := false
@@ -163,7 +113,7 @@ func (c *Client) Check(ctx context.Context, channel string) (*Release, error) {
 	}
 	path := filepath.Join(c.Directory, channel+".json")
 	var previous checkpoint
-	b, err = os.ReadFile(path)
+	b, err := os.ReadFile(path)
 	if err == nil {
 		if err = json.Unmarshal(b, &previous); err != nil {
 			return nil, err
@@ -200,7 +150,7 @@ func (c *Client) Download(ctx context.Context, channel string) (*Release, string
 	if r == nil {
 		return nil, "", errors.New("no newer package")
 	}
-	resp, err := c.get(ctx, r.URL)
+	resp, err := updateverify.Get(ctx, c.HTTP, r.URL)
 	if err != nil {
 		return nil, "", err
 	}
@@ -211,8 +161,7 @@ func (c *Client) Download(ctx context.Context, channel string) (*Release, string
 		return nil, "", err
 	}
 	defer os.Remove(path + ".part")
-	h := sha256.New()
-	n, copyErr := io.Copy(io.MultiWriter(f, h), io.LimitReader(resp.Body, r.Size+1))
+	match, copyErr := updateverify.CopyAndMatch(f, resp.Body, r.Size, r.SHA256)
 	closeErr := f.Close()
 	if copyErr != nil {
 		return nil, "", copyErr
@@ -220,7 +169,7 @@ func (c *Client) Download(ctx context.Context, channel string) (*Release, string
 	if closeErr != nil {
 		return nil, "", closeErr
 	}
-	if n != r.Size || hex.EncodeToString(h.Sum(nil)) != r.SHA256 {
+	if !match {
 		return nil, "", errors.New("APK size or digest mismatch")
 	}
 	if err = os.Rename(path+".part", path); err != nil {

@@ -6,20 +6,17 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
 
+	"github.com/farooqu/encore-satellite/core/updateverify"
 	"golang.org/x/mod/semver"
 )
 
@@ -80,39 +77,6 @@ func validCore(s string) bool {
 func Newer(candidate, installed string) bool {
 	return validCore(candidate) && validCore(installed) && semver.Compare("v"+candidate, "v"+installed) > 0
 }
-func secureURL(s string) bool {
-	u, err := url.Parse(s)
-	// Release hosts may redirect to temporary, query-signed HTTPS URLs.
-	return err == nil && u.Scheme == "https" && u.Hostname() != "" && u.User == nil && u.Fragment == ""
-}
-func (c *Client) get(ctx context.Context, address string) (*http.Response, error) {
-	if !secureURL(address) {
-		return nil, errors.New("updates require HTTPS without credentials or fragment")
-	}
-	h := http.Client{Timeout: 5 * time.Minute}
-	if c.HTTP != nil {
-		h = *c.HTTP
-	}
-	h.CheckRedirect = func(r *http.Request, via []*http.Request) error {
-		if len(via) >= 5 || !secureURL(r.URL.String()) {
-			return errors.New("unsafe update redirect")
-		}
-		return nil
-	}
-	req, err := http.NewRequestWithContext(ctx, "GET", address, nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := h.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode != http.StatusOK {
-		resp.Body.Close()
-		return nil, fmt.Errorf("update HTTP %d", resp.StatusCode)
-	}
-	return resp, nil
-}
 
 // Check authenticates and records metadata even when the selected feed is behind
 // installed. There is no switch-time publication watermark or channel fallback.
@@ -124,16 +88,11 @@ func (c *Client) Check(ctx context.Context, channel string, highest int64) (*Rel
 	if len(c.Key) != ed25519.PublicKeySize {
 		return nil, errors.New("update trust not provisioned")
 	}
-	resp, err := c.get(ctx, strings.TrimRight(c.BaseURL, "/")+"/"+i.Target+"/"+i.Backend+"/"+channel+".jws")
+	metadata, err := updateverify.FetchMetadata(ctx, c.HTTP, strings.TrimRight(c.BaseURL, "/")+"/"+i.Target+"/"+i.Backend+"/"+channel+".jws")
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-	b, err := io.ReadAll(io.LimitReader(resp.Body, 32769))
-	if err != nil || len(b) > 32768 {
-		return nil, errors.New("invalid metadata size")
-	}
-	r, err := VerifyRelease(b, c.Key, i, channel)
+	r, err := VerifyRelease(metadata, c.Key, i, channel)
 	if err != nil {
 		return nil, err
 	}
@@ -147,7 +106,7 @@ func (c *Client) Check(ctx context.Context, channel string, highest int64) (*Rel
 	current := checkpoint{r.Revision, r.Issued, hex.EncodeToString(sum[:])}
 	path := filepath.Join(c.Directory, channel+".json")
 	var old checkpoint
-	b, err = os.ReadFile(path)
+	b, err := os.ReadFile(path)
 	if err == nil {
 		if err = json.Unmarshal(b, &old); err != nil {
 			return nil, err
@@ -176,19 +135,9 @@ func (c *Client) Check(ctx context.Context, channel string, highest int64) (*Rel
 // an unset RTC without needing to contact the network.
 func VerifyRelease(b []byte, key ed25519.PublicKey, i Manifest, channel string) (Release, error) {
 	var r Release
-	if len(b) > 32768 || len(key) != ed25519.PublicKeySize {
-		return r, errors.New("invalid metadata size or trust root")
-	}
-	proof := strings.TrimSpace(string(b))
-	parts := strings.Split(proof, ".")
-	if len(parts) != 3 {
-		return r, errors.New("invalid JWS")
-	}
-	header, e1 := base64.RawURLEncoding.DecodeString(parts[0])
-	payload, e2 := base64.RawURLEncoding.DecodeString(parts[1])
-	sig, e3 := base64.RawURLEncoding.DecodeString(parts[2])
-	if e1 != nil || e2 != nil || e3 != nil || string(header) != Header || !ed25519.Verify(key, []byte(parts[0]+"."+parts[1]), sig) {
-		return r, errors.New("invalid update signature")
+	payload, proof, err := updateverify.VerifyJWS(b, key, Header)
+	if err != nil {
+		return r, err
 	}
 	if err := json.Unmarshal(payload, &r); err != nil {
 		return r, err
@@ -196,7 +145,7 @@ func VerifyRelease(b []byte, key ed25519.PublicKey, i Manifest, channel string) 
 	if r.Target != i.Target || r.Backend != i.Backend || r.Format != i.Format || r.Channel != channel || r.BaseSHA256 != i.BaseSHA256 {
 		return r, errors.New("incompatible target/backend/shared base; base migration unsupported")
 	}
-	if !validCore(r.CoreVersion) || r.Revision <= 0 || !digest.MatchString(r.SHA256) || r.Size <= 0 || r.Size > MaxBundle || !secureURL(r.URL) {
+	if !validCore(r.CoreVersion) || r.Revision <= 0 || !digest.MatchString(r.SHA256) || r.Size <= 0 || r.Size > MaxBundle || !updateverify.SecureURL(r.URL) {
 		return r, errors.New("invalid release metadata")
 	}
 	if channel == "stable" && semver.Prerelease("v"+r.CoreVersion) != "" {
@@ -207,8 +156,7 @@ func VerifyRelease(b []byte, key ed25519.PublicKey, i Manifest, channel string) 
 }
 
 func (r Release) Fresh() error {
-	now := time.Now().Unix()
-	if r.Issued <= 0 || r.Issued > now+300 || r.Expires <= now || r.Expires <= r.Issued || r.Expires-r.Issued > 7*24*3600 {
+	if !updateverify.Fresh(time.Now().Unix(), r.Issued, r.Expires) {
 		return errors.New("expired or invalid metadata lifetime; check device clock")
 	}
 	return nil
@@ -220,7 +168,7 @@ func (c *Client) Download(ctx context.Context, r Release) (string, error) {
 	if err := r.Fresh(); err != nil {
 		return "", err
 	}
-	resp, err := c.get(ctx, r.URL)
+	resp, err := updateverify.Get(ctx, c.HTTP, r.URL)
 	if err != nil {
 		return "", err
 	}
@@ -230,8 +178,7 @@ func (c *Client) Download(ctx context.Context, r Release) (string, error) {
 		return "", err
 	}
 	defer os.Remove(f.Name())
-	h := sha256.New()
-	n, e := io.Copy(io.MultiWriter(f, h), io.LimitReader(resp.Body, r.Size+1))
+	match, e := updateverify.CopyAndMatch(f, resp.Body, r.Size, r.SHA256)
 	if e == nil {
 		e = f.Sync()
 	}
@@ -242,7 +189,7 @@ func (c *Client) Download(ctx context.Context, r Release) (string, error) {
 	if closeErr != nil {
 		return "", closeErr
 	}
-	if n != r.Size || hex.EncodeToString(h.Sum(nil)) != r.SHA256 {
+	if !match {
 		return "", errors.New("bundle size or digest mismatch")
 	}
 	path := filepath.Join(c.Directory, r.SHA256+".zip")
