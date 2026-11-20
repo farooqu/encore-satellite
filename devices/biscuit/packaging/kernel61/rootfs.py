@@ -11,6 +11,14 @@ HERE = Path(__file__).resolve().parent
 TRIAL_FORMAT = "encore-biscuit-kernel61-trial-v1"
 
 
+def arm64_bluetooth():
+    bluetooth = (HERE.parent / "bluetooth").read_text()
+    if bluetooth.count("/proc/idme/bt_mac_addr") != 1:
+        raise ValueError("Bluetooth identity source contract changed; review DT-IDME integration")
+    # The 6.1 connectivity import consumes the factory IDME value directly from DT.
+    return bluetooth.replace("/proc/idme/bt_mac_addr", "/sys/firmware/devicetree/base/idme/bt_mac_addr/value").encode()
+
+
 def rootfs_archive(base, kernel_record):
     entries = {}
     with tarfile.open(fileobj=io.BytesIO(base), mode="r:gz") as archive:
@@ -57,13 +65,7 @@ def rootfs_archive(base, kernel_record):
                            ("network", "encore-network"), ("firewall", "encore-firewall")):
         add("usr/local/sbin/" + target, (HERE.parent / source).read_bytes(), 0o755)
     add("etc/encore/dhcp.sh", (HERE.parent / "dhcp.sh").read_bytes(), 0o755)
-    bluetooth = (HERE.parent / "bluetooth").read_text()
-    if bluetooth.count("/proc/idme/bt_mac_addr") != 1:
-        raise ValueError("Bluetooth identity source contract changed; review DT-IDME integration")
-    # Vendor idme.c exposes each /idme child node's `value` property through
-    # procfs. The 6.1 connectivity import consumes DT values directly instead.
-    bluetooth = bluetooth.replace("/proc/idme/bt_mac_addr", "/sys/firmware/devicetree/base/idme/bt_mac_addr/value")
-    add("usr/local/sbin/encore-bluetooth", bluetooth.encode(), 0o755)
+    add("usr/local/sbin/encore-bluetooth", arm64_bluetooth(), 0o755)
     add("usr/local/sbin/usb-rescue", (HERE / "usb-rescue").read_bytes(), 0o755)
     add("sbin/init", (HERE / "arm64-probe-init").read_bytes(), 0o755)
     add("etc/inittab", b"::respawn:/usr/local/sbin/usb-rescue\n")

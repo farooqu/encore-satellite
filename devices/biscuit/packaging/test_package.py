@@ -489,6 +489,44 @@ class RecoveryTests(unittest.TestCase):
         self.assertFalse(self.store("").exists())
         self.assertEqual((self.device / "dev/block/mmcblk0p12").read_bytes(), self.twrp)
 
+    def test_native_seed_installs_both_images_but_never_imports_enrollment(self):
+        from kernel61 import starter_install
+
+        p = self.device / "dev/block"
+        recovery = self.twrp.ljust(16 << 20, b"R")
+        a, b = b"a" * (16 << 20), b"b" * (16 << 20)
+        misc = bytes(0x360) + b"\0ABB\x01\x8f\x00" + b"preserved" * 80
+        originals = {"boot_a": a, "boot_b": b, "recovery": recovery, "misc": misc}
+        for number, value in zip((10, 11, 12, 8), originals.values()):
+            (p / f"mmcblk0p{number}").write_bytes(value)
+        (self.device / "tools/dd").write_text('#!/bin/sh\nexec /usr/bin/dd "$@" conv=notrunc\n')
+        self.args.twrp_sha256 = package.sha(recovery)
+        files = {"rootfs.tar.gz": b"new runtime", "boot_a.img": b"native A" * 512, "boot_b.img": b"native B" * 512}
+        manifest = {"package_revision": 81}
+        adb = install.ADB(self.args.serial)
+        state = self.device / "data/encore"
+        state.mkdir()
+        (state / "wpa_supplicant.conf").write_bytes(b"old network")
+        with self.assertRaisesRegex(RuntimeError, "simulated recovery failure"):
+            starter_install.install_native_locked(adb, self.args, manifest, files, "native-dot")
+        self.assertEqual((state / "wpa_supplicant.conf").read_bytes(), b"old network")
+        self.assertEqual((p / "mmcblk0p10").read_bytes(), a)
+        self.assertFalse(self.args.backup_dir.exists())
+        (state / "wpa_supplicant.conf").unlink()
+        state.rmdir()
+
+        starter_install.install_native_locked(adb, self.args, manifest, files, "native-dot")
+        self.assertEqual([x.name for x in state.iterdir()], ["config.json"])
+        self.assertEqual(json.loads((state / "config.json").read_bytes()), {"schema": 1, "name": "native-dot"})
+        for slot, number, old in (("a", 10, a), ("b", 11, b)):
+            image = files[f"boot_{slot}.img"]
+            self.assertEqual((p / f"mmcblk0p{number}").read_bytes(), image + old[len(image):])
+            self.assertEqual(self.store(f"native-ab-v1/slots/{slot}/rootfs.tar.gz").read_bytes(), files["rootfs.tar.gz"])
+        self.assertEqual((p / "mmcblk0p8").read_bytes(), misc[:0x366] + b"\x8e" + misc[0x367:])
+        self.assertEqual((p / "mmcblk0p12").read_bytes(), recovery)
+        for name, value in originals.items():
+            self.assertEqual((self.args.backup_dir / f"{name}.img").read_bytes(), value)
+
     def test_fresh_arm64_install_needs_no_legacy_layout(self):
         from kernel61 import starter_install
 

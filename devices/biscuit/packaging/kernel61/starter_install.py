@@ -2,6 +2,7 @@
 
 import base64
 import gzip
+import hashlib
 import io
 import json
 import os
@@ -26,6 +27,155 @@ P12 = "/dev/block/mmcblk0p12"
 STORE = "/cache/encore"
 STATE = "/data/encore"
 STOCK_FIRMWARE = Path(__file__).with_name("stock-firmware")
+NATIVE_TARGET = "biscuit-native-ab"
+NATIVE_FORMAT = "encore-biscuit-native-ab-v1"
+NATIVE_LAYOUT = hashlib.sha256(NATIVE_FORMAT.encode()).hexdigest()
+NATIVE_FILES = {"boot_a.img": 16 << 20, "boot_b.img": 16 << 20, "rootfs.tar.gz": 96 << 20}
+
+
+def native_identity(core, revision):
+    starter_version(core, revision)
+    return {"schema": 1, "target": NATIVE_TARGET, "backend": "incubator", "format": NATIVE_FORMAT,
+            "update_channels": True, "base_sha256": NATIVE_LAYOUT, "channel": "stable",
+            "core_version": core, "package_revision": revision}
+
+
+def native_members(path, limits):
+    with zipfile.ZipFile(path) as bundle:
+        if sorted(bundle.namelist()) != sorted(limits) or any(
+                not 0 < m.file_size <= limits[m.filename] for m in bundle.infolist()):
+            raise ValueError("invalid native bundle members or size")
+        return {name: bundle.read(name) for name in limits}
+
+
+def load_native_bundle(path, digest):
+    """Read the exact first-install payload, not an OTA or recovery ZIP."""
+    with path.open("rb") as stream:
+        if hashlib.file_digest(stream, "sha256").hexdigest() != digest:
+            raise ValueError("native seed does not match the reviewed SHA256")
+        files = native_members(stream, {**NATIVE_FILES, "manifest.json": 1 << 20, "header.bin": 2048})
+    manifest = json.loads(files.pop("manifest.json"))
+    header = files.pop("header.bin")
+    identity = native_identity(manifest["core_version"], manifest["package_revision"])
+    if (set(manifest) != set(identity) | {"input_lock_sha256", "kernel_image_sha256", "dtb_sha256", "files"}
+            or any(manifest[name] != value for name, value in identity.items())
+            or manifest["files"] != {name: sha(data) for name, data in files.items()}
+            or any(not re.fullmatch(r"[a-f0-9]{64}", manifest[n]) for n in
+                   ("input_lock_sha256", "kernel_image_sha256", "dtb_sha256"))):
+        raise ValueError("invalid native seed identity or member checksums")
+    rootfs = files["rootfs.tar.gz"]
+    with tarfile.open(fileobj=io.BytesIO(rootfs), mode="r:gz") as archive:
+        def read(name, limit):
+            entry = archive.getmember(name)
+            if not entry.isfile() or not 0 < entry.size <= limit:
+                raise ValueError("invalid native rootfs member: " + name)
+            return archive.extractfile(entry).read()
+
+        busybox = read("bin/busybox.static", 4 << 20)
+        fpga = read("lib/firmware/i2s_to_spi_v34.bin", 32768)
+        verifier = read("usr/local/bin/arm64-verify", 16 << 20)
+        native_elf(verifier, static=True)
+        if sha(busybox) != BUSYBOX_SHA256 or sha(fpga) != FPGA_SHA256 or read("etc/encore-arm64-version", 256) != (
+                starter_version(identity["core_version"], identity["package_revision"]) + "\n").encode():
+            raise ValueError("wrong native runtime identity or immutable firmware")
+    for slot in "ab":
+        boot = files[f"boot_{slot}.img"]
+        if len(boot) < 2048 or boot[:8] != b"ANDROID!":
+            raise ValueError("invalid native boot envelope")
+        kernel_len, ka, ramdisk_len, ra = struct.unpack_from("<4I", boot, 8)
+        offset = 2048 + ((kernel_len + 2047) // 2048) * 2048
+        if not (65536 < kernel_len and ka == 0x40000000 and ra == 0x46000000
+                and ramdisk_len > 0 and offset + ramdisk_len <= len(boot)
+                and len(boot) == offset + ((ramdisk_len + 2047) // 2048) * 2048):
+            raise ValueError("unexpected native boot footprint")
+        payload = boot[2048:2048 + kernel_len]
+        decoder = zlib.decompressobj(31)
+        image = decoder.decompress(payload, 28 << 20)
+        trailer = decoder.unused_data
+        if not decoder.eof or len(trailer) != 65536 or trailer[:4] != b"\xd0\x0d\xfe\xed":
+            raise ValueError("invalid native kernel/DTB payload")
+        dtb = trailer[:struct.unpack_from(">I", trailer, 4)[0]]
+        expected = gzip.decompress(initramfs(busybox, sha(rootfs), fpga, native=(slot, identity, verifier)))
+        ramdisk = boot[offset:offset + ramdisk_len]
+        decoder = zlib.decompressobj(31)
+        if (sha(image) != manifest["kernel_image_sha256"] or sha(dtb) != manifest["dtb_sha256"]
+                or decoder.decompress(ramdisk, len(expected) + 1) != expected or not decoder.eof or decoder.unused_data
+                or boot != boot_image(header, image, dtb, ramdisk, compressed_image=payload[:-65536])):
+            raise ValueError("native boot image does not bind the intended runtime and slot")
+    return manifest, files
+
+
+def install_native_locked(adb, args, manifest, files, name):
+    """First-install only. Never move, import or erase an old enrollment."""
+    store = STORE + "/native-ab-v1"
+    next_data = "/data/.encore-native-next"
+    adb.shell(f'for p in {STORE} {STATE} {next_data}; do test ! -e "$p"; test ! -L "$p"; done')
+    for mount, required in (("/cache", (2 * len(files["rootfs.tar.gz"]) >> 10) + 8192), ("/data", 8192)):
+        if int(adb.shell(f"df -Pk {mount} | awk 'END {{print $4}}'")) < required:
+            raise ValueError(f"insufficient space for native install on {mount}")
+    paths = {"boot_a": "/dev/block/mmcblk0p10", "boot_b": "/dev/block/mmcblk0p11",
+             "recovery": P12, "misc": "/dev/block/mmcblk0p8"}
+    backups = {name: adb.shell(f"cat {partition}") for name, partition in paths.items()}
+    misc = backups["misc"]
+    if (any(len(backups[slot]) != 16 << 20 for slot in ("boot_a", "boot_b", "recovery"))
+            or sha(backups["recovery"]) != args.twrp_sha256 or len(misc) < 1024
+            or misc[:32] != bytes(32) or misc[0x360:0x365] != b"\0ABB\1"):
+        raise ValueError("unexpected recovery backup, normal-boot command or Amazon boot control")
+    args.backup_dir.mkdir(mode=0o700)
+    for filename, data in [*((f"{key}.img", data) for key, data in backups.items()),
+                           ("SHA256SUMS", "".join(f"{sha(data)}  {key}.img\n" for key, data in backups.items()).encode())]:
+        path = args.backup_dir / filename
+        with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as out:
+            out.write(data)
+            out.flush()
+            os.fsync(out.fileno())
+        if sha(path.read_bytes()) != sha(data):
+            raise RuntimeError("host rollback backup read-back failed")
+    for directory in (args.backup_dir, args.backup_dir.parent):
+        fd = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    adb.shell(f"umask 077; mkdir -p {store}/slots/a {store}/slots/b; mkdir {next_data}")
+    for slot in "ab":
+        adb.write(f"{store}/slots/{slot}/rootfs.tar.gz", files["rootfs.tar.gz"])
+    adb.write(f"{store}/highest-revision", f"{manifest['package_revision']}\n".encode())
+    adb.write(f"{next_data}/config.json", json.dumps({"schema": 1, "name": name}).encode() + b"\n")
+    adb.shell(f"mv {next_data} {STATE}; sync")
+    # Keep the live USB recovery session open until all readbacks pass.
+    # Start with B, so A remains stock during the first boot-store write.
+    for slot in ("boot_b", "boot_a"):
+        image = files[slot + ".img"]
+        partition = paths[slot]
+        expected = sha(image + backups[slot][len(image):])
+        if adb.shell(f"sha256sum {partition}").decode().split()[0] != sha(backups[slot]):
+            raise RuntimeError(f"{slot} changed since backup; stay in recovery")
+        adb.shell(f"dd of={partition} bs=2048; sync", image)
+        if adb.shell(f"sha256sum {partition}").decode().split()[0] != expected:
+            raise RuntimeError(f"{slot} readback failed; stay in recovery and restore verified backups")
+    if adb.shell(f"sha256sum {P12}").decode().split()[0] != args.twrp_sha256:
+        raise RuntimeError("recovery changed; do not reboot")
+    # Both payloads are durable. Select A, seed B as last-good fallback, and
+    # write only the slot-control sector. eMMC readback also covers its neighbors.
+    after = misc[:0x365] + bytes((0x8f, 0x8e)) + misc[0x367:]
+    sector = f"{store}/.install-control-sector"
+    if after != misc:
+        adb.write(sector, after[512:1024])
+    if adb.shell(f"cat {paths['misc']}") != misc:
+        raise RuntimeError("MISC changed during install; do not reboot")
+    if after != misc:
+        adb.shell(f"dd if={sector} of={paths['misc']} bs=512 seek=1 count=1; sync")
+        if adb.shell(f"cat {paths['misc']}") != after:
+            raise RuntimeError("native boot control readback failed; do not reboot")
+        adb.shell(f"rm {sector}; sync")
+    print("Both seed slots staged and verified. Recovery unchanged. No Wi-Fi or HA pairing imported; no reboot performed.")
+
+
+def boot_compatibility(image, dtb):
+    # Do not allow runtime-only OTA across a different recovery kernel or DTB.
+    # Bump the domain if the recovery/runtime protocol changes incompatibly.
+    return sha(b"encore-biscuit-recovery-v1\0" + bytes.fromhex(sha(image) + sha(dtb)))
 
 
 def starter_version(core, revision):
@@ -107,7 +257,7 @@ def load_bundle(path, digest):
             core, revision = manifest["core_version"], manifest["package_revision"]
             if read("etc/encore-arm64-version") != (starter_version(core, revision) + "\n").encode():
                 raise ValueError("starter version marker mismatch")
-            if manifest.get("retained_base_sha256") != BASE_SHA or sha(read("etc/ssl/certs/ca-certificates.crt")) != CA_SHA:
+            if sha(read("etc/ssl/certs/ca-certificates.crt")) != CA_SHA:
                 raise ValueError("unexpected ARM64 base or CA bundle")
             verifier = read("usr/local/bin/arm64-verify")
             native_elf(verifier, static=True)
@@ -126,7 +276,15 @@ def load_bundle(path, digest):
         raise ValueError("missing appended starter DTB")
     # The DTB's own length includes its trailing zero bytes.
     dtb = decoder.unused_data[:struct.unpack_from(">I", decoder.unused_data, 4)[0]]
-    if sha(image) != IMAGE_SHA or sha(dtb) != DTB_SHA:
+    if "input_lock_sha256" in manifest:
+        compatibility = boot_compatibility(image, dtb)
+        if (signed is None or not isinstance(manifest["input_lock_sha256"], str)
+                or not re.fullmatch(r"[a-f0-9]{64}", manifest["input_lock_sha256"])
+                or manifest.get("kernel_image_sha256") != sha(image) or manifest.get("dtb_sha256") != sha(dtb)
+                or manifest.get("retained_base_sha256") != compatibility):
+            raise ValueError("invalid locked-build boot identity")
+        signed += (compatibility,)
+    elif sha(image) != IMAGE_SHA or sha(dtb) != DTB_SHA or (signed and manifest.get("retained_base_sha256") != BASE_SHA):
         raise ValueError("starter requires the exact retained stpfix1 Image and DTB")
     ramdisk_offset = 2048 + ((kernel_len + 2047) // 2048) * 2048
     ramdisk_size = struct.unpack_from("<I", recovery, 16)[0]

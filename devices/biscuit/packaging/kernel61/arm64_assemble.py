@@ -95,12 +95,48 @@ def repack(data, replacements):
 
 
 def initramfs(busybox, rootfs_hash, microphone_firmware, store_rootfs=STORE_ROOTFS, *, starter=False, signed=None,
-              recovery_rearm=False):
+              recovery_rearm=False, native=None):
     if recovery_rearm and (not starter or signed is None):
         raise ValueError("recovery re-arm requires a verified-update starter")
+    if native is not None and (starter or signed is not None):
+        raise ValueError("native boot does not use the recovery selector")
     init = (HERE / "init").read_text().replace(
         "@ROOTFS_SHA256@", rootfs_hash).replace(
         "/store/encore/kernel61-trial/rootfs.tar.gz", store_rootfs)
+    if native is not None:
+        slot, identity, verifier = native
+        if slot not in ("a", "b"):
+            raise ValueError("native boot requires an explicit slot")
+        start = init.index("# Only the existing firmware/store partition")
+        end = init.index("# Bounded RAM use", start)
+        init = init[:start] + f'''\
+i=0
+while [ ! -b /dev/mmcblk0p8 ] || [ ! -b /dev/mmcblk0p15 ]; do
+  i=$((i+1)); [ "$i" -le 15 ] || rescue storage-timeout
+  $BB sleep 1
+done
+printf '%s\\n' {slot} > /run/encore/slot || rescue booted-slot
+trial=$(/bin/arm64-verify native-trial) || rescue boot-control
+if [ "$trial" = true ]; then
+  /bin/arm64-verify native-watchdog 2>/dev/kmsg &
+  guard=$!
+  i=0
+  while [ ! -f /run/encore/native-watchdog-armed ]; do
+    i=$((i+1)); [ "$i" -le 5 ] && kill -0 "$guard" || rescue watchdog
+    $BB sleep 1
+  done
+fi
+$BB mount -t ext4 -o noatime,nosuid,nodev,noexec /dev/mmcblk0p15 /store || rescue store
+for dir in /store/encore /store/encore/native-ab-v1 /store/encore/native-ab-v1/slots /store/encore/native-ab-v1/slots/{slot}; do
+  [ -d "$dir" ] && [ ! -L "$dir" ] || rescue native-layout
+done
+archive=/store/encore/native-ab-v1/slots/{slot}/rootfs.tar.gz
+[ -f "$archive" ] && [ ! -L "$archive" ] || rescue native-runtime
+printf '%s  %s\\n' '{rootfs_hash}' "$archive" | $BB sha256sum -c - || rescue rootfs-checksum
+printf '%s\\n' {shlex.quote(json.dumps(identity, sort_keys=True))} > /run/encore/arm64-installed.json || rescue boot-identity
+: > /run/encore/native-ab || rescue native-marker
+''' + init[end:]
+        init = init.replace(TRIAL_FORMAT, STARTER_FORMAT)
     if starter:
         # Only a published transition may mount the store writable. Use an
         # ordinary mount to replay ext4's journal, then recheck the selector.
@@ -133,7 +169,8 @@ done
 [ -n "$selected" ] || rescue no-verified-slot
 ''' + init[end:]
         if signed is not None:
-            core, revision, _ = signed
+            core, revision, *_ = signed
+            compatibility = " " + shlex.quote(signed[3]) if len(signed) == 4 else ""
             start = init.index('selected=\n')
             end = init.index('moved=\n', start)
             init = init[:start] + f'''\
@@ -145,7 +182,7 @@ for slot in "$active" "$other"; do
     update) [ "$slot" = "$active" ] || continue;;
     *) continue;;
   esac
-  /bin/arm64-verify /store/encore "$slot" {rootfs_hash} {shlex.quote(core)} {int(revision)} \\
+  /bin/arm64-verify /store/encore "$slot" {rootfs_hash} {shlex.quote(core)} {int(revision)}{compatibility} \\
     > /run/encore/arm64-installed.json || continue
   archive=/store/encore/slots/$slot/rootfs.tar.gz
   $BB mount -t tmpfs -o mode=0755,size=128m tmpfs /newroot || rescue ram-root
@@ -203,6 +240,8 @@ moved=
               ("usr/local/sbin/usb-rescue", stat.S_IFREG | 0o755, (HERE / "usb-rescue").read_bytes())]
     if signed is not None:
         files.append(("bin/arm64-verify", stat.S_IFREG | 0o755, signed[2]))
+    if native is not None:
+        files.append(("bin/arm64-verify", stat.S_IFREG | 0o755, verifier))
     return cpio(files)
 
 
