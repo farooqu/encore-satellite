@@ -160,6 +160,9 @@ func (m *musicService) Run(ctx context.Context) {
 			m.running, m.runningRevision = true, revision
 			m.mu.Unlock()
 			// Enabling/reconnection never releases an existing Stop/privacy latch.
+			// TODO(Sendspin): Make readiness and the command queue worker-scoped.
+			// Launch is not proof of a ready connection, and a command queued
+			// as the old worker exits can reach its replacement on retry.
 			opts := linuxsendspin.Options{Name: m.name, URL: url, StateDir: musicStateDir, Executable: musicExecutable, Output: m.player, Commands: m.commands}
 			go func(result chan error) { result <- m.run(childCtx, opts) }(done)
 		}
