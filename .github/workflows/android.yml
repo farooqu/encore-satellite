@@ -42,6 +42,27 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y meson ninja-build
       - name: Regenerate engine, assemble, test and lint
         run: devices/android-generic/build-android :app:assembleDebug :app:testDebugUnitTest :app:lintDebug
+      - name: Exercise release assembly and inspection with a disposable key
+        env:
+          ENCORE_STORE_PASSWORD: ci-only
+          ENCORE_KEY_PASSWORD: ci-only
+          ENCORE_KEY_ALIAS: ci-only
+          ENCORE_VERSION_CODE: '3'
+          ENCORE_VERSION_NAME: 'ci-only'
+          ENCORE_UPDATE_BASE_URL: https://updates.invalid
+        run: |
+          set -euo pipefail
+          umask 077
+          export ENCORE_KEYSTORE="$RUNNER_TEMP/ci-only.p12"
+          trap 'rm -f "$ENCORE_KEYSTORE"' EXIT
+          keytool -genkeypair -keystore "$ENCORE_KEYSTORE" -storepass:env ENCORE_STORE_PASSWORD \
+            -alias "$ENCORE_KEY_ALIAS" -keyalg RSA -keysize 2048 -dname 'CN=Encore CI only' -validity 1
+          export ENCORE_UPDATE_PUBLIC_KEY="$(openssl genpkey -algorithm ED25519 | openssl pkey -pubout -outform DER | tail -c 32 | base64 -w0)"
+          cert="$(keytool -exportcert -keystore "$ENCORE_KEYSTORE" -storepass:env ENCORE_STORE_PASSWORD -alias "$ENCORE_KEY_ALIAS" | sha256sum | cut -d' ' -f1)"
+          SKIP_GO_BIND=1 devices/android-generic/build-android :app:assembleRelease
+          export PATH="$ANDROID_HOME/build-tools/36.0.0:$PATH"
+          python3 release/pipeline.py inspect-android devices/android-generic/app/build/outputs/apk/release/app-release.apk \
+            --revision "$ENCORE_VERSION_CODE" --version "$ENCORE_VERSION_NAME" --certificate-sha256 "$cert"
 
   signed-candidate:
     if: github.event_name == 'workflow_dispatch' && inputs.signed_candidate && github.ref == 'refs/heads/main'
@@ -55,20 +76,26 @@ jobs:
       ENCORE_VERSION_CODE: ${{ inputs.revision }}
       ENCORE_VERSION_NAME: ${{ inputs.version }}
       ENCORE_UPDATE_BASE_URL: ${{ vars.ANDROID_UPDATE_BASE_URL }}
-      ENCORE_UPDATE_PUBLIC_KEY: ${{ vars.ANDROID_UPDATE_PUBLIC_KEY }}
+      ANDROID_METADATA_PUBLIC_KEY_PEM: ${{ vars.ANDROID_METADATA_PUBLIC_KEY_PEM }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - name: Validate the centrally reserved candidate identity
+      - name: Validate candidate identity and derive the APK's feed trust root
         run: |
           python3 release/check.py
           python3 - <<'PY'
-          import json, os
+          import base64, json, os, subprocess
           registry = json.load(open('release/targets.json'))
           target = next(t for t in registry['targets'] if t['id'] == 'android-generic')
           assert str(target['package_revision']) == os.environ['ENCORE_VERSION_CODE'], 'reserve the revision centrally before signing'
           assert os.environ['ENCORE_VERSION_NAME'].strip(), 'explicit APK versionName required'
+          der = subprocess.check_output(['openssl', 'pkey', '-pubin', '-outform', 'DER'],
+                                        input=os.environ['ANDROID_METADATA_PUBLIC_KEY_PEM'].encode())
+          prefix = bytes.fromhex('302a300506032b6570032100')  # RFC 8410 Ed25519 SPKI
+          assert len(der) == len(prefix) + 32 and der.startswith(prefix), 'Android metadata root must be Ed25519'
+          with open(os.environ['GITHUB_ENV'], 'a') as env:
+              print('ENCORE_UPDATE_PUBLIC_KEY=' + base64.b64encode(der[len(prefix):]).decode(), file=env)
           PY
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
@@ -99,9 +126,9 @@ jobs:
           printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$ENCORE_KEYSTORE"
           devices/android-generic/build-android :app:assembleRelease
           apk=devices/android-generic/app/build/outputs/apk/release/app-release.apk
-          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs "$apk" > "$RUNNER_TEMP/signature.txt"
-          test -n "$EXPECTED_CERTIFICATE"
-          grep -Fqx "Signer #1 certificate SHA-256 digest: $EXPECTED_CERTIFICATE" "$RUNNER_TEMP/signature.txt"
+          export PATH="$ANDROID_HOME/build-tools/36.0.0:$PATH"
+          python3 release/pipeline.py inspect-android "$apk" --revision "$ENCORE_VERSION_CODE" \
+            --version "$ENCORE_VERSION_NAME" --certificate-sha256 "$EXPECTED_CERTIFICATE"
           sha256sum "$apk" > "$apk.sha256"
           git rev-parse HEAD > "$apk.source"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

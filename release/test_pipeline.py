@@ -8,6 +8,7 @@ import sys
 import tempfile
 import time
 import unittest
+import zipfile
 
 import pipeline
 from test_fixtures import inventory
@@ -39,10 +40,14 @@ class PipelineTests(unittest.TestCase):
             (self.build / name).write_bytes(b"synthetic fixture, not distributable sources\n")
         # SDK output fixtures test parsing/rejection, not real APK signing.
         apk = self.build / "app.apk"
-        apk.write_bytes(b"synthetic APK fixture")
+        with zipfile.ZipFile(apk, "w") as archive:
+            for abi in ("armeabi-v7a", "arm64-v8a"):
+                archive.writestr(f"lib/{abi}/libgojni.so", "synthetic engine")
         shutil.copyfile(apk, self.build / "second.apk")
         cert = "9" * 64
         badging = ("package: name='com.encore.satellite.incubator' versionCode='5' versionName='1.2.0-incubator'\n"
+                   "launchable-activity: name='com.encore.satellite.MainActivity'\n"
+                   "uses-permission: name='android.permission.REQUEST_INSTALL_PACKAGES'\n"
                    "sdkVersion:'26'\nnative-code: 'armeabi-v7a' 'arm64-v8a'\n")
         manifest = ('A: android:name(0x01010003)="com.encore.core_version"\n'
                     '  A: android:value(0x01010024)="1.2.0" (Raw: "1.2.0")\n')
@@ -244,6 +249,13 @@ class PipelineTests(unittest.TestCase):
         self.stage(feed, "dev")
         payload = pipeline.verify_jws(feed, pipeline.ANDROID_FEED_TYPE, self.public)
         self.assertEqual((payload["source"], payload["revision"], payload["certificate_sha256"]), (self.source, 5, self.spec["certificate_sha256"]))
+        with zipfile.ZipFile(self.build / "missing-engine.apk", "w") as archive:
+            # Another library keeps arm64 in the APK's advertised ABIs.
+            archive.writestr("lib/arm64-v8a/libother.so", "not the engine")
+            archive.writestr("lib/armeabi-v7a/libgojni.so", "synthetic engine")
+        with self.assertRaisesRegex(ValueError, "APK missing Go engine"):
+            pipeline.inspect_artifact({"target": "android-generic", "revision": 5, "core_version": "1.2.0"},
+                                      self.build / "missing-engine.apk", self.aapt, self.signer)
         for name, data in (("badging", (self.build / "badging").read_text() + "application-debuggable\n"),
                            ("manifest", (self.build / "manifest").read_text().replace("1.2.0", "1.1.9")),
                            ("cert", f"Signer #1 certificate SHA-256 digest: {'8' * 64}\n")):

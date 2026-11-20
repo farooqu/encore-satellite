@@ -7,13 +7,17 @@ The target remains planned/release-unsupported. Nothing here publishes a feed.
 
 ## What the app does
 
-The encrypted ESPHome API exposes **APK update**, **Update channel** (`dev` or
-`stable`) and **Check for updates**. Existing installs default to `dev`; the
+In Home Assistant, pair Encore with the encrypted ESPHome integration. It exposes
+**APK update**, **Update channel** (`dev` or `stable`), **Check for updates** and
+the **APK update status** diagnostic sensor. Fresh and existing installs default to `dev`; the
 explicit selection persists alongside pairing/dashboard/privacy state. There is
-no channel fallback. Checks run when the service is created, every six hours
+no channel fallback. Checks run when the satellite starts, every six hours
 while it lives, on channel selection and on ESPHome check requests. A stopped
-app is not a scheduled/background updater. Failures report unknown, not up to
-date. Version labels show the installed/eligible shared-core SemVer and versionCode.
+app is not a scheduled/background updater. The update entity shows the installed
+and eligible shared-core SemVer; versionCode remains a separate install gate.
+Without a verified newer offer, Home Assistant receives the installed version
+as both values (it ignores the ESPHome update missing-state flag). Use **APK update
+status** to distinguish check failures from “Up to date” and see when local approval is needed.
 Eligibility requires a strictly newer `core_version` **and** a higher versionCode;
 equal/older semantic versions are never offered, even at higher package revisions.
 Build metadata is ignored for precedence; prereleases follow SemVer ordering.
@@ -23,7 +27,7 @@ core SemVer are not a “next semantic version” OTA update. The installed core
 embedded from `release/targets.json` in BuildConfig and APK manifest metadata;
 the downloaded APK's actual core metadata must match its signed feed entry.
 
-An ESPHome install command rechecks the selected channel, downloads to private
+Choose **Install** on the **APK update** entity. Encore rechecks the selected channel, downloads to private
 storage, verifies size/SHA-256, and independently checks the APK package name,
 versionCode/versionName and signer against both metadata and the installed app.
 Changing channel during a request discards its result. A persisted selection
@@ -40,9 +44,11 @@ confirmation. If necessary, the user enables **Allow from this source** in Andro
 Settings, then chooses **Review downloaded update** again. Android's own package installer asks for final
 confirmation. No Activity is forced to the foreground by a remote command.
 Notification permission is optional: the Settings review action also finds the pending
-request. Cancel/interruption does not uninstall the old app or delete its data;
-retry via ESPHome. “Verified / approve installation” does **not** mean installed.
-Successful replacement can kill the process; reopen/start Encore afterward.
+request. Opening Android's installer does not mark the APK installed. If the user
+cancels, the verified request stays retryable on the device while still eligible;
+if it expires or is superseded, request the update again through Home Assistant.
+Successful replacement can kill the process; reopen Encore and **Start satellite**
+to reconnect and report the installed version from the replacement APK.
 There is no automatic boot/replacement restart or installation-success claim.
 
 Signed release builds use `com.encore.satellite.incubator` on both channels,
@@ -60,9 +66,11 @@ known Android debug key as a production trust root.
 ## Build and signing pipeline
 
 `android.yml` rebuilds the Go AAR, assembles the debug APK and runs native tests
-and lint on PRs/pushes without signing secrets. Its separate manual **signed
+and lint on PRs/pushes without signing secrets. It also smoke-builds and inspects
+the release variant with a disposable key; that APK is never uploaded. Its separate manual **signed
 candidate** job runs only on main, after checks, in the `android-signing`
-environment. It signs a release APK, verifies the expected certificate, and
+environment. It signs one full release APK for fresh install and OTA, checks the
+compiled package, versions, launcher, installer permission, both ARM engine libraries and signer, and
 retains APK/digest/source as a 30-day Actions artifact. This is a review candidate,
 not an immutable public release store. No GitHub release/feed upload is performed.
 
@@ -72,16 +80,20 @@ privately in GitHub environment settings, never a chat or tracked file:
 
 - Secrets: `ANDROID_KEYSTORE_BASE64`, `ANDROID_STORE_PASSWORD`,
   `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD`.
-- Variables: `ANDROID_CERTIFICATE_SHA256` (lowercase hex),
-  `ANDROID_UPDATE_BASE_URL` (HTTPS), `ANDROID_UPDATE_PUBLIC_KEY` (base64 raw
-  32-byte Ed25519 public key, **not** PEM/SPKI).
+- Set `ANDROID_CERTIFICATE_SHA256` (lowercase hex) and
+  `ANDROID_METADATA_PUBLIC_KEY_PEM` (Ed25519 public key) as repository variables
+  shared by APK signing, release retention and feed activation. Do not override
+  them per environment. The candidate job derives the embedded raw Ed25519 key
+  from the same PEM used to verify feeds; there is no separate raw-key setting in CI.
+- Set `ANDROID_UPDATE_BASE_URL` to the HTTPS feed base, with no query or fragment.
 - Keep the corresponding Ed25519 metadata private key offline, separate from the
   CI APK signing key. Keep recoverable, access-controlled backups of both keys.
 
 Local release builds use `ENCORE_KEYSTORE` (absolute file path),
 `ENCORE_STORE_PASSWORD`, `ENCORE_KEY_ALIAS`, `ENCORE_KEY_PASSWORD`,
 `ENCORE_VERSION_CODE`, `ENCORE_VERSION_NAME`, `ENCORE_UPDATE_BASE_URL`, and
-`ENCORE_UPDATE_PUBLIC_KEY`. Invoke `build-android :app:assembleRelease` with the
+`ENCORE_UPDATE_PUBLIC_KEY` (base64 raw 32-byte Ed25519 public key, not PEM).
+Invoke `build-android :app:assembleRelease` with the
 SDK/NDK/Java prerequisites from the device README. Missing inputs fail closed;
 release signing never falls back to debug. Debug builds without trust inputs
 still work, but report update trust as unprovisioned.
@@ -93,13 +105,12 @@ publication. The candidate workflow validates the existing ledger/inventory and
 requires its current reserved versionCode before loading the keystore. It does
 not lock competing local builds or deliver durable corresponding sources.
 Use the separate [retention and channel pipeline](publishing.md) for signed
-immutable receipts/source assets, publication and feed selection. Its main-driven
-dev path is implemented with separate build and publication approvals. Approved
-build setup reserves both experimental targets centrally and clean-builds/tests
-both, twice, including the APK signature and exact source kits. Metadata keys
-stay offline; final signing/publication consumes those bytes without rebuilding.
-Publishing is disabled, and both dev/stable feed activation stay manual;
-cohort/source review and concrete owner approval remain gates.
+immutable receipts/source assets, publication and feed selection. Android is not
+part of the Biscuit main-driven build. Prepare the Android receipt from a clean,
+reserved source and two byte-identical assemblies, with their matching sources.
+Use the retained release APK itself for first installs and as the feed download;
+no second package or channel-specific APK is needed. Publishing is disabled and
+dev/stable activation stays separately approved and manual.
 
 ## Feed contract and trust lifecycle
 
@@ -191,5 +202,11 @@ those inputs are validated,
 central release/cohort/revision/withdrawal rules and the license audit are met,
 and a real device demonstrates higher-version replacement retaining state,
 user cancellation, denied install/notification permission, interrupted download,
-expired/bad metadata, channel changes, restart and recovery. No physical-device
-or production publication result is implied by local tests.
+expired/bad metadata, channel changes, restart and recovery. A fresh install of the
+same signed artifact also needs qualification. Check the actual package name, signer
+and highest deployed versionCode before attempting replacement. Older builds with
+an empty saved channel may need **Update channel → dev** selected once in Home
+Assistant to write it explicitly before they can receive their first OTA; the newer
+updater accepts either older representation of the default. No physical-device or
+production publication result is implied by local tests. Keep 0.2.0 on hold until
+Android self-update and Biscuit's separate persistent image and OTA are qualified.

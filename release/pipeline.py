@@ -180,12 +180,18 @@ def inspect_artifact(receipt, path, aapt="aapt", apksigner="apksigner"):
     require(package and sdk and abis and len(certs) == 1, "missing APK identity/SDK/ABI/single signer")
     require(package[1] == "com.encore.satellite.incubator" and int(package[2]) == receipt["revision"], "wrong APK identity")
     require("application-debuggable" not in badging, "debug APK is not distributable")
+    require("launchable-activity: name='com.encore.satellite.MainActivity'" in badging, "APK has no Encore launcher")
+    require("uses-permission: name='android.permission.REQUEST_INSTALL_PACKAGES'" in badging, "APK cannot request update installation")
     # Read the compiled manifest, not an operator-supplied core version claim.
     require(re.search(r'com\.encore\.core_version.*?\n\s*A: android:value[^\n]*="'
                       + re.escape(receipt["core_version"]) + r'"', manifest), "APK embedded core mismatch")
     require(int(sdk[1]) >= 26, "unsupported APK minimum SDK")
+    apk_abis = re.findall(r"'([^']+)'", abis[1])
+    require(set(apk_abis) == {"arm64-v8a", "armeabi-v7a"}, "release APK must contain both ARM ABIs")
+    with zipfile.ZipFile(path) as apk:
+        require(all(f"lib/{abi}/libgojni.so" in apk.namelist() for abi in apk_abis), "APK missing Go engine for an advertised ABI")
     return {"application_id": package[1], "version": package[3], "min_sdk": int(sdk[1]),
-            "abis": re.findall(r"'([^']+)'", abis[1]), "certificate_sha256": certs[0]}
+            "abis": apk_abis, "certificate_sha256": certs[0]}
 
 
 def inspect_native_pair(receipt, path):
@@ -526,6 +532,13 @@ def main():
     native = commands.add_parser("prepare-native-ci")
     native.add_argument("build", type=Path)
     native.add_argument("--output", type=Path, required=True)
+    android = commands.add_parser("inspect-android", help="verify a signed fresh-install/OTA release APK")
+    android.add_argument("apk", type=Path)
+    android.add_argument("--revision", required=True, type=int)
+    android.add_argument("--version", required=True)
+    android.add_argument("--certificate-sha256", required=True)
+    android.add_argument("--aapt", default="aapt")
+    android.add_argument("--apksigner", default="apksigner")
     signer = commands.add_parser("sign-receipt")
     signer.add_argument("directory", type=Path)
     signer.add_argument("--key", type=Path, required=True)
@@ -552,6 +565,13 @@ def main():
         prepare(read_json(args.spec), args.output, args.aapt, args.apksigner)
     elif args.command == "prepare-native-ci":
         prepare_native_ci(args.build, args.output)
+    elif args.command == "inspect-android":
+        receipt = {"target": "android-generic", "revision": args.revision,
+                   "core_version": json.loads((ROOT / "release/targets.json").read_text())["core_version"]}
+        apk = inspect_artifact(receipt, args.apk, args.aapt, args.apksigner)
+        require(apk["version"] == args.version, "unexpected APK versionName")
+        require(apk["certificate_sha256"] == args.certificate_sha256, "unexpected APK signer")
+        print(json.dumps({**apk, "core_version": receipt["core_version"], "revision": args.revision}, sort_keys=True))
     elif args.command == "sign-receipt":
         data = (args.directory / "receipt.json").read_bytes()
         receipt = validate_receipt(json.loads(data, object_pairs_hook=unique))

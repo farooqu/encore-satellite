@@ -18,6 +18,8 @@ import kotlinx.coroutines.sync.Mutex
 import org.json.JSONObject
 import java.security.MessageDigest
 
+private const val READY_TO_INSTALL = "Downloaded and verified. In Encore, open Settings → Review downloaded update to approve installation."
+
 /** No channel/feed/key/installer commands come from dashboard JavaScript. */
 class ApkUpdates(private val context: Context, private val runtime: Runtime, private val scope: CoroutineScope) : UpdateHost {
     private val mutex = Mutex()
@@ -29,7 +31,8 @@ class ApkUpdates(private val context: Context, private val runtime: Runtime, pri
     }
     private var worker: Worker? = null
     private val installed = context.packageManager.getPackageInfo(context.packageName, signingFlags())
-    private val current = "${BuildConfig.CORE_VERSION} (${revision(installed)})"
+    private val current = BuildConfig.CORE_VERSION
+    private val preferences = context.getSharedPreferences("updates", Context.MODE_PRIVATE)
 
     init {
         runtime.configureUpdates(this, current)
@@ -67,11 +70,9 @@ class ApkUpdates(private val context: Context, private val runtime: Runtime, pri
                 val verifier = synchronized(lifecycle) {
                     if (worker !== active || !active.job.isActive) return@launch
                     if (runtime.updateChannel() != channel || runtime.updateGeneration() != generation) return@launch
-                    val preferences = context.getSharedPreferences("updates", Context.MODE_PRIVATE)
-                    val pending = preferences.getString("pending", null)?.let { JSONObject(it) }
-                    if (pending != null && (pending.optString("channel") != channel || pending.optLong("selection_generation") != generation)) {
-                        preferences.edit().remove("pending").commit()
-                        context.getSystemService(NotificationManager::class.java).cancel(3)
+                    val pending = preferences.getString("pending", null)
+                    if (pending != null && runCatching { validateRequest(context, JSONObject(pending)) }.isFailure) {
+                        clearPending()
                     }
                     runtime.updateStatus(channel, generation, "", if (install) "Downloading and verifying APK" else "Checking updates", false, install)
                     active.verifier ?: Mobile.newUpdates(BuildConfig.UPDATE_BASE_URL, BuildConfig.UPDATE_PUBLIC_KEY, context.packageName,
@@ -98,16 +99,23 @@ class ApkUpdates(private val context: Context, private val runtime: Runtime, pri
                     ensureActive()
                     if (worker !== active || !active.job.isActive) return@launch
                     if (runtime.updateChannel() != channel || runtime.updateGeneration() != generation) return@launch
+                    val pending = preferences.getString("pending", null)?.let { JSONObject(it) }
+                    // A later trusted check may supersede a previously downloaded APK.
+                    val ready = release != null && pending != null && pending.getString("sha256") == release.getString("sha256") &&
+                        pending.getLong("revision") == release.getLong("revision") &&
+                        runCatching { validateRequest(context, pending) }.isSuccess && updateFile(context, pending).isFile
+                    if (pending != null && !ready) clearPending()
                     if (release == null) {
                         runtime.updateStatus(channel, generation, current, "Up to date", true, false)
                     } else {
-                        val latest = "${release.getString("core_version")} (${release.getLong("revision")})"
+                        val latest = release.getString("core_version")
                         if (install) {
-                            context.getSharedPreferences("updates", Context.MODE_PRIVATE).edit()
+                            preferences.edit()
                                 .putString("pending", release.toString()).commit().also { check(it) { "Could not retain update request" } }
-                            notifyReady(context)
+                            // Notification denial must not hide a verified request from Settings or HA.
+                            runCatching { notifyReady(context) }
                         }
-                        runtime.updateStatus(channel, generation, latest, if (install) "Verified. Use Settings → Review downloaded update on this device to approve installation." else "Update available", true, false)
+                        runtime.updateStatus(channel, generation, latest, if (install || ready) READY_TO_INSTALL else "Update available", true, false)
                     }
                 }
             } catch (error: CancellationException) {
@@ -115,11 +123,16 @@ class ApkUpdates(private val context: Context, private val runtime: Runtime, pri
             } catch (error: Exception) {
                 synchronized(lifecycle) {
                     if (worker === active && active.job.isActive) {
-                        runtime.updateStatus(channel, generation, "", "Update unavailable: ${error.message}", false, false)
+                        runtime.updateStatus(channel, generation, "", "Update unavailable: ${error.message?.take(180)}", false, false)
                     }
                 }
             } finally { mutex.unlock() }
         }
+    }
+
+    private fun clearPending() {
+        check(preferences.edit().remove("pending").commit()) { "Could not clear the previous update request" }
+        context.getSystemService(NotificationManager::class.java).cancel(3)
     }
 }
 
@@ -156,7 +169,8 @@ private fun validateRequest(context: Context, release: JSONObject) {
     // update after another APK replacement. Recheck the feed against the new floor.
     check(release.getString("installed_core_version") == BuildConfig.CORE_VERSION) { "Installed core changed; check again" }
     val settings = JSONObject(context.filesDir.resolve("engine/encore.json").readText())
-    check(settings.optString("channel", "dev") == release.getString("channel")) { "Update channel changed" }
+    // Older fresh installs persisted an empty channel; Go has always treated it as Dev.
+    check(settings.optString("channel").ifEmpty { "dev" } == release.getString("channel")) { "Update channel changed" }
     check(settings.optLong("channel_generation") == release.getLong("selection_generation")) { "Update selection changed; request again" }
     check(System.currentTimeMillis() / 1000 < release.getLong("expires")) { "Update metadata expired; check again" }
 }
@@ -181,7 +195,8 @@ class UpdateActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val preferences = getSharedPreferences("updates", MODE_PRIVATE)
-        val release = runCatching { JSONObject(checkNotNull(preferences.getString("pending", null))) }.getOrNull()
+        val request = preferences.getString("pending", null)
+        val release = runCatching { JSONObject(checkNotNull(request)) }.getOrNull()
         if (release == null) {
             AlertDialog.Builder(this).setTitle("No downloaded update")
                 .setMessage("Choose a channel and request the APK update through ESPHome first.")
@@ -202,17 +217,22 @@ class UpdateActivity : Activity() {
                         runOnUiThread {
                             if (isFinishing || isDestroyed) return@runOnUiThread
                             // Selection may have changed while this UI task was queued.
-                            val reviewFailure = failure ?: runCatching { validateRequest(this, release) }.exceptionOrNull()
+                            val reviewFailure = failure ?: runCatching {
+                                check(preferences.getString("pending", null) == request) { "Update request changed; open it again" }
+                                validateRequest(this, release)
+                            }.exceptionOrNull()
                             if (reviewFailure != null) {
-                                preferences.edit().remove("pending").apply()
                                 AlertDialog.Builder(this).setTitle("Update rejected").setMessage(reviewFailure.message)
                                     .setPositiveButton("Close") { _, _ -> finish() }.setOnCancelListener { finish() }.show()
                             } else {
-                                val uri = FileProvider.getUriForFile(this, "$packageName.updates", updateFile(this, release))
-                                @Suppress("DEPRECATION")
-                                val intent = Intent(Intent.ACTION_INSTALL_PACKAGE).setDataAndType(uri, "application/vnd.android.package-archive").addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                                runCatching { startActivity(intent) }.onSuccess { preferences.edit().remove("pending").apply() }
-                                    .onFailure { android.widget.Toast.makeText(this, "Installer unavailable: ${it.message}", android.widget.Toast.LENGTH_LONG).show() }
+                                // Launch is not success. Keep the verified request retryable if Android is cancelled.
+                                runCatching {
+                                    val uri = FileProvider.getUriForFile(this, "$packageName.updates", updateFile(this, release))
+                                    @Suppress("DEPRECATION")
+                                    startActivity(Intent(Intent.ACTION_INSTALL_PACKAGE)
+                                        .setDataAndType(uri, "application/vnd.android.package-archive")
+                                        .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION))
+                                }.onFailure { android.widget.Toast.makeText(this, "Installer unavailable: ${it.message}", android.widget.Toast.LENGTH_LONG).show() }
                                 finish()
                             }
                         }

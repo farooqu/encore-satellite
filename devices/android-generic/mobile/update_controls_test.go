@@ -36,11 +36,12 @@ func TestAPKUpdateCapabilityOnESPHome(t *testing.T) {
 			ctx, cancel := context.WithCancel(t.Context())
 			done := make(chan error, 1)
 			s := &esphome.Server{Handler: r, WriteTimeout: time.Second}
+			r.control = s
 			go func() { done <- s.Serve(ctx, l) }()
 			t.Cleanup(func() { cancel(); <-done })
 			send, receive := loopbackPeer(t, l.Addr().String())
 			send(&api.ListEntitiesRequest{})
-			var update, check uint32
+			var update, check, diagnostic uint32
 		listing:
 			for {
 				switch v := receive().(type) {
@@ -51,6 +52,10 @@ func TestAPKUpdateCapabilityOnESPHome(t *testing.T) {
 				case *api.ListEntitiesUpdateResponse:
 					if v.ObjectId == "apk_update" {
 						update = v.Key
+					}
+				case *api.ListEntitiesTextSensorResponse:
+					if v.ObjectId == "apk_update_status" {
+						diagnostic = v.Key
 					}
 				case *api.ListEntitiesButtonResponse:
 					if v.ObjectId == "reload_dashboard" {
@@ -66,10 +71,13 @@ func TestAPKUpdateCapabilityOnESPHome(t *testing.T) {
 			if (!supported && (update != 0 || check != 0)) || (supported && (update != 0x454e4303 || check != 0x454e4305)) {
 				t.Fatalf("unexpected update capability: update=%x check=%x", update, check)
 			}
+			if (diagnostic != 0) != supported {
+				t.Fatalf("unexpected APK diagnostic: %x", diagnostic)
+			}
 			send(&api.SubscribeStatesRequest{})
 			var state *api.UpdateStateResponse
-		states:
-			for {
+			var microphone, bluetooth bool
+			for !microphone || !bluetooth {
 				switch v := receive().(type) {
 				case *api.UpdateStateResponse:
 					state = v
@@ -77,11 +85,13 @@ func TestAPKUpdateCapabilityOnESPHome(t *testing.T) {
 					if v.Key == dashboardKey {
 						t.Fatal("renderer-less runtime published dashboard state")
 					}
-				case *api.SwitchStateResponse: // Bluetooth state follows the update snapshot.
-					break states
+				case *api.BinarySensorStateResponse:
+					microphone = true
+				case *api.SwitchStateResponse:
+					bluetooth = true
 				}
 			}
-			if (state != nil) != supported || (supported && (state.Key != update || state.CurrentVersion != "1.2.3" || !state.MissingState)) {
+			if (state != nil) != supported || (supported && (state.Key != update || state.CurrentVersion != "1.2.3" || state.LatestVersion != state.CurrentVersion || !state.MissingState)) {
 				t.Fatalf("unexpected update state: %v", state)
 			}
 			if err := r.Handle(ctx, nil, &api.TextCommandRequest{Key: dashboardKey, State: "https://dashboard.example.test"}); err != nil || r.config.Dashboard != "" {
@@ -97,6 +107,33 @@ func TestAPKUpdateCapabilityOnESPHome(t *testing.T) {
 				case <-time.After(time.Second):
 					t.Fatal("check command did not reach updater")
 				}
+				assertStatus := func(latest, status string, known, busy bool) {
+					t.Helper()
+					if got, ok := receive().(*api.UpdateStateResponse); !ok || got.CurrentVersion != "1.2.3" ||
+						got.LatestVersion != latest || got.MissingState == known || got.InProgress != busy {
+						t.Fatalf("unexpected update state: %v", got)
+					}
+					if got, ok := receive().(*api.TextSensorStateResponse); !ok || got.Key != diagnostic || got.State != status {
+						t.Fatalf("unexpected diagnostic: %v", got)
+					}
+				}
+				r.UpdateStatus("dev", 0, "1.2.4", "Available", true, false)
+				assertStatus("1.2.4", "Available", true, false)
+				send(&api.UpdateCommandRequest{Key: update, Command: api.UpdateCommand_UPDATE_COMMAND_UPDATE})
+				select {
+				case install := <-requests:
+					if !install {
+						t.Fatal("Install command was treated as a check")
+					}
+				case <-time.After(time.Second):
+					t.Fatal("Install command did not reach updater")
+				}
+				r.UpdateStatus("dev", 0, "", "Downloading", false, true)
+				assertStatus("1.2.4", "Downloading", true, true)
+				r.UpdateStatus("dev", 0, "1.2.4", "Approve on device", true, false)
+				assertStatus("1.2.4", "Approve on device", true, false)
+				r.UpdateStatus("dev", 0, "", "Bad feed signature", false, false)
+				assertStatus("1.2.3", "Bad feed signature", false, false)
 			}
 		})
 	}

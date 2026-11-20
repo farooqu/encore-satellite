@@ -1,4 +1,5 @@
 import java.util.Base64
+import java.net.URI
 import groovy.json.JsonSlurper
 
 plugins {
@@ -26,8 +27,11 @@ gradle.taskGraph.whenReady {
         require(env(it).isNotBlank()) { "$it is required for a signed release" }
     }
     require(env("ENCORE_VERSION_CODE").toInt() in 3..2100000000)
-    require(env("ENCORE_UPDATE_BASE_URL").startsWith("https://"))
-    require(Base64.getDecoder().decode(env("ENCORE_UPDATE_PUBLIC_KEY")).size == 32)
+    val feed = URI(env("ENCORE_UPDATE_BASE_URL"))
+    require(feed.scheme == "https" && feed.host != null && feed.userInfo == null && feed.query == null && feed.fragment == null) {
+        "ENCORE_UPDATE_BASE_URL must be an HTTPS base URL without credentials, a query or a fragment"
+    }
+    require(Base64.getDecoder().decode(env("ENCORE_UPDATE_PUBLIC_KEY")).size == 32) { "ENCORE_UPDATE_PUBLIC_KEY must be a raw Ed25519 public key" }
   }
 }
 android {

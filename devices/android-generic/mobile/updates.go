@@ -20,11 +20,17 @@ type UpdateHost interface {
 
 const updateKey = controls.AndroidUpdateKey
 const channelKey = controls.AndroidChannelKey
+const updateStatusKey = 0x454e4306
+
+func updateDiagnostic(state *api.UpdateStateResponse) *api.TextSensorStateResponse {
+	return &api.TextSensorStateResponse{Key: updateStatusKey, State: state.ReleaseSummary}
+}
 
 func (r *Runtime) ConfigureUpdates(host UpdateHost, current string) {
 	r.mu.Lock()
 	r.updater = host
-	r.updateState = &api.UpdateStateResponse{Key: updateKey, CurrentVersion: current, MissingState: true, Title: "Encore APK"}
+	r.updateState = &api.UpdateStateResponse{Key: updateKey, CurrentVersion: current, LatestVersion: current,
+		MissingState: true, Title: "Encore APK", ReleaseSummary: "Not checked yet"}
 	r.mu.Unlock()
 }
 
@@ -40,22 +46,33 @@ func (r *Runtime) UpdateGeneration() int64 {
 	return r.config.ChannelGeneration
 }
 
-// UpdateStatus reports failures as unknown, not a falsely up-to-date package.
+// Home Assistant's ESPHome update entity ignores MissingState and treats a
+// different, unparseable version (including an empty string) as installable.
+// Use the installed version when there is no verified offer; the diagnostic
+// sensor distinguishes a check failure from a successful up-to-date check.
 func (r *Runtime) UpdateStatus(channel string, generation int64, latest, status string, known, busy bool) {
 	r.mu.Lock()
 	if r.config.Channel != channel || r.config.ChannelGeneration != generation || r.updateState == nil || r.updater == nil {
 		r.mu.Unlock()
 		return
 	}
+	if busy && latest == "" && !r.updateState.MissingState {
+		// Keep the verified offer visible while rechecking it for installation.
+		latest, known = r.updateState.LatestVersion, true
+	}
+	if !known || latest == "" {
+		latest = r.updateState.CurrentVersion
+	}
 	r.updateState.LatestVersion = latest
 	r.updateState.ReleaseSummary = status
 	r.updateState.MissingState = !known
 	r.updateState.InProgress = busy
-	state := proto.Clone(r.updateState)
+	state := proto.Clone(r.updateState).(*api.UpdateStateResponse)
 	control := r.control
 	r.mu.Unlock()
 	if control != nil {
 		_ = control.Broadcast(state)
+		_ = control.Broadcast(updateDiagnostic(state))
 	}
 }
 

@@ -11,6 +11,7 @@ import kotlinx.coroutines.*
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.json.JSONObject
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
@@ -38,7 +39,14 @@ class ApkUpdatesTest {
         info.signatures = arrayOf(Signature("abcd"))
         shadowOf(context.packageManager).installPackage(info)
         val preferences = context.getSharedPreferences("updates", Context.MODE_PRIVATE)
-        val pending = """{"channel":"dev","selection_generation":4,"version":"retained"}"""
+        context.filesDir.resolve("engine").mkdirs()
+        context.filesDir.resolve("engine/encore.json").writeText("""{"channel":"dev","channel_generation":4}""")
+        val digest = "a".repeat(64)
+        context.filesDir.resolve("updates/apks").mkdirs()
+        context.filesDir.resolve("updates/apks/$digest.apk").writeText("download fixture")
+        val pending = JSONObject().put("channel", "dev").put("selection_generation", 4)
+            .put("installed_core_version", BuildConfig.CORE_VERSION).put("expires", System.currentTimeMillis() / 1000 + 3600)
+            .put("revision", 8).put("sha256", digest).toString()
         preferences.edit().clear().putString("pending", pending).commit()
         UpdateRuntimeShadow.statuses.clear()
         val blocked = UpdateAttempt()
@@ -71,7 +79,8 @@ class ApkUpdatesTest {
                 UpdateMobileShadow.attempt = fresh
                 updater.start()
                 assertTrue("Restart must accept fresh results", fresh.published.await(3, TimeUnit.SECONDS))
-                assertTrue(UpdateRuntimeShadow.statuses.contains("Update available"))
+                assertTrue(UpdateRuntimeShadow.statuses.any { it.startsWith("Downloaded and verified") })
+                assertEquals("Checking the same release must retain approval instructions", pending, preferences.getString("pending", null))
                 updater.stop()
             }
         } finally {
@@ -112,7 +121,7 @@ class UpdateRuntimeShadow {
     @Implementation fun updateGeneration() = 4L
     @Implementation fun updateStatus(channel: String, generation: Long, latest: String, status: String, known: Boolean, busy: Boolean) {
         statuses.add(status)
-        if (status == "Update available") UpdateMobileShadow.attempt.published.countDown()
+        if (status.startsWith("Downloaded and verified")) UpdateMobileShadow.attempt.published.countDown()
     }
 }
 
@@ -124,7 +133,7 @@ class UpdateFetchShadow {
         attempt.calls.incrementAndGet()
         attempt.entered.countDown()
         check(attempt.release.await(5, TimeUnit.SECONDS)) { "Test never released Fetch" }
-        return """{"release":{"core_version":"1.2.0","revision":8}}"""
+        return """{"release":{"core_version":"1.2.0","revision":8,"sha256":"${"a".repeat(64)}"}}"""
     }
     @Implementation fun close() { attempt.closed.countDown() }
 }

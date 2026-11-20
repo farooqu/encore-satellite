@@ -94,6 +94,7 @@ func Open(directory string, output Audio) (*Runtime, error) {
 		}
 		id[0] = (id[0] | 2) & 0xfe
 		r.config.MAC = net.HardwareAddr(id[:]).String()
+		r.config.Channel = "dev"
 		if err = r.save(r.config); err != nil {
 			return nil, err
 		}
@@ -450,6 +451,15 @@ func (r *Runtime) Handle(ctx context.Context, c *esphome.Conn, msg proto.Message
 		if err := r.writable().List(c.Send); err != nil {
 			return err
 		}
+		r.mu.Lock()
+		hasUpdater := r.updater != nil
+		r.mu.Unlock()
+		if hasUpdater {
+			if err := c.Send(&api.ListEntitiesTextSensorResponse{Key: updateStatusKey, ObjectId: "apk_update_status",
+				Name: "APK update status", EntityCategory: esphome.CategoryDiagnostic}); err != nil {
+				return err
+			}
+		}
 		return r.proxy.Handle(ctx, c, msg)
 	case *api.SubscribeStatesRequest:
 		if state := r.sensors().IlluminanceState(); state != nil {
@@ -468,6 +478,9 @@ func (r *Runtime) Handle(ctx context.Context, c *esphome.Conn, msg proto.Message
 		r.mu.Unlock()
 		states := []proto.Message{&api.SelectStateResponse{Key: channelKey, State: channel}}
 		if state != nil {
+			if err := c.Send(updateDiagnostic(state)); err != nil {
+				return err
+			}
 			states = append(states, state)
 		}
 		states = append(states, &api.TextStateResponse{Key: dashboardKey, State: v})
@@ -522,20 +535,19 @@ func (r *Runtime) setUpdateChannel(_ *esphome.Conn, m *api.SelectCommandRequest)
 	}
 	r.config = next
 	if r.updateState != nil {
-		r.updateState.LatestVersion = ""
+		r.updateState.LatestVersion = r.updateState.CurrentVersion
+		r.updateState.ReleaseSummary = "Checking selected channel"
 		r.updateState.MissingState = true
 		r.updateState.InProgress = false
 	}
 	host := r.updater
 	r.mu.Unlock()
-	if err := r.broadcastControl(&api.SelectStateResponse{Key: channelKey, State: m.State}); err != nil {
-		return err
-	}
+	broadcastErr := r.broadcastControl(&api.SelectStateResponse{Key: channelKey, State: m.State})
 	r.UpdateStatus(m.State, next.ChannelGeneration, "", "Checking selected channel", false, false)
 	if host != nil {
 		host.RequestUpdate(m.State, next.ChannelGeneration, false)
 	}
-	return nil
+	return broadcastErr
 }
 
 func (r *Runtime) requestUpdate(install bool) {
