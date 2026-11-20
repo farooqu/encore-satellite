@@ -126,19 +126,22 @@ class PipelineTests(unittest.TestCase):
 
     def test_dev_publication_requires_matching_draft_and_immutable_readback(self):
         self.prepare()
-        for remote_matches, immutable, expected in (
-            (False, True, "uploaded assets differ; leave draft unpublished"),
-            (True, False, "/releases/tag/android-generic-r5"),
-            (True, True, None),
+        for tagged_source, remote_matches, immutable, expected in (
+            (None, False, True, "uploaded assets differ; leave draft unpublished"),
+            (None, True, False, "/releases/tag/android-generic-r5"),
+            (None, True, True, None),
+            (self.source, True, True, None),
+            ("0" * 40, True, True, "existing Dev tag must be a lightweight tag at the exact receipt source"),
         ):
-            with self.subTest(remote_matches=remote_matches, immutable=immutable):
+            with self.subTest(tagged_source=tagged_source, remote_matches=remote_matches, immutable=immutable):
                 operations = []
 
                 def read_command(*command):
                     if command[0] == "git":
                         return b""
                     if "/git/matching-refs/" in command[-1]:
-                        return b"[]"
+                        refs = [{"ref": "refs/tags/android-generic-r5", "object": {"type": "commit", "sha": tagged_source}}] if tagged_source else []
+                        return json.dumps(refs).encode()
                     if command[-1].endswith("releases?per_page=100"):
                         return b"[[]]"
                     if command[-1].endswith("releases/tags/android-generic-r5"):
@@ -148,6 +151,9 @@ class PipelineTests(unittest.TestCase):
                 def write_command(command, *, check):
                     operation = command[2]
                     operations.append(operation)
+                    if operation == "create":
+                        self.assertEqual("--verify-tag" in command, tagged_source is not None)
+                        self.assertEqual("--target" in command, tagged_source is None)
                     if operation == "download":
                         draft = Path(command[-1])
                         for asset in self.output.iterdir():
@@ -166,7 +172,8 @@ class PipelineTests(unittest.TestCase):
                             pipeline.publish(self.output, self.receipt, execute=True, automatic_dev=True)
                     else:
                         pipeline.publish(self.output, self.receipt, execute=True, automatic_dev=True)
-                self.assertEqual(operations, ["create", "upload", "download"] + (["edit"] if remote_matches else []))
+                wanted = [] if tagged_source not in (None, self.source) else ["create", "upload", "download"]
+                self.assertEqual(operations, wanted + (["edit"] if wanted and remote_matches else []))
 
     def test_tampered_or_incomplete_assets_and_receipts_fail(self):
         self.prepare()

@@ -519,9 +519,17 @@ def publish(directory, receipt, execute, *, automatic_dev=False):
         settings = subprocess.check_output(["gh", "api", f"repos/{REPOSITORY}/immutable-releases"],
                                            env={**os.environ, "GH_TOKEN": token}, stderr=subprocess.PIPE)
         require(json.loads(settings).get("enabled") is True, "enable immutable releases before publication")
-    # Existing tag OR draft means stop; inspect any partial failure manually.
-    existing = run("gh", "api", f"repos/{REPOSITORY}/git/matching-refs/tags/{release_tag}")
-    require(not any(r["ref"] == f"refs/tags/{release_tag}" for r in json.loads(existing)), "release tag already exists")
+    existing = json.loads(run("gh", "api", f"repos/{REPOSITORY}/git/matching-refs/tags/{release_tag}"))
+    existing = next((r["object"] for r in existing if r["ref"] == f"refs/tags/{release_tag}"), None)
+    if existing:
+        require(automatic_dev, "release tag already exists")
+        require(existing["type"] == "commit" and existing["sha"] == receipt["source"],
+                "existing Dev tag must be a lightweight tag at the exact receipt source")
+        # Never create/retarget a tag on this path. GitHub's built-in token may
+        # publish against a reviewed existing tag even when it cannot create it.
+        pos = commands[0].index("--target")
+        commands[0][pos:pos+2] = ["--verify-tag"]
+    # Never overwrite a published release or resume a partial draft here.
     releases = json.loads(run("gh", "api", "--paginate", "--slurp", f"repos/{REPOSITORY}/releases?per_page=100"))
     require(not any(r["tag_name"] == release_tag for page in releases for r in page), "release/draft already exists; inspect, never overwrite")
     for command in commands[:2]:

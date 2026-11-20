@@ -57,7 +57,7 @@ automatic signing, Dev retention and activation are chained using that run's
 artifacts through the unattended, exact-main environments
 `release-dev-publication` and `release-dev-feeds`. The manual environments
 `release-publication` and `release-feeds` retain their reviewer gates.
-Manual signing never publishes, regardless of the publication switch.
+The manual `sign` operation never publishes, regardless of the publication switch.
 Native feeds are stored under `biscuit-native-ab/incubator/` so they cannot
 affect recovery installs.
 
@@ -191,6 +191,15 @@ independently requires the same confirmation. If a release was published but
 immutability cannot be confirmed, inspect the reported public tag; do not
 activate it, delete it automatically, or retry blindly. Manual publication
 still requires `IMMUTABILITY_READ_TOKEN` for its pre-publication settings check.
+
+If GitHub refuses to create a tag for an earlier `main` commit with the built-in
+token, check that no release or draft exists. An authorized maintainer may
+create the exact release tag as a lightweight tag pointing at the verified
+receipt source, never ahead of or behind it. Automatic Dev retention accepts
+that exact existing tag without creating or retargeting it. For Biscuit, use
+`operation=deliver-dev` on protected `main` with the original build run ID,
+source SHA and reviewed receipt SHA256 to deliver the same candidate to Dev.
+This operation forces Dev and keeps its existing policy and environment gates.
 
 Never retry a failed publication blindly. A failure can leave an uploaded draft
 or a completed immutable release. Inspect its tag, source SHA, assets and
