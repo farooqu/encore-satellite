@@ -19,11 +19,13 @@ import org.robolectric.shadows.ShadowSensor
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
 class LightSensorTest {
-    @Test fun absentHardwareDoesNotClaimCapability() {
-        LightSensorHost(ApplicationProvider.getApplicationContext()).use { host ->
-            assertFalse(host.supported())
-            assertTrue(JSONObject(host.sample()).has("problem"))
-        }
+    @Test fun noLightSensorCreatesNoHostOrLooper() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val manager = shadowOf(context.getSystemService(SensorManager::class.java))
+        manager.addSensor(ShadowSensor.newInstance(Sensor.TYPE_PROXIMITY))
+        val existingLoopers = ShadowLooper.getAllLoopers().toSet()
+        assertNull(LightSensorHost.create(context))
+        assertEquals(existingLoopers, ShadowLooper.getAllLoopers().toSet())
     }
 
     @Test fun registrationFailureIsUnknownNotAbsentAndCanRecover() {
@@ -33,11 +35,10 @@ class LightSensorTest {
         manager.addSensor(sensor)
         manager.setForceListenersToFail(true)
         val existingLoopers = ShadowLooper.getAllLoopers().toSet()
-        LightSensorHost(context).use { host ->
+        checkNotNull(LightSensorHost.create(context)).use { host ->
             // Other test classes can leave quit loopers in Robolectric's registry.
             val sensorLooper = ShadowLooper.getAllLoopers().single { it !in existingLoopers }
             shadowOf(sensorLooper).idle()
-            assertTrue(host.supported())
             assertEquals("Light sensor registration failed", JSONObject(host.sample()).getString("problem"))
             manager.setForceListenersToFail(false)
             host.sample()
@@ -53,30 +54,32 @@ class LightSensorTest {
         }
     }
 
-    @Test fun luxUsesEventAgeAndCapabilitySurvivesBadSamplesAndShutdown() {
+    @Test fun luxUsesEventAgeAndRejectsBadAndPostShutdownSamples() {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val sensor = ShadowSensor.newInstance(Sensor.TYPE_LIGHT)
         shadowOf(context.getSystemService(SensorManager::class.java)).addSensor(sensor)
-        val host = LightSensorHost(context)
-        assertTrue(host.supported())
-        assertTrue(JSONObject(host.sample()).has("problem"))
-        SystemClock.sleep(10)
-        val event = SensorEventBuilder.newBuilder().setSensor(sensor)
-            .setTimestamp(SystemClock.elapsedRealtimeNanos()).setValues(floatArrayOf(213.5f)).build()
-        host.onSensorChanged(event)
-        assertEquals(213.5, JSONObject(host.sample()).getDouble("lux"), 0.0)
-        SystemClock.sleep(1_234)
-        assertTrue(JSONObject(host.sample()).getLong("age_ms") >= 1_234)
-        event.values[0] = Float.NaN
-        host.onSensorChanged(event)
-        assertFalse(JSONObject(host.sample()).has("lux"))
-        assertTrue(host.supported())
-        event.values[0] = 0f
-        host.onSensorChanged(event)
-        assertEquals(0.0, JSONObject(host.sample()).getDouble("lux"), 0.0)
-        host.close()
-        host.onSensorChanged(event)
-        assertFalse(JSONObject(host.sample()).has("lux"))
-        assertTrue(host.supported())
+        checkNotNull(LightSensorHost.create(context)).use { host ->
+            assertEquals("Awaiting light sample", JSONObject(host.sample()).getString("problem"))
+            SystemClock.sleep(10)
+            val event = SensorEventBuilder.newBuilder().setSensor(sensor)
+                .setTimestamp(SystemClock.elapsedRealtimeNanos()).setValues(floatArrayOf(213.5f)).build()
+            host.onSensorChanged(event)
+            assertEquals(213.5, JSONObject(host.sample()).getDouble("lux"), 0.0)
+            SystemClock.sleep(1_234)
+            assertTrue(JSONObject(host.sample()).getLong("age_ms") >= 1_234)
+            event.values[0] = Float.NaN
+            host.onSensorChanged(event)
+            val invalid = JSONObject(host.sample())
+            assertEquals("Invalid light sample", invalid.getString("problem"))
+            assertFalse(invalid.has("lux"))
+            event.values[0] = 0f
+            host.onSensorChanged(event)
+            assertEquals(0.0, JSONObject(host.sample()).getDouble("lux"), 0.0)
+            host.close()
+            host.onSensorChanged(event)
+            val stopped = JSONObject(host.sample())
+            assertEquals("Light sensor stopped", stopped.getString("problem"))
+            assertFalse(stopped.has("lux"))
+        }
     }
 }

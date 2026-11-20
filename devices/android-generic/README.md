@@ -90,6 +90,9 @@ two Gradle workers and a 3 GB Gradle heap.
    full URL, including its origin. Invalid URLs retain the previous configuration.
    **Reload dashboard** is a separate button entity. No dashboard list or backend
    selector exists. Previously configured full dashboard URLs remain valid.
+   The read-only **Microphone muted** (`microphone_muted`) binary sensor reports
+   the app's microphone privacy latch and updates when it changes. It does not
+   report Android permission or recorder readiness and cannot unmute the app.
 4. Sign into HA in the dashboard itself. Only the HA dashboard is a WebView;
    settings, privacy, voice, waveform and music controls are Compose. Initial
    login supports same-origin flows only (no external-IdP allowlist yet).

@@ -111,7 +111,7 @@ class EncoreService : Service() {
             val engine = checkNotNull(runtime) { "Engine unavailable" }
             if (!mutable.value.running) {
                 // Optional sensor failure never prevents voice/music startup.
-                light = runCatching { LightSensorHost(this) }.getOrNull()
+                light = runCatching { LightSensorHost.create(this) }.getOrNull()
                 engine.setLightHost(light)
                 if (!microphoneForeground && !bluetoothStart) engine.setMuted(true)
                 engine.start()

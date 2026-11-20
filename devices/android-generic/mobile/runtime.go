@@ -18,7 +18,7 @@ import (
 	"time"
 
 	"github.com/farooqu/encore-satellite/backends/bluetooth"
-	lightapi "github.com/farooqu/encore-satellite/backends/illuminance"
+	"github.com/farooqu/encore-satellite/backends/esphome/sensors"
 	"github.com/farooqu/encore-satellite/backends/incubator"
 	"github.com/farooqu/encore-satellite/core/audio"
 	"github.com/farooqu/encore-satellite/core/illuminance"
@@ -66,6 +66,7 @@ type Runtime struct {
 	radio               *androidhost.BluetoothScanner
 	bluetoothConfigured bool
 	light               *illuminance.Monitor
+	microphone          *sensors.Microphone
 }
 
 func Open(directory string, output Audio) (*Runtime, error) {
@@ -107,6 +108,7 @@ func Open(directory string, output Audio) (*Runtime, error) {
 	}
 	r.engine = session.New(androidhost.NewPlayback(output))
 	r.engine.SetMuted(r.config.Muted)
+	r.microphone = sensors.NewMicrophone(r.config.Muted)
 	r.voice = &incubator.Server{Engine: r.engine, Name: r.Name(), MAC: r.config.MAC, Version: "0.1.0-android", EnableModels: true}
 	r.proxy = r.newBluetooth(nil)
 	return r, nil
@@ -152,9 +154,12 @@ func (r *Runtime) Start() error {
 	r.cancel = cancel
 	r.control = &esphome.Server{Info: esphome.Info{Name: r.Name(), FriendlyName: "Encore Incubator", MACAddress: r.config.MAC, Manufacturer: "Encore", Model: "Generic Android", Version: "0.1.0", ProjectName: "encore.incubator"}, PSK: &key, Handler: r, WriteTimeout: 2 * time.Second}
 	r.control.Info.BluetoothFeatures = r.proxy.Features()
+	control := r.control
+	r.done.Go(func() { r.microphone.Run(ctx, control.Broadcast) })
 	r.done.Go(func() { r.proxy.Run(ctx) })
 	if r.light.Supported() {
-		r.done.Go(func() { r.light.Run(ctx, func() { _ = r.control.Broadcast(lightapi.State(r.light)) }) })
+		sources := r.sensors()
+		r.done.Go(func() { sources.Illuminance.Run(ctx, func() { _ = control.Broadcast(sources.IlluminanceState()) }) })
 	}
 	r.done.Go(func() {
 		if err := r.voice.Serve(ctx, vl); err != nil {
@@ -204,6 +209,7 @@ func (r *Runtime) Stop()       { _ = r.engine.Stop() }
 func (r *Runtime) SetMuted(muted bool) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	defer func() { r.microphone.SetMuted(r.config.Muted) }()
 	// Gate before saving and retain effective mute for subsequent settings saves.
 	// Only an explicitly requested, successfully saved unmute clears this latch.
 	r.engine.SetMuted(true)
@@ -247,10 +253,14 @@ func (r *Runtime) DismissProblem() {
 const dashboardKey uint32 = 0x454e4301
 const reloadKey uint32 = 0x454e4302
 
+func (r *Runtime) sensors() sensors.Sources {
+	return sensors.Sources{Illuminance: r.light, MicrophoneMuted: r.microphone.Muted}
+}
+
 func (r *Runtime) Handle(ctx context.Context, c *esphome.Conn, msg proto.Message) error {
 	switch m := msg.(type) {
 	case *api.ListEntitiesRequest:
-		if err := lightapi.List(c, r.light); err != nil {
+		if err := r.sensors().List(c.Send); err != nil {
 			return err
 		}
 		if err := c.Send(&api.ListEntitiesTextResponse{ObjectId: "dashboard_url", Key: dashboardKey, Name: "Dashboard URL", EntityCategory: esphome.CategoryConfig, MaxLength: 1024}); err != nil {
@@ -270,10 +280,13 @@ func (r *Runtime) Handle(ctx context.Context, c *esphome.Conn, msg proto.Message
 		}
 		return r.proxy.Handle(ctx, c, msg)
 	case *api.SubscribeStatesRequest:
-		if state := lightapi.State(r.light); state != nil {
+		if state := r.sensors().IlluminanceState(); state != nil {
 			if err := c.Send(state); err != nil {
 				return err
 			}
+		}
+		if err := r.microphone.Send(c.Send); err != nil {
+			return err
 		}
 		r.mu.Lock()
 		v := r.config.Dashboard

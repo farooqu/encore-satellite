@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	lightapi "github.com/farooqu/encore-satellite/backends/illuminance"
+	"github.com/farooqu/encore-satellite/backends/esphome/sensors"
 	"golang.org/x/sys/unix"
 )
 
@@ -22,7 +22,7 @@ func TestBiscuitLightRequiresProbedDriverAndPreservesLuxUnits(t *testing.T) {
 	assertAbsent := func() {
 		t.Helper()
 		m, err := discoverLight(dir)
-		if err != nil || m.Supported() || lightapi.State(m) != nil {
+		if err != nil || m.Supported() || (sensors.Sources{Illuminance: m}).IlluminanceState() != nil {
 			t.Fatalf("advertised absent hardware: %v", err)
 		}
 	}
@@ -44,7 +44,7 @@ func TestBiscuitLightRequiresProbedDriverAndPreservesLuxUnits(t *testing.T) {
 	if err != nil || !m.Supported() {
 		t.Fatalf("probed hardware: %v", err)
 	}
-	if state := lightapi.State(m); state == nil || !state.MissingState {
+	if state := (sensors.Sources{Illuminance: m}).IlluminanceState(); state == nil || !state.MissingState {
 		t.Fatal("missing initial sample was not unknown")
 	}
 	source := biscuitLight{dir}

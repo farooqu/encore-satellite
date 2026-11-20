@@ -2,6 +2,7 @@ package biscuit
 
 import (
 	"context"
+	"errors"
 	"math"
 	"net"
 	"path/filepath"
@@ -11,6 +12,8 @@ import (
 	"time"
 
 	"github.com/farooqu/encore-satellite/backends/bluetooth"
+	"github.com/farooqu/encore-satellite/backends/esphome/sensors"
+	"github.com/farooqu/encore-satellite/backends/incubator"
 	"github.com/farooqu/encore-satellite/core/music"
 	"github.com/farooqu/encore-satellite/core/session"
 	"github.com/farooqu/encore-satellite/platforms/linux"
@@ -18,6 +21,104 @@ import (
 	esphome "github.com/ygelfand/go-esphome-device"
 	"github.com/ygelfand/go-esphome-device/api"
 )
+
+func TestMicrophoneMutedEncryptedAPI(t *testing.T) {
+	var driver atomic.Int32
+	driver.Store(1)
+	gate := linux.NewPrivacy(func() (bool, error) {
+		switch driver.Load() {
+		case 0:
+			return false, nil
+		case 1:
+			return true, nil
+		default:
+			return false, errors.New("privacy unreadable")
+		}
+	})
+	p, _ := buttonMusic(t)
+	muted, _ := gate.Check(nil)
+	d := &biscuitControls{Proxy: bluetooth.New(managementRadio{}, bluetooth.Options{}), player: p, microphone: sensors.NewMicrophone(muted)}
+	key, err := esphome.GeneratePSK()
+	if err != nil {
+		t.Fatal(err)
+	}
+	l, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- d.Serve(ctx, l, esphome.Info{Name: "privacy-test"}, key) }()
+	t.Cleanup(func() { cancel(); l.Close(); <-done })
+	peer := newManagementPeer(t, l.Addr().String(), key)
+	peer.send(&api.ListEntitiesRequest{})
+	var mic, speaker uint32
+listing:
+	for {
+		switch v := peer.receive().(type) {
+		case *api.ListEntitiesBinarySensorResponse:
+			if v.ObjectId == "microphone_muted" {
+				mic = v.Key
+			}
+		case *api.ListEntitiesSwitchResponse:
+			if v.ObjectId == "speaker_mute" {
+				speaker = v.Key
+			}
+		case *api.ListEntitiesDoneResponse:
+			break listing
+		}
+	}
+	if mic == 0 || speaker == 0 || mic == speaker {
+		t.Fatal("missing separate read-only microphone and speaker entities")
+	}
+	lastSpeaker := make(map[*managementPeer]*api.SwitchStateResponse)
+	state := func(peer *managementPeer, wantMic, wantSpeaker bool) {
+		t.Helper()
+		for {
+			switch v := peer.receive().(type) {
+			case *api.SwitchStateResponse:
+				if v.Key == speaker {
+					lastSpeaker[peer] = v
+				}
+			case *api.BinarySensorStateResponse:
+				speakerState := lastSpeaker[peer]
+				if v.Key == mic && v.State == wantMic && !v.MissingState && speakerState != nil && speakerState.State == wantSpeaker && !speakerState.MissingState {
+					return
+				}
+			}
+		}
+	}
+	peer.send(&api.SubscribeStatesRequest{})
+	state(peer, true, false)
+	captureDone := make(chan error, 1)
+	go func() {
+		voice := &incubator.Server{Engine: session.New(p)}
+		captureDone <- capture(ctx, &captureStub{}, func() (bool, error) { return false, nil }, gate, voice, &captureMeter{origin: time.Now()}, func() {}, d.microphone.SetMuted)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		if err := <-captureDone; err != nil {
+			t.Error(err)
+		}
+	})
+	driver.Store(0)
+	state(peer, false, false)
+	peer.send(&api.SwitchCommandRequest{Key: speaker, State: true})
+	state(peer, false, true)
+	driver.Store(1)
+	state(peer, true, true)
+	peer.send(&api.SwitchCommandRequest{Key: speaker, State: false})
+	state(peer, true, false)
+	driver.Store(0)
+	state(peer, false, false)
+	driver.Store(-1)
+	state(peer, true, false)
+	other := newManagementPeer(t, l.Addr().String(), key)
+	other.send(&api.SubscribeStatesRequest{})
+	state(other, true, false)
+	driver.Store(0)
+	state(other, false, false)
+}
 
 func TestNativeVolumeEncryptedAPIAndPhysicalKeys(t *testing.T) {
 	p, sample := buttonMusic(t)

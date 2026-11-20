@@ -65,21 +65,22 @@ func TestLinuxManagementEncryptedAPI(t *testing.T) {
 	}
 	peer.send(&api.ListEntitiesRequest{})
 	actions := map[string]uint32{}
-	entities := map[string]bool{}
+	entities := map[string]uint32{}
 listing:
 	for {
 		switch v := peer.receive().(type) {
 		case *api.ListEntitiesServicesResponse:
 			actions[v.Name] = v.Key
-		case *api.ListEntitiesSwitchResponse:
-			entities[v.ObjectId] = true
-		case *api.ListEntitiesTextSensorResponse:
-			entities[v.ObjectId] = true
+		case interface {
+			GetObjectId() string
+			GetKey() uint32
+		}:
+			entities[v.GetObjectId()] = v.GetKey()
 		case *api.ListEntitiesDoneResponse:
 			break listing
 		}
 	}
-	if len(actions) != 8 || !entities["bluetooth_proxy"] || !entities["sendspin"] || !entities["ssh_enabled"] || !entities["wifi_ssid"] {
+	if len(actions) != 8 || entities["bluetooth_proxy"] == 0 || entities["sendspin"] == 0 || entities["ssh_enabled"] == 0 || entities["ssh_running"] == 0 || entities["ssh_fingerprints"] == 0 || entities["wifi_ssid"] == 0 || entities["wifi_change_status"] == 0 {
 		t.Fatalf("incomplete combined listing: actions=%v entities=%v", actions, entities)
 	}
 	call := func(name string, args ...*api.ExecuteServiceArgument) *api.ExecuteServiceResponse {
@@ -144,11 +145,11 @@ listing:
 	for !sshAvailable || !wifiUnavailable {
 		switch state := peer.receive().(type) {
 		case *api.SwitchStateResponse:
-			if state.Key == sshEnabledKey {
+			if state.Key == entities["ssh_enabled"] {
 				sshAvailable = state.State && !state.MissingState
 			}
 		case *api.TextSensorStateResponse:
-			if state.Key == wifiStateKey {
+			if state.Key == entities["wifi_change_status"] {
 				wifiUnavailable = state.State == "unavailable"
 			}
 		}

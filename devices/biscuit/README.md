@@ -222,6 +222,11 @@ report and fails closed on an unreadable privacy state. Capture rechecks that
 state, and unmute does not resume stopped music. The ring reflects privacy with
 priority over voice/timers. No code reads the unsafe `power_button_state` node.
 
+Home Assistant can observe **Microphone muted** (`microphone_muted`), a read-only
+ESPHome binary sensor. It is on whenever the privacy gate blocks capture,
+including while the hardware state settles after a press or cannot be read.
+It does not control or mirror **Speaker mute**.
+
 Evdev-record tests through the real input reader cover taps/holds/releases,
 volume limits, Action start/cancel/timer Stop, duplicate downs, muted Action and
 driver-lag/privacy behavior. The event node, audio hardware and voice peer are

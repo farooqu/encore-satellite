@@ -3,9 +3,9 @@ package biscuit
 import (
 	"context"
 	"encoding/json"
-	"strings"
 	"time"
 
+	"github.com/farooqu/encore-satellite/backends/esphome/sensors"
 	esphome "github.com/ygelfand/go-esphome-device"
 	"github.com/ygelfand/go-esphome-device/api"
 	"google.golang.org/protobuf/proto"
@@ -20,13 +20,7 @@ type management struct {
 	args    map[uint32]int
 }
 
-var (
-	sshEnabledKey = (&esphome.Base{ObjectID: "ssh_enabled"}).Key()
-	sshRunningKey = (&esphome.Base{ObjectID: "ssh_running"}).Key()
-	sshKeysKey    = (&esphome.Base{ObjectID: "ssh_fingerprints"}).Key()
-	wifiSSIDKey   = (&esphome.Base{ObjectID: "wifi_ssid"}).Key()
-	wifiStateKey  = (&esphome.Base{ObjectID: "wifi_change_status"}).Key()
-)
+var sshEnabledKey = (&esphome.Base{ObjectID: "ssh_enabled"}).Key()
 
 func newManagement(ssh *sshManager) (*management, error) {
 	m := &management{ssh: ssh, wifi: newWiFiManager(), actions: esphome.NewEntities(), args: make(map[uint32]int)}
@@ -88,20 +82,26 @@ func newManagement(ssh *sshManager) (*management, error) {
 	return m, nil
 }
 
-func (m *management) list(ctx context.Context, c *esphome.Conn) error {
-	entities := []proto.Message{
-		&api.ListEntitiesTextSensorResponse{Key: wifiSSIDKey, ObjectId: "wifi_ssid", Name: "Wi-Fi SSID", EntityCategory: esphome.CategoryDiagnostic},
-		&api.ListEntitiesTextSensorResponse{Key: wifiStateKey, ObjectId: "wifi_change_status", Name: "Wi-Fi change status", EntityCategory: esphome.CategoryDiagnostic},
+func (m *management) sensorSources() sensors.Sources {
+	var sources sensors.Sources
+	if m.wifi != nil {
+		sources.WiFi = func() (string, string, error) {
+			status, err := m.wifi.status()
+			return status.SSID, status.State, err
+		}
 	}
 	if m.ssh != nil {
-		entities = append(entities,
-			&api.ListEntitiesSwitchResponse{Key: sshEnabledKey, ObjectId: "ssh_enabled", Name: "SSH enabled", Icon: "mdi:console-network", EntityCategory: esphome.CategoryConfig},
-			&api.ListEntitiesBinarySensorResponse{Key: sshRunningKey, ObjectId: "ssh_running", Name: "SSH running", EntityCategory: esphome.CategoryDiagnostic},
-			&api.ListEntitiesTextSensorResponse{Key: sshKeysKey, ObjectId: "ssh_fingerprints", Name: "SSH public-key fingerprints", EntityCategory: esphome.CategoryDiagnostic},
-		)
+		sources.SSH = func() (bool, []string, error) {
+			status, err := m.ssh.status()
+			return status.Running, status.Fingerprints, err
+		}
 	}
-	for _, entity := range entities {
-		if err := c.Send(entity); err != nil {
+	return sources
+}
+
+func (m *management) list(ctx context.Context, c *esphome.Conn) error {
+	if m.ssh != nil {
+		if err := c.Send(&api.ListEntitiesSwitchResponse{Key: sshEnabledKey, ObjectId: "ssh_enabled", Name: "SSH enabled", Icon: "mdi:console-network", EntityCategory: esphome.CategoryConfig}); err != nil {
 			return err
 		}
 	}
@@ -120,26 +120,15 @@ func (m *management) execute(ctx context.Context, c *esphome.Conn, r *api.Execut
 	return m.actions.Handle(ctx, c, r)
 }
 
-func (m *management) states() []proto.Message {
-	w, wifiErr := m.wifi.status()
-	if wifiErr != nil {
-		w.State = "unavailable"
+func (m *management) states() ([]proto.Message, *api.SwitchStateResponse) {
+	sources := m.sensorSources()
+	if m.ssh == nil {
+		return sources.States(), nil
 	}
-	// One unavailable supervisor must not disconnect the other controls or
-	// publish its previous state as if it were still authoritative.
-	states := []proto.Message{
-		&api.TextSensorStateResponse{Key: wifiSSIDKey, State: w.SSID, MissingState: wifiErr != nil},
-		&api.TextSensorStateResponse{Key: wifiStateKey, State: w.State},
-	}
-	if m.ssh != nil {
-		s, sshErr := m.ssh.status()
-		states = append(states,
-			&api.SwitchStateResponse{Key: sshEnabledKey, State: s.Enabled, MissingState: sshErr != nil},
-			&api.BinarySensorStateResponse{Key: sshRunningKey, State: s.Running, MissingState: sshErr != nil},
-			&api.TextSensorStateResponse{Key: sshKeysKey, State: strings.Join(s.Fingerprints, ", "), MissingState: sshErr != nil},
-		)
-	}
-	return states
+	// The writable switch and diagnostics must describe the same SSH snapshot.
+	status, err := m.ssh.status()
+	sources.SSH = func() (bool, []string, error) { return status.Running, status.Fingerprints, err }
+	return sources.States(), &api.SwitchStateResponse{Key: sshEnabledKey, State: status.Enabled, MissingState: err != nil}
 }
 
 func (d *biscuitControls) watchManagement(ctx context.Context) {
@@ -151,7 +140,10 @@ func (d *biscuitControls) watchManagement(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			states := d.management.states()
+			states, ssh := d.management.states()
+			if ssh != nil {
+				states = append(states, ssh)
+			}
 			b, _ := json.Marshal(states) // Only public status, never action arguments.
 			if string(b) != previous {
 				_ = d.broadcast()

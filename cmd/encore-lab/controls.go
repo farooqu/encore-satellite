@@ -8,6 +8,7 @@ import (
 	"net"
 	"time"
 
+	"github.com/farooqu/encore-satellite/backends/esphome/sensors"
 	"github.com/farooqu/encore-satellite/core/session"
 	esphome "github.com/ygelfand/go-esphome-device"
 	"github.com/ygelfand/go-esphome-device/api"
@@ -35,9 +36,8 @@ var modeNames = map[session.Backend]string{
 }
 
 var (
-	modeKey    = (&esphome.Select{Base: esphome.Base{ObjectID: "voice_mode"}}).Key()
-	runningKey = (&esphome.TextSensor{Base: esphome.Base{ObjectID: "running_voice_mode"}}).Key()
-	applyKey   = (&esphome.Button{Base: esphome.Base{ObjectID: "apply_voice_mode"}}).Key()
+	modeKey  = (&esphome.Select{Base: esphome.Base{ObjectID: "voice_mode"}}).Key()
+	applyKey = (&esphome.Button{Base: esphome.Base{ObjectID: "apply_voice_mode"}}).Key()
 )
 
 func (s *voiceControls) Features() esphome.BluetoothFeature {
@@ -72,16 +72,19 @@ func (s *voiceControls) Serve(ctx context.Context, listener net.Listener, info e
 }
 
 func (s *voiceControls) Handle(ctx context.Context, c *esphome.Conn, message proto.Message) error {
+	sources := sensors.Sources{RunningVoiceMode: func() string { return modeNames[s.RunningMode] }}
 	switch m := message.(type) {
 	case *api.ListEntitiesRequest:
 		for _, entity := range []proto.Message{
 			&api.ListEntitiesSelectResponse{ObjectId: "voice_mode", Key: modeKey, Name: "Voice mode (restart required)", EntityCategory: esphome.CategoryConfig, Options: []string{modeNames[session.Assist], modeNames[session.Incubator]}},
-			&api.ListEntitiesTextSensorResponse{ObjectId: "running_voice_mode", Key: runningKey, Name: "Running voice mode", EntityCategory: esphome.CategoryDiagnostic},
 			&api.ListEntitiesButtonResponse{ObjectId: "apply_voice_mode", Key: applyKey, Name: "Apply and restart", Icon: "mdi:restart", EntityCategory: esphome.CategoryConfig},
 		} {
 			if err := c.Send(entity); err != nil {
 				return err
 			}
+		}
+		if err := sources.List(c.Send); err != nil {
+			return err
 		}
 		// Bluetooth terminates the combined entity list, exactly once.
 		if s.Bluetooth == nil {
@@ -91,8 +94,10 @@ func (s *voiceControls) Handle(ctx context.Context, c *esphome.Conn, message pro
 		if err := c.Send(&api.SelectStateResponse{Key: modeKey, State: modeNames[s.Mode()]}); err != nil {
 			return err
 		}
-		if err := c.Send(&api.TextSensorStateResponse{Key: runningKey, State: modeNames[s.RunningMode]}); err != nil {
-			return err
+		for _, state := range sources.States() {
+			if err := c.Send(state); err != nil {
+				return err
+			}
 		}
 	case *api.SelectCommandRequest:
 		if m.Key == modeKey {

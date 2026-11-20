@@ -13,6 +13,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/farooqu/encore-satellite/backends/bluetooth"
+	"github.com/farooqu/encore-satellite/backends/esphome/sensors"
 	"github.com/farooqu/encore-satellite/core/music"
 	"github.com/farooqu/encore-satellite/internal/esphomepairing"
 	"github.com/farooqu/encore-satellite/platforms/linuxsendspin"
@@ -200,6 +201,7 @@ type biscuitControls struct {
 	updates       *linuxUpdates
 	ring          *ringSettings
 	announcements *announcementPlayer
+	microphone    *sensors.Microphone
 	mu            sync.Mutex
 	stateMu       sync.Mutex
 	subscribers   map[*esphome.Conn]struct{}
@@ -213,6 +215,17 @@ var (
 	musicPlayKey     = (&esphome.Button{Base: esphome.Base{ObjectID: "sendspin_play"}}).Key()
 	musicStopKey     = (&esphome.Button{Base: esphome.Base{ObjectID: "sendspin_stop"}}).Key()
 )
+
+func (d *biscuitControls) sensorSources() sensors.Sources {
+	var sources sensors.Sources
+	if d.management != nil {
+		sources = d.management.sensorSources()
+	}
+	if d.microphone != nil {
+		sources.MicrophoneMuted = d.microphone.Muted
+	}
+	return sources
+}
 
 func (d *biscuitControls) Handle(ctx context.Context, c *esphome.Conn, msg proto.Message) error {
 	switch v := msg.(type) {
@@ -248,6 +261,9 @@ func (d *biscuitControls) Handle(ctx context.Context, c *esphome.Conn, msg proto
 			if err := c.Send(ent); err != nil {
 				return err
 			}
+		}
+		if err := d.sensorSources().List(c.Send); err != nil {
+			return err
 		}
 		if d.management != nil {
 			// The Proxy's standalone handler ends the listing itself. Compose
@@ -396,16 +412,27 @@ func (d *biscuitControls) state(c *esphome.Conn) error {
 			return err
 		}
 	}
+	if d.microphone != nil {
+		if err := d.microphone.Send(c.Send); err != nil {
+			return err
+		}
+	}
 	if d.management != nil {
-		for _, state := range d.management.states() {
+		diagnostics, ssh := d.management.states()
+		for _, state := range diagnostics {
 			if err := c.Send(state); err != nil {
 				return err
 			}
 		}
+		if ssh != nil {
+			return c.Send(ssh)
+		}
 	}
 	return nil
 }
-func (d *biscuitControls) broadcast() error {
+func (d *biscuitControls) broadcast() error { return d.sendToSubscribers(d.state) }
+
+func (d *biscuitControls) sendToSubscribers(send func(*esphome.Conn) error) error {
 	d.mu.Lock()
 	peers := make([]*esphome.Conn, 0, len(d.subscribers))
 	for c := range d.subscribers {
@@ -413,7 +440,7 @@ func (d *biscuitControls) broadcast() error {
 	}
 	d.mu.Unlock()
 	for _, c := range peers {
-		if err := d.state(c); err != nil {
+		if err := send(c); err != nil {
 			_ = c.Close()
 		}
 	}
@@ -433,6 +460,13 @@ func (d *biscuitControls) Run(ctx context.Context) {
 	workers.Go(func() { d.Proxy.Run(ctx) })
 	if d.music != nil {
 		workers.Go(func() { d.music.Run(ctx) })
+	}
+	if d.microphone != nil {
+		workers.Go(func() {
+			d.microphone.Run(ctx, func(msg proto.Message) error {
+				return d.sendToSubscribers(func(c *esphome.Conn) error { return c.Send(msg) })
+			})
+		})
 	}
 	workers.Go(func() {
 		for {

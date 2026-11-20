@@ -18,6 +18,7 @@ import (
 	"github.com/ygelfand/go-esphome-device/mdns"
 
 	"github.com/farooqu/encore-satellite/backends/bluetooth"
+	"github.com/farooqu/encore-satellite/backends/esphome/sensors"
 	"github.com/farooqu/encore-satellite/backends/incubator"
 	"github.com/farooqu/encore-satellite/core/ble"
 	"github.com/farooqu/encore-satellite/core/session"
@@ -162,7 +163,7 @@ func Run(parent context.Context, c Config) error {
 	if err != nil {
 		return err
 	}
-	controls := &biscuitControls{Proxy: proxy, player: player, management: admin, ring: ringPolicy, announcements: newAnnouncementPlayer(engine, player)}
+	controls := &biscuitControls{Proxy: proxy, player: player, management: admin, ring: ringPolicy, announcements: newAnnouncementPlayer(engine, player), microphone: sensors.NewMicrophone(muted)}
 	if controls.updates, err = newARM64Updates(); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("read ARM64 boot identity: %w", err)
 	}
@@ -251,7 +252,7 @@ func Run(parent context.Context, c Config) error {
 	})
 	ready := make(chan struct{}, 1)
 	start(func() error {
-		return capture(ctx, mic, loss, gate, voice, meter, func() { ready <- struct{}{} }, player.SetMusicPrivacy)
+		return capture(ctx, mic, loss, gate, voice, meter, func() { ready <- struct{}{} }, player.SetMusicPrivacy, controls.microphone.SetMuted)
 	})
 	for {
 		select {

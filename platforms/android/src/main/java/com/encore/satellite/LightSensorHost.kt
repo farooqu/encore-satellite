@@ -12,20 +12,27 @@ import com.encore.engine.mobile.LightHost
 import org.json.JSONObject
 
 /** Low-rate, service-owned ALS. No audio focus, wake lock or dangerous permission. */
-class LightSensorHost(context: Context) : LightHost, SensorEventListener, AutoCloseable {
-    private val manager = context.getSystemService(SensorManager::class.java)
-    private val sensor = manager?.getDefaultSensor(Sensor.TYPE_LIGHT)
-    private val thread = if (sensor != null) HandlerThread("Encore illuminance").apply { start() } else null
-    private val handler = thread?.let { Handler(it.looper) }
+class LightSensorHost private constructor(
+    private val manager: SensorManager,
+    private val sensor: Sensor,
+) : LightHost, SensorEventListener, AutoCloseable {
+    companion object {
+        fun create(context: Context): LightSensorHost? {
+            val manager = context.getSystemService(SensorManager::class.java) ?: return null
+            val sensor = manager.getDefaultSensor(Sensor.TYPE_LIGHT) ?: return null
+            return LightSensorHost(manager, sensor)
+        }
+    }
+
+    private val thread = HandlerThread("Encore illuminance").apply { start() }
+    private val handler = Handler(thread.looper)
     @Volatile private var closed = false
     private var lux = 0.0
     private var timestamp = 0L
     private var problem = "Awaiting light sample"
     private val registration = Runnable { register() }
 
-    init { handler?.post(registration) }
-
-    override fun supported() = sensor != null
+    init { handler.post(registration) }
 
     // SensorManager registers callbacks on a dedicated looper; JNI reads only
     // this short synchronized snapshot, never the main/audio/recorder threads.
@@ -35,8 +42,8 @@ class LightSensorHost(context: Context) : LightHost, SensorEventListener, AutoCl
             // TYPE_LIGHT is commonly on-change. Re-register to request a new
             // initial sample rather than inventing fresh timestamps for old data.
             // At most one retry queues behind a slow HAL operation.
-            handler?.removeCallbacks(registration)
-            handler?.post(registration)
+            handler.removeCallbacks(registration)
+            handler.post(registration)
         }
         return JSONObject().apply {
             if (closed || problem.isNotEmpty()) put("problem", if (closed) "Light sensor stopped" else problem)
@@ -45,7 +52,7 @@ class LightSensorHost(context: Context) : LightHost, SensorEventListener, AutoCl
     }
 
     private fun register() {
-        if (closed || sensor == null) return
+        if (closed) return
         // Binder/HAL calls stay on the sensor looper, outside the snapshot lock.
         runCatching {
             manager.unregisterListener(this)
@@ -79,7 +86,10 @@ class LightSensorHost(context: Context) : LightHost, SensorEventListener, AutoCl
         timestamp = 0
         // Queued behind any in-flight registration; late callbacks are fenced
         // immediately by closed. Audio shutdown never waits for a HAL call.
-        handler?.removeCallbacks(registration)
-        handler?.post { manager?.unregisterListener(this); thread?.quitSafely() }
+        handler.removeCallbacks(registration)
+        handler.post {
+            runCatching { manager.unregisterListener(this) }
+            thread.quitSafely()
+        }
     }
 }
