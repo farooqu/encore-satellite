@@ -183,6 +183,15 @@ the published release's `immutable=true`. No feed is written. Retained releases
 remain labelled experimental/prerelease even when a later qualified stable feed
 selects their eligible non-prerelease core; GitHub's badge is not qualification.
 
+**Repository requirement: keep immutable releases enabled.** Automatic Dev
+retention has no admin-read token and does not query the setting before
+publication. It still verifies the downloaded draft bytes before publishing
+and requires GitHub to report `immutable: true` afterward. Feed activation
+independently requires the same confirmation. If a release was published but
+immutability cannot be confirmed, inspect the reported public tag; do not
+activate it, delete it automatically, or retry blindly. Manual publication
+still requires `IMMUTABILITY_READ_TOKEN` for its pre-publication settings check.
+
 Never retry a failed publication blindly. A failure can leave an uploaded draft
 or a completed immutable release. Inspect its tag, source SHA, assets and
 immutability first. The workflow intentionally refuses to overwrite/resume a

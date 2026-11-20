@@ -482,7 +482,7 @@ def stage_feed(receipt, feed, public_key, site, channel, now=None):
     (site / ".nojekyll").touch()
 
 
-def publish(directory, receipt, execute):
+def publish(directory, receipt, execute, *, automatic_dev=False):
     release_tag = tag(receipt)
     changelog = f"release/changelogs/{receipt['core_version']}.md"
     if arm64_starter(receipt):
@@ -511,14 +511,14 @@ def publish(directory, receipt, execute):
     if not execute:
         print(json.dumps({"mode": "dry-run", "commands": commands}, indent=2))
         return
-    # A normal GITHUB_TOKEN cannot read admin settings. A scoped admin-read token
-    # is used only for this read; it must not be the upload credential.
-    import os
-    token = os.environ.get("IMMUTABILITY_READ_TOKEN")
-    require(token, "IMMUTABILITY_READ_TOKEN required for repository immutability preflight")
-    settings = subprocess.check_output(["gh", "api", f"repos/{REPOSITORY}/immutable-releases"],
-                                       env={**os.environ, "GH_TOKEN": token}, stderr=subprocess.PIPE)
-    require(json.loads(settings).get("enabled") is True, "enable immutable releases before publication")
+    if not automatic_dev:
+        # The manual path uses an admin-read credential only for this check.
+        import os
+        token = os.environ.get("IMMUTABILITY_READ_TOKEN")
+        require(token, "IMMUTABILITY_READ_TOKEN required for repository immutability preflight")
+        settings = subprocess.check_output(["gh", "api", f"repos/{REPOSITORY}/immutable-releases"],
+                                           env={**os.environ, "GH_TOKEN": token}, stderr=subprocess.PIPE)
+        require(json.loads(settings).get("enabled") is True, "enable immutable releases before publication")
     # Existing tag OR draft means stop; inspect any partial failure manually.
     existing = run("gh", "api", f"repos/{REPOSITORY}/git/matching-refs/tags/{release_tag}")
     require(not any(r["ref"] == f"refs/tags/{release_tag}" for r in json.loads(existing)), "release tag already exists")
@@ -533,7 +533,9 @@ def publish(directory, receipt, execute):
                 sorted((record(p) for p in directory.iterdir()), key=lambda r: r["name"]), "uploaded assets differ; leave draft unpublished")
     subprocess.run(commands[2], check=True)
     published = json.loads(run("gh", "api", f"repos/{REPOSITORY}/releases/tags/{release_tag}"))
-    require(published.get("immutable") is True, "published release immutability not confirmed; do not activate feeds")
+    require(published.get("immutable") is True,
+            f"published release immutability not confirmed: https://github.com/{REPOSITORY}/releases/tag/{release_tag}; "
+            "inspect the release before retrying; do not activate feeds")
 
 
 def main():
@@ -566,6 +568,7 @@ def main():
         sub.add_argument("--receipt-sha256", required=True)
         if name == "publish":
             sub.add_argument("--execute", action="store_true")
+            sub.add_argument("--automatic-dev", action="store_true", help="Use the repository's required immutability setting instead of an admin preflight")
         if name in {"feed", "stage-feed"}:
             sub.add_argument("--channel", choices=("dev", "stable"), required=True)
         if name == "feed":
@@ -604,7 +607,7 @@ def main():
     else:
         receipt = verify(args.directory, args.public_key, args.receipt_sha256)
         if args.command == "publish":
-            publish(args.directory, receipt, args.execute)
+            publish(args.directory, receipt, args.execute, automatic_dev=args.automatic_dev)
         elif args.command == "feed":
             feed_type = ARM64_FEED_TYPE if arm64_starter(receipt) else ANDROID_FEED_TYPE
             if arm64_starter(receipt):

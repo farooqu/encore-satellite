@@ -1,6 +1,7 @@
 """Offline public CLI contracts with disposable keys and synthetic source/bundles."""
 import copy
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -8,6 +9,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 import zipfile
 
 import pipeline
@@ -121,6 +123,50 @@ class PipelineTests(unittest.TestCase):
         self.assertIn(self.source, plan["commands"][0])
         self.assertNotIn("--clobber", str(plan))
         self.assertNotIn("dev.jws", str(plan))
+
+    def test_dev_publication_requires_matching_draft_and_immutable_readback(self):
+        self.prepare()
+        for remote_matches, immutable, expected in (
+            (False, True, "uploaded assets differ; leave draft unpublished"),
+            (True, False, "/releases/tag/android-generic-r5"),
+            (True, True, None),
+        ):
+            with self.subTest(remote_matches=remote_matches, immutable=immutable):
+                operations = []
+
+                def read_command(*command):
+                    if command[0] == "git":
+                        return b""
+                    if "/git/matching-refs/" in command[-1]:
+                        return b"[]"
+                    if command[-1].endswith("releases?per_page=100"):
+                        return b"[[]]"
+                    if command[-1].endswith("releases/tags/android-generic-r5"):
+                        return json.dumps({"immutable": immutable}).encode()
+                    self.fail(f"Unexpected read: {command}")
+
+                def write_command(command, *, check):
+                    operation = command[2]
+                    operations.append(operation)
+                    if operation == "download":
+                        draft = Path(command[-1])
+                        for asset in self.output.iterdir():
+                            shutil.copyfile(asset, draft / asset.name)
+                        if not remote_matches:
+                            (draft / "app.apk").write_bytes(b"wrong remote bytes")
+
+                with (patch.dict(os.environ, {"IMMUTABILITY_READ_TOKEN": ""}),
+                      patch.object(pipeline, "run", side_effect=read_command),
+                      patch.object(pipeline.subprocess, "run", side_effect=write_command)):
+                    with self.assertRaisesRegex(ValueError, "IMMUTABILITY_READ_TOKEN required"):
+                        pipeline.publish(self.output, self.receipt, execute=True)
+                    self.assertEqual(operations, [])
+                    if expected:
+                        with self.assertRaisesRegex(ValueError, expected):
+                            pipeline.publish(self.output, self.receipt, execute=True, automatic_dev=True)
+                    else:
+                        pipeline.publish(self.output, self.receipt, execute=True, automatic_dev=True)
+                self.assertEqual(operations, ["create", "upload", "download"] + (["edit"] if remote_matches else []))
 
     def test_tampered_or_incomplete_assets_and_receipts_fail(self):
         self.prepare()

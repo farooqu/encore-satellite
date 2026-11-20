@@ -119,10 +119,11 @@ jobs:
           python3 release/pipeline.py verify "$CANDIDATE" --public-key "$RUNNER_TEMP/root.pem" --receipt-sha256 "$RECEIPT_SHA256"
       - name: Plan or explicitly publish immutable assets (never feeds)
         env:
-          IMMUTABILITY_READ_TOKEN: ${{ secrets.IMMUTABILITY_READ_TOKEN }}
+          IMMUTABILITY_READ_TOKEN: ${{ inputs.signed_artifact == '' && secrets.IMMUTABILITY_READ_TOKEN || '' }}
         run: |
           set -euo pipefail
           args=()
           if test "$PUBLISH" = true; then args+=(--execute); fi
+          if test -n "$SIGNED_ARTIFACT"; then args+=(--automatic-dev); fi
           python3 release/pipeline.py publish "$RUNNER_TEMP/candidate" \
             --public-key "$RUNNER_TEMP/root.pem" --receipt-sha256 "$RECEIPT_SHA256" "${args[@]}"
