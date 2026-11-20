@@ -15,6 +15,7 @@ import org.robolectric.shadows.ShadowAudioRecord
 import org.robolectric.shadows.ShadowAudioTrack
 import org.robolectric.shadows.ShadowSystemClock
 import java.time.Duration
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -57,6 +58,31 @@ class AudioIoTest {
         } finally { audio.release() }
     }
 
+    @Test fun defaultCaptureFailsClosedWithoutTheAndroidNativeLibrary() {
+        val application = RuntimeEnvironment.getApplication()
+        shadowOf(application).grantPermissions(Manifest.permission.RECORD_AUDIO)
+        val read = AtomicBoolean()
+        val failure = CountDownLatch(1)
+        ShadowAudioRecord.setSourceProvider {
+            object : ShadowAudioRecord.AudioRecordSource {
+                override fun readInByteArray(buffer: ByteArray, offset: Int, size: Int, blocking: Boolean): Int {
+                    read.set(true)
+                    return -1
+                }
+            }
+        }
+        val audio = AudioIo(application)
+        try {
+            audio.startCapture({ fail("Capture delivered PCM without AEC3") }, { failure.countDown() })
+            assertTrue("Missing native library did not fail capture", failure.await(3, TimeUnit.SECONDS))
+            assertFalse("Default capture attempted a raw read", read.get())
+            assertFalse(audio.captureReady)
+        } finally {
+            audio.release()
+            ShadowAudioRecord.clearSource()
+        }
+    }
+
     @Test fun microphoneHistoryCannotCrossInputEpochsAndHealthExpires() {
         val application = RuntimeEnvironment.getApplication()
         shadowOf(application).grantPermissions(Manifest.permission.RECORD_AUDIO)
@@ -79,7 +105,8 @@ class AudioIoTest {
         ShadowAudioRecord.setSourceProvider { source }
         fun nextRead() { assertNotNull("Capture did not reach the next read", reads.poll(3, TimeUnit.SECONDS)) }
         fun block(sample: Int) = ByteArray(640) { if (it % 2 == 0) sample.toByte() else (sample shr 8).toByte() }
-        val audio = AudioIo(application)
+        // This host test supplies raw fixture PCM without the Android JNI library.
+        val audio = AudioIo(application, voiceAec = false)
         ShadowSystemClock.advanceBy(Duration.ofMillis(1))
         try {
             assertFalse(audio.captureReady)

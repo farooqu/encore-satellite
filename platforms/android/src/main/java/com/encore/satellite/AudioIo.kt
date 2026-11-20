@@ -8,6 +8,7 @@ import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioRecord
+import android.media.AudioTimestamp
 import android.media.AudioTrack
 import android.media.MediaRecorder
 import android.os.Build
@@ -16,7 +17,11 @@ import com.encore.engine.mobile.Audio
 import kotlin.math.sqrt
 
 /** One microphone feeds both the local model executor and the voice transport. */
-class AudioIo(private val context: Context) : Audio {
+class AudioIo internal constructor(private val context: Context, voiceAec: Boolean) : Audio {
+    constructor(context: Context) : this(context, voiceAec = true)
+
+    private val reference = if (voiceAec) VoiceReference() else null
+    private val renderTimestamp = AudioTimestamp()
     @Volatile private var recording = false
     data class MicrophoneFrame(val at: Long = 0, val level: Float = 0f, val waveform: List<Float> = emptyList())
     @Volatile private var microphone = MicrophoneFrame()
@@ -58,7 +63,7 @@ class AudioIo(private val context: Context) : Audio {
         visualEpoch++
         microphone = microphone.copy(level = 0f, waveform = emptyList())
     }
-    private var recorder: AudioRecord? = null
+    @Volatile private var recorder: AudioRecord? = null
     private var captureThread: Thread? = null
     private val outputLock = Any()
     private var track: AudioTrack? = null
@@ -99,14 +104,66 @@ class AudioIo(private val context: Context) : Audio {
         recording = true
         captureThread = Thread({
             android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_AUDIO)
+            var aec: VoiceAec? = null
             try {
-                val block = ByteArray(640)
-                while (recording) {
+                if (reference != null) aec = VoiceAec()
+                val block = ByteArray(if (aec != null) AEC_BLOCK_BYTES else 640)
+                val render = ByteArray(AEC_BLOCK_BYTES)
+                val captureTimestamp = AudioTimestamp()
+                var framesRead = 0L
+                var lastRead = 0L
+                var lastStart = 0L
+                var inputRoute: Int? = null
+                var generation = -1L
+                var reset = false
+                while (recording && recorder === input) {
                     val observedEpoch = synchronized(visualLock) { visualEpoch }
-                    val count = input.read(block, 0, block.size, AudioRecord.READ_BLOCKING)
+                    var count = 0
+                    do {
+                        val n = input.read(block, count, block.size - count, AudioRecord.READ_BLOCKING)
+                        if (!recording || recorder !== input) break
+                        check(n > 0 && n % 2 == 0)
+                        count += n
+                    } while (aec != null && count < block.size)
                     val observedAt = SystemClock.elapsedRealtimeNanos()
-                    if (!recording) break
-                    check(count > 0 && count % 2 == 0)
+                    if (!recording || recorder !== input) break
+                    if (aec != null && reference != null) {
+                        val now = System.nanoTime()
+                        val frameCount = count / 2
+                        val route = input.routedDevice?.id
+                        // Map the first frame using the recorder's frame clock.
+                        // Without a plausible timestamp, anchor reads to their
+                        // completion without adding scheduler jitter every block.
+                        val readAnchor = now - frameCount * VOICE_FRAME_NS
+                        val expected = lastStart + frameCount * VOICE_FRAME_NS
+                        val measured = if (input.getTimestamp(captureTimestamp, AudioTimestamp.TIMEBASE_MONOTONIC) == AudioRecord.SUCCESS)
+                            captureTimestamp.nanoTime + (framesRead - captureTimestamp.framePosition) * VOICE_FRAME_NS
+                        else Long.MIN_VALUE
+                        val start = when {
+                            measured in (readAnchor - 150_000_000L)..readAnchor -> measured
+                            lastRead != 0L && expected in (readAnchor - 20_000_000L)..readAnchor -> expected
+                            else -> readAnchor
+                        }
+                        val captureChanged = lastRead != 0L && (route != inputRoute ||
+                            now - lastRead > 80_000_000L || kotlin.math.abs(start - expected) > 20_000_000L)
+                        inputRoute = route
+                        framesRead += frameCount
+                        lastStart = start
+                        lastRead = now
+                        val (usable, currentGeneration) = synchronized(outputLock) {
+                            track?.let { observeReference(it) }
+                            reference.render(start, render) to reference.generation
+                        }
+                        if (!usable || captureChanged) {
+                            block.fill(0)
+                            reset = true
+                        } else {
+                            if (reset || generation != currentGeneration) aec.reset()
+                            reset = false
+                            aec.process(render, block)
+                        }
+                        generation = currentGeneration
+                    }
                     var energy = 0.0
                     for (i in 0 until count step 2) {
                         val sample = ((block[i].toInt() and 255) or (block[i + 1].toInt() shl 8)).toShort().toDouble()
@@ -117,17 +174,24 @@ class AudioIo(private val context: Context) : Audio {
                         val at = (point * (count / 2) / 64) * 2
                         (((block[at].toInt() and 255) or (block[at + 1].toInt() shl 8)).toShort() / 10000f).coerceIn(-1f, 1f)
                     }
-                    if (recording) consume(block.copyOf(count))
+                    if (recording && recorder === input) consume(block.copyOf(count))
                     synchronized(visualLock) {
-                        if (recording) microphone = if (observedEpoch == visualEpoch && visualTurn != null)
+                        if (recording && recorder === input) microphone = if (observedEpoch == visualEpoch && visualTurn != null)
                             MicrophoneFrame(observedAt, level, waveform)
                         else MicrophoneFrame(observedAt)
                     }
                 }
             } catch (_: Exception) {
-                if (recording) failure()
+                if (recording && recorder === input) failure()
+            } catch (_: LinkageError) {
+                // A missing or unusable native engine is a capture failure, not
+                // permission to feed raw audio through the voice path.
+                if (recording && recorder === input) failure()
             } finally {
-                synchronized(visualLock) { microphone = MicrophoneFrame(); visualEpoch++; visualTurn = null }
+                aec?.close()
+                synchronized(visualLock) {
+                    if (recorder === input) { microphone = MicrophoneFrame(); visualEpoch++; visualTurn = null }
+                }
             }
         }, "encore-microphone").also { it.start() }
     }
@@ -154,8 +218,10 @@ class AudioIo(private val context: Context) : Audio {
                     .setBufferSizeInBytes(maxOf(6400, AudioTrack.getMinBufferSize(16000,
                         AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT)))
                     .setTransferMode(AudioTrack.MODE_STREAM).build().also { track = it; it.play() }
+                if (reference != null) observeReference(output)
                 output.write(pcm, offset, pcm.size - offset, AudioTrack.WRITE_NON_BLOCKING).also {
                     if (it > 0) {
+                        reference?.accepted(pcm, offset, it)
                         val head = output.playbackHeadPosition.toLong() and 0xffffffffL
                         while (playback.isNotEmpty() && playback.first().end <= head) playback.removeFirst()
                         // Retain only accepted PCM, in at most 20 ms envelope bins.
@@ -173,6 +239,9 @@ class AudioIo(private val context: Context) : Audio {
                             start = next
                         }
                         written += it / 2
+                    } else if (it < 0 && reference != null) {
+                        // A dead track cannot supply clocks or consume the queue.
+                        releaseTrack()
                     }
                 }
             }
@@ -199,7 +268,28 @@ class AudioIo(private val context: Context) : Audio {
 
     override fun flushVoice(epoch: Long) = synchronized(outputLock) {
         this.epoch = epoch
-        track?.let { it.pause(); it.flush(); it.release() }
+        releaseTrack()
+    }
+
+    private fun observeReference(output: AudioTrack, route: Int? = output.routedDevice?.id) {
+        val tap = reference ?: return
+        val timestamp = if (output.getTimestamp(renderTimestamp)) renderTimestamp.framePosition to renderTimestamp.nanoTime else null
+        val head = output.playbackHeadPosition.toLong() and 0xffffffffL
+        tap.observe(head, System.nanoTime(), route, output.underrunCount, timestamp)
+    }
+
+    private fun releaseTrack() {
+        track?.let {
+            val route = if (reference != null) it.routedDevice?.id else null
+            it.pause()
+            if (reference != null) {
+                // Pause freezes the head. Flush resets it and discards the queued tail.
+                observeReference(it, route)
+                reference.flush(System.nanoTime())
+            }
+            it.flush()
+            it.release()
+        }
         track = null
         written = 0
         playback.clear()
@@ -207,7 +297,7 @@ class AudioIo(private val context: Context) : Audio {
 
     fun release() {
         stopCapture()
-        synchronized(outputLock) { track?.release(); track = null; epoch++; playback.clear() }
+        synchronized(outputLock) { epoch++; releaseTrack() }
     }
 
     private fun format(channel: Int) = AudioFormat.Builder().setSampleRate(16000)

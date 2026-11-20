@@ -6,6 +6,10 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 fun env(name: String) = System.getenv(name).orEmpty()
+val aecOutput = file("../../../build/android/aec")
+require(listOf("arm64-v8a", "armeabi-v7a").all { aecOutput.resolve("jniLibs/$it/libencore_aec.so").isFile }) {
+    "Run devices/android-generic/build-android to build AEC3 before packaging the APK"
+}
 val coreVersion = (JsonSlurper().parse(file("../../../release/targets.json")) as Map<*, *>)["core_version"] as String
 fun quoted(value: String) = "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r") + "\""
 abstract class EncoreLicenseAssets : Sync() {
@@ -65,6 +69,8 @@ android {
             kotlin.directories += "../../../platforms/android/src/main/java"
             res.srcDir("../../../platforms/android/src/main/res")
             assets.srcDir("../../../licenses")
+            jniLibs.directories += aecOutput.resolve("jniLibs").path
+            assets.directories += aecOutput.resolve("assets").path
         }
         getByName("test") {
             kotlin.directories += "../../../platforms/android/src/test/java"

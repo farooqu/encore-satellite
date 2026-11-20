@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# Android AEC3. No binaries or dependency sources are vendored.
+set -euo pipefail
+root="$(cd "$(dirname "$0")/../.." && pwd)"
+out="$root/build/android/aec"
+source_dir="$out/src"
+version=1.3
+name="webrtc-audio-processing-$version"
+mkdir -p "$source_dir/subprojects" "$out/assets/aec-licenses"
+if [[ ! -f "$source_dir/subprojects/$name/meson.build" ]]; then
+  curl -fsSL "https://freedesktop.org/software/pulseaudio/webrtc-audio-processing/$name.tar.xz" -o "$out/$name.tar.xz"
+  echo "2365e93e778d7b61b5d6e02d21c47d97222e9c7deff9e1d0838ad6ec2e86f1b9  $out/$name.tar.xz" | sha256sum -c -
+  tar -xJf "$out/$name.tar.xz" -C "$source_dir/subprojects"
+fi
+cp "$source_dir/subprojects/$name/subprojects/abseil-cpp.wrap" "$source_dir/subprojects/"
+cp "$root/platforms/android/src/main/cpp/"{meson.build,voice_aec.cpp} "$source_dir/"
+apm="$source_dir/subprojects/$name"
+cp "$apm/COPYING" "$out/assets/aec-licenses/webrtc-audio-processing.txt"
+cp "$apm/AUTHORS" "$apm/webrtc/"{LICENSE,PATENTS} "$out/assets/aec-licenses/"
+cp "$apm/webrtc/third_party/pffft/LICENSE" "$out/assets/aec-licenses/pffft.txt"
+
+# NDK r28 uses the x86_64 toolchain directory name on all supported host CPUs.
+case "$(uname -s)" in
+  Linux) host=linux-x86_64 ;;
+  Darwin) host=darwin-x86_64 ;;
+  *) echo 'AEC3 development builds need a Linux or macOS NDK host' >&2; exit 1 ;;
+esac
+bin="${ANDROID_NDK_HOME:?Android NDK required}/toolchains/llvm/prebuilt/$host/bin"
+cp "$ANDROID_NDK_HOME/NOTICE.toolchain" "$out/assets/aec-licenses/ndk-toolchain.txt"
+for abi in arm64-v8a armeabi-v7a; do
+  case "$abi" in
+    arm64-v8a) triple=aarch64-linux-android; family=aarch64; cpu=aarch64 ;;
+    armeabi-v7a) triple=armv7a-linux-androideabi; family=arm; cpu=armv7a ;;
+  esac
+  cross="$out/$abi.ini"
+  cat > "$cross" <<EOF
+[binaries]
+c = '$bin/${triple}26-clang'
+cpp = '$bin/${triple}26-clang++'
+ar = '$bin/llvm-ar'
+strip = '$bin/llvm-strip'
+[host_machine]
+system = 'android'
+cpu_family = '$family'
+cpu = '$cpu'
+endian = 'little'
+EOF
+  meson setup --reconfigure "$out/$abi" "$source_dir" --cross-file "$cross" \
+    --buildtype=release --default-library=static --force-fallback-for=abseil-cpp \
+    -Dwebrtc-audio-processing-1.3:gnustl=disabled -Dwebrtc-audio-processing-1.3:neon=no
+  meson compile -C "$out/$abi" -j "${AEC_JOBS:-4}" encore_aec
+  mkdir -p "$out/jniLibs/$abi"
+  cp "$out/$abi/libencore_aec.so" "$out/jniLibs/$abi/"
+done
+cp "$source_dir/subprojects/abseil-cpp-20230125.1/LICENSE" "$out/assets/aec-licenses/abseil.txt"

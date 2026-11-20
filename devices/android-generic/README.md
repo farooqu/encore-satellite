@@ -35,14 +35,14 @@ Portal 2 remains a separate unqualified target. Biscuit's separate
 ## Build locally
 
 Requirements: Go 1.27, JDK 21, Gradle 9.4.1, Android SDK platform/build-tools 36,
-and NDK 28.0.13004108. Set `ANDROID_HOME` and put Gradle on `PATH` (or set `GRADLE`
-to its executable). From the repository root:
+NDK 28.0.13004108, Meson (0.63 or newer), and Ninja. Set `ANDROID_HOME` and put
+Gradle on `PATH` (or set `GRADLE` to its executable). From the repository root:
 
 ```sh
 devices/android-generic/build-android
 ```
 
-The script binds the matching Go engine into an AAR for `arm64-v8a` and
+The script builds the Go engine and AEC3 library for `arm64-v8a` and
 `armeabi-v7a`, downloads and SHA-256-checks a pinned SendspinDroid player library,
 then builds `app/build/outputs/apk/debug/app-debug.apk` under this directory.
 It does not install, upload, publish or update a device. Gradle uses its normal
@@ -66,6 +66,45 @@ debug installs cannot accept a different production signing key in-place.
 Use a build machine with sufficient RAM: the initial 2 GB orb exhausted memory;
 the complete APK/test/lint build passed in an `a1.large` orb. Default settings use
 two Gradle workers and a 3 GB Gradle heap.
+
+## Voice AEC3
+
+Voice capture uses AEC3 by default in debug and release APKs. The build compiles
+the checksum-pinned freedesktop WebRTC Audio Processing 1.3 source for both ARM
+ABIs, with Abseil pinned by the upstream Meson wrap, and packages the JNI library
+and dependency notices. No Kiosk code, OS changes, root, playback-capture grant,
+or physical loopback input is used.
+
+The assistant `AudioTrack` provides the accepted 16 kHz mono PCM for replies,
+announcements and timer cues that reach that sink. Accepted writes only enter
+the queue; the track timestamp/playback head determines which portion was
+presented. Capture and render are mapped to the same monotonic clock, with
+advancing-head and read-completion fallbacks when hardware timestamps are not
+plausible. Flush retains the presented prefix for in-flight echo, never the
+discarded queue. Route changes, underruns with outstanding PCM and clock jumps
+invalidate the old mapping. Unusable timing substitutes silence, not raw mic
+audio; native initialization or processing failure uses the existing capture
+failure/mute path. This is still experimental timing: the PCM tap is before
+Android's system volume, mixer and vendor DSP, not a measurement at the speaker.
+Sendspin uses a separate `USAGE_MEDIA` sink; this build does **not** cancel its
+audio, Android/system sounds or other apps. Keep Sendspin off for the voice A/B.
+
+An x86-64 host JNI check with synthesized speech and two delayed echo taps
+measured 45 dB echo reduction at 181 and 601 samples of lag, versus about 0 dB
+without a reference. Output RMS during speech overlap was 2.5–3 dB below the
+clean near-end input level; with overlapping broadband noise it was about 20 dB
+below. These are fixture measurements, not evidence that the device recognizes
+spoken Stop under overlap.
+
+Local ordinary wake (idle), spoken Stop (armed for response playback,
+announcements and alerts), and active/follow-up call input share the one capture
+path through the existing Incubator adapter. The APK supplies AEC3's
+output on the existing primary call route. `listen` means call listening and
+follow-up, not an off-call mic monitor. `aec`, `monitor`, `monitor_aec`, and
+`intercom` remain false, with no `monitor_result` claim. Do not enable call AEC
+until measured; the shared Biscuit precedent sends the **same** cleaned mono
+PCM on `0x08` before `0x03` with zero relative lead and matching pre-roll. No
+second physical lane is required by the protocol.
 
 ## Use the development app
 
@@ -181,8 +220,8 @@ pairing records persist. The screen stays awake while the Activity is visible.
   Transcript text is not persisted. Android screenshots
   are disabled for the running Activity, including locally revealed pairing keys.
 - Only server-requested Incubator follow-ups exist. No Assist, runtime route
-  switching, Assist-only follow-up toggle, enrollment/reference stream, claimed
-  AEC or ESPHome `media_player` is included.
+  switching, Assist-only follow-up toggle, enrollment stream, advertised wire
+  AEC route, or ESPHome `media_player` is included.
 - The optional [Android Bluetooth proxy](../../docs/bluetooth-android.md) is
   independently default-OFF and scan-only on API 26+ with a detected BLE adapter.
   Settings explains consent and version-specific grants. Scans pause outside a
