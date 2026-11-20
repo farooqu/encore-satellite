@@ -39,6 +39,13 @@ class EncoreStateTest {
         assertFalse(inhibited.talkAllowed)
     }
 
+    @Test fun dashboardExternalAuthFlagPreservesExplicitViewAndOtherParameters() {
+        val dashboard = "https://home.example:8123/encore-kitchen/lighting?label=A%26B&%65xternal_auth=0&kiosk#switches"
+        assertEquals(dashboard, dashboardLoadUrl(dashboard, externalAuth = false))
+        assertEquals("https://home.example:8123/encore-kitchen/lighting?label=A%26B&kiosk&external_auth=1#switches",
+            dashboardLoadUrl(dashboard, externalAuth = true))
+    }
+
     companion object {
         fun snapshot(active: Boolean = true, announcing: Boolean = true, output: String = "playing",
             owner: String = "announcement", talkAllowed: Boolean = false) = """

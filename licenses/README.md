@@ -10,6 +10,8 @@ binary inventory.
 - `Go-Dependencies-NOTICE.txt` preserves notices from the Biscuit executable's
   resolved modules, the Go standard library and the Android `golang.org/x/mobile`
   bridge. Exact linked subsets still come from the final binary/AAR build records.
+- `go-qrcode-MIT.txt` preserves the license for `github.com/skip2/go-qrcode`,
+  used to encode the Android dashboard sign-in QR code.
 - `Android-Dependencies-NOTICE.txt` records 134 resolved Maven components and
   preserves supplied AAR/JAR notices, SLF4J's MIT text and Bouncy Castle 1.80's
   `org/bouncycastle/LICENSE.java` permission text. Some resolved components are

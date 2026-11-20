@@ -48,7 +48,7 @@ private val Muted = Color(0xffa0afbd)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun EncoreScreen(state: EncoreState, onStart: () -> Unit, onTalk: () -> Unit, onStop: () -> Unit,
+internal fun EncoreScreen(state: EncoreState, onStart: () -> Unit, onTalk: () -> Unit, onStop: () -> Unit,
     onMuted: (Boolean) -> Unit, noiseKey: () -> String,
     musicToken: () -> String, onMusicConnect: (String) -> Unit, onMusicDisconnect: () -> Unit,
     onMusicCommand: (String) -> Unit, onDismiss: () -> Unit, onUpdate: () -> Unit = {},
@@ -57,7 +57,8 @@ fun EncoreScreen(state: EncoreState, onStart: () -> Unit, onTalk: () -> Unit, on
     onMonitorOverlay: (Long, Boolean) -> Unit = { _, _ -> },
     onPairHomeAssistant: () -> Unit = {},
     microphonePermissionGranted: Boolean = true,
-    dashboardContent: @Composable () -> Unit = { Dashboard(state, microphonePermissionGranted, onStart, onPairHomeAssistant) }) {
+    dashboardAuth: DashboardAuth? = null,
+    dashboardContent: @Composable () -> Unit = { Dashboard(state, microphonePermissionGranted, onStart, onPairHomeAssistant, dashboardAuth) }) {
     var settings by remember { mutableStateOf(false) }
     val drawer = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
@@ -159,7 +160,14 @@ fun EncoreScreen(state: EncoreState, onStart: () -> Unit, onTalk: () -> Unit, on
                 }
             }
         }
-        if (settings) SettingsDialog(state, noiseKey, musicToken, onMusicConnect, onMusicDisconnect, onUpdate, onBluetooth) { settings = false }
+        if (settings) SettingsDialog(state, noiseKey, musicToken, onMusicConnect, onMusicDisconnect, onUpdate, onBluetooth,
+            dashboardAuth) { settings = false }
+        dashboardAuth?.attempt?.let { attempt ->
+            if (attempt.origin == state.origin) DashboardEnrollmentDialog(state.name, attempt.origin, attempt.qr,
+                attempt.candidate?.name(), attempt.error, onCancel = dashboardAuth::cancel,
+                onAccept = { dashboardAuth.accept(attempt) }, onRetry = { dashboardAuth.start(attempt.origin) })
+            else if (state.running) LaunchedEffect(attempt) { dashboardAuth.cancel() }
+        }
     }
 }
 
@@ -245,9 +253,8 @@ internal fun trustedNavigation(origin: String, value: String): Boolean {
     return b.scheme in listOf("https", "http") && a.scheme == b.scheme && a.encodedAuthority == b.encodedAuthority && b.userInfo == null
 }
 
-@SuppressLint("SetJavaScriptEnabled")
 @Composable private fun Dashboard(state: EncoreState, microphonePermissionGranted: Boolean,
-    onRequestPermission: () -> Unit, onPairHomeAssistant: () -> Unit) {
+    onRequestPermission: () -> Unit, onPairHomeAssistant: () -> Unit, auth: DashboardAuth?) {
     val needsPermission = !state.running && !microphonePermissionGranted
     if (needsPermission || state.needsHomeAssistantSetup) {
         Box(Modifier.fillMaxSize().background(Color(0xff101d28)).padding(bottom = 88.dp), contentAlignment = Alignment.Center) {
@@ -275,7 +282,27 @@ internal fun trustedNavigation(origin: String, value: String): Boolean {
             Spacer(Modifier.height(16.dp))
             Text("Set the full Dashboard URL in the device's ESPHome integration. One URL includes your HA address and dashboard path.", color = Muted, fontSize = 17.sp)
         }
-    } else key(state.origin) {
+    } else if (auth != null && auth.lostOrigin == state.origin) {
+        DashboardSignInNeeded(onPhone = if (supportsDashboardBridge()) ({ auth.start(state.origin) }) else null,
+            onTablet = auth::manualSignIn)
+    } else DashboardWebView(state, auth)
+}
+
+@Composable
+internal fun DashboardSignInNeeded(onPhone: (() -> Unit)?, onTablet: () -> Unit) {
+    Column(Modifier.fillMaxSize().background(Color(0xff101d28)).padding(32.dp),
+        verticalArrangement = Arrangement.Center) {
+        Text("Dashboard sign-in needed", style = MaterialTheme.typography.headlineMedium, color = Color.White)
+        Text("Your Home Assistant session ended. Sign in again without changing this satellite's dashboard URL.", color = Muted)
+        if (onPhone != null) Button(onClick = onPhone) { Text("Sign in with phone") }
+        TextButton(onClick = onTablet) { Text("Sign in on tablet") }
+    }
+}
+
+@SuppressLint("SetJavaScriptEnabled")
+@Composable private fun DashboardWebView(state: EncoreState, auth: DashboardAuth?) {
+    val session = auth?.saved?.takeIf { it.origin() == state.origin && supportsDashboardBridge() }
+    key(state.origin, session) {
         var webView by remember { mutableStateOf<WebView?>(null) }
         DisposableEffect(Unit) { onDispose { webView?.destroy(); webView = null } }
         AndroidView(factory = { context -> WebView(context).apply {
@@ -291,6 +318,7 @@ internal fun trustedNavigation(origin: String, value: String): Boolean {
             webViewClient = object : WebViewClient() {
                 override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest) = !trustedNavigation(state.origin, request.url.toString())
             }
+            if (session != null) auth.installBridge(this, session)
             // No addJavascriptInterface, downloads, external intents or microphone/camera WebChromeClient grants.
         } }, update = { view ->
             view.importantForAccessibility = if (state.interactionVisible) View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS else View.IMPORTANT_FOR_ACCESSIBILITY_AUTO
@@ -299,13 +327,14 @@ internal fun trustedNavigation(origin: String, value: String): Boolean {
             view.isFocusable = !state.interactionVisible
             view.isFocusableInTouchMode = !state.interactionVisible
             val desired = "${state.reload}:${state.dashboard}"
-            if (view.tag != desired) { view.tag = desired; view.loadUrl(state.dashboard) }
+            if (view.tag != desired) { view.tag = desired; view.loadUrl(dashboardLoadUrl(state.dashboard, session != null)) }
         }, modifier = Modifier.fillMaxSize().testTag("dashboard"))
     }
 }
 
 @Composable private fun SettingsDialog(state: EncoreState, noiseKey: () -> String,
-    musicToken: () -> String, onMusicConnect: (String) -> Unit, onMusicDisconnect: () -> Unit, onUpdate: () -> Unit, onBluetooth: () -> Unit, close: () -> Unit) {
+    musicToken: () -> String, onMusicConnect: (String) -> Unit, onMusicDisconnect: () -> Unit, onUpdate: () -> Unit,
+    onBluetooth: () -> Unit, auth: DashboardAuth?, close: () -> Unit) {
     var sendspin by remember { mutableStateOf("") }
     var secret by remember { mutableStateOf("") }
     AlertDialog(onDismissRequest = close, title = { Text("Satellite settings") }, confirmButton = { TextButton(onClick = close) { Text("Done") } },
@@ -314,7 +343,13 @@ internal fun trustedNavigation(origin: String, value: String): Boolean {
                 Text("${state.name} · Incubator only", color = Mint)
                 Text("Incubator voice uses trusted-LAN TCP 6055. ESPHome controls use encrypted TCP 6053. Bluetooth capabilities depend on the running Android APIs; no Assist backend.", fontSize = 12.sp)
                 TextButton(onClick = onBluetooth) { Text("Bluetooth proxy setup") }
-                Text("Set one full Dashboard URL through ESPHome, such as https://home.example/lovelace/home. It supplies both the HA address and dashboard path; no local origin setup is needed. Sign in to HA in the dashboard itself. Navigation stays within the configured origin.", fontSize = 12.sp)
+                Text("Set one full Dashboard URL through ESPHome, such as https://home.example/lovelace/home. Sign in on the tablet, or use your phone with Home Assistant 2026.11+ over HTTPS. Navigation stays within the configured origin.", fontSize = 12.sp)
+                if (auth != null && state.origin.startsWith("https://") && supportsDashboardBridge()) {
+                    auth.saved?.takeIf { it.origin() == state.origin }?.let {
+                        Text("Dashboard account: ${it.name()}\nSession ID: ${it.clientID()}", fontSize = 12.sp)
+                    }
+                    TextButton(onClick = { close(); auth.start(state.origin) }) { Text("Sign in with phone") }
+                }
                 if (!state.needsHomeAssistantSetup) {
                     TextButton(onClick = { secret = noiseKey() }) { Text("Reveal ESPHome encryption key") }
                 }

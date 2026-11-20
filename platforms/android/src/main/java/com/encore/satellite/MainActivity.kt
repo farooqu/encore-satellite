@@ -15,6 +15,7 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.ViewModelProvider
 
 class MainActivity : ComponentActivity() {
     private var service by mutableStateOf<EncoreService?>(null)
@@ -42,6 +43,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        val dashboardAuth = ViewModelProvider(this)[DashboardAuth::class.java]
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON or WindowManager.LayoutParams.FLAG_SECURE)
         WindowCompat.setDecorFitsSystemWindows(window, false)
         WindowCompat.getInsetsController(window, window.decorView).apply {
@@ -64,6 +66,7 @@ class MainActivity : ComponentActivity() {
                 onBluetooth = { startActivity(Intent(this, BluetoothActivity::class.java)) },
                 onPairHomeAssistant = { service?.pairHomeAssistant() },
                 microphonePermissionGranted = microphonePermissionGranted,
+                dashboardAuth = dashboardAuth,
                 onMonitorOverlay = { id, visible -> connectedService?.setMonitorOverlay(id, visible) })
         }
     }

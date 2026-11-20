@@ -1,10 +1,14 @@
 package com.encore.satellite
 
+import android.graphics.BitmapFactory
 import android.provider.Settings
+import android.util.Base64
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.Button
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Modifier
@@ -38,6 +42,43 @@ import kotlin.math.sin
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 class EncoreScreenTest {
     @get:Rule val compose = createComposeRule()
+
+    @Test fun dashboardEnrollmentNeedsLocalApprovalAndCanStartOverAfterLoss() {
+        val dialog = mutableStateOf(false)
+        val account = mutableStateOf<String?>(null)
+        val error = mutableStateOf("")
+        // Inert scan target for screenshots: https://home.example/auth/authorize
+        val sample = Base64.decode("iVBORw0KGgoAAAANSUhEUgAAAEoAAABKAQMAAAAmHlAyAAAABlBMVEUAAAD///+l2Z/dAAAAAnRSTlP//8i138cAAAAJcEhZcwAACxIAAAsSAdLdfvwAAADKSURBVCiRtdKxikQxCAVQwTbgrwi2AX89kDbgrwTSCk6YnX0z8U25a3Wqi1yFuAb+loBr+QQ9qcusSSSyVA/BG43m+sZ6o67J8Jt7EVBEGBIjqpO+9r2IoFpwJfYopM30pM0pMjgRHHGgx0ntc3YcenJEW4qW6EJmUBKNijctcXK0qOUV9qZTI5KeWPtesnpit47NnmEfZPFlu6eTEbyLZj25SzWXkqiLA5USWbDSLjZzEDrfWOV5mIO6CEb5KfVNwDoLup78n69+AAAM3pCnFEKDAAAAAElFTkSuQmCC", Base64.DEFAULT)
+        val qr = BitmapFactory.decodeByteArray(sample, 0, sample.size)
+        var starts = 0
+        var approvals = 0
+        var fallbacks = 0
+        compose.setContent {
+            MaterialTheme(colorScheme = darkColorScheme(primary = androidx.compose.ui.graphics.Color(0xff97e6d4),
+                background = androidx.compose.ui.graphics.Color(0xff0c141d), surface = androidx.compose.ui.graphics.Color(0xff152330))) {
+                DashboardSignInNeeded(onPhone = { dialog.value = true; starts++ }, onTablet = { fallbacks++ })
+                if (dialog.value) DashboardEnrollmentDialog("Kitchen satellite", "https://home.example", qr, account.value,
+                    error.value, onCancel = { dialog.value = false }, onAccept = { approvals++; dialog.value = false },
+                    onRetry = { starts++; error.value = "" })
+            }
+        }
+        compose.onNodeWithText("Dashboard sign-in needed").assertIsDisplayed()
+        compose.onNodeWithText("Sign in on tablet").assertIsDisplayed().performClick()
+        capture("android-dashboard-auth-recovery")
+        compose.onNodeWithText("Sign in with phone").performClick()
+        compose.onNodeWithText("private browser tab", substring = true).assertIsDisplayed()
+        compose.onNodeWithContentDescription("Home Assistant phone sign-in QR code").assertIsDisplayed()
+        compose.onNodeWithText("Use this account").assertDoesNotExist()
+        capture("android-dashboard-auth-qr")
+        compose.runOnIdle { error.value = "The QR code expired." }
+        compose.onNodeWithText("Try again").performClick()
+        compose.onNodeWithText("Use this account").assertDoesNotExist()
+        compose.runOnIdle { account.value = "Satellite lab"; assertEquals(0, approvals) }
+        compose.onNodeWithText("signed in as Satellite lab", substring = true).assertIsDisplayed()
+        capture("android-dashboard-auth-confirmation")
+        compose.onNodeWithText("Use this account").performClick()
+        compose.runOnIdle { assertEquals(2, starts); assertEquals(1, approvals); assertEquals(1, fallbacks) }
+    }
 
     @Test fun homeAssistantPairingAppearsOnlyInInitialSetupAndCanRetry() {
         val state = mutableStateOf(EncoreState())

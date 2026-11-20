@@ -176,9 +176,26 @@ these devices, acoustic timings or model-backed enrollment/training.
    The read-only **Microphone muted** (`microphone_muted`) binary sensor reports
    the app's microphone privacy latch and updates when it changes. It does not
    report Android permission or recorder readiness and cannot unmute the app.
-4. Sign into HA in the dashboard itself. Only the HA dashboard is a WebView;
-   settings, privacy, voice, waveform and music controls are Compose. Initial
-   login supports same-origin flows only (no external-IdP allowlist yet).
+4. Sign into HA in the dashboard itself, or use **Settings → Sign in with
+   phone** on the tablet. Phone sign-in requires HA 2026.11 or later, an up-to-date
+   Android System WebView, and an HTTPS HA address trusted and reachable by both
+   devices. Connect the phone and tablet to the same trusted local IPv4 network
+   (not isolated guest Wi-Fi).
+   - Scan the tablet's QR code within five minutes. Check the HA address on the
+     phone before signing in. If your phone normally uses your main HA account,
+     open the link in a private browser tab and sign in as your non-admin
+     satellite account. You do not need to switch accounts in the HA companion app.
+   - Return to the tablet and verify the account shown before tapping **Use this
+     account**. Repeat on each satellite; the same account can have independently
+     revocable sessions and each satellite keeps its own ESPHome Dashboard URL.
+     The session has the account's normal HA permissions, not dashboard-only access.
+   - If a session is lost or revoked, tap **Sign in with phone** again, or choose
+     **Sign in on tablet** from the recovery screen. To revoke one tablet from HA,
+     compare the Session ID shown in Encore Settings with the HA profile's
+     refresh-token list for the satellite account under **Security**. You can also
+     sign out from that tablet's dashboard. No need to re-pair ESPHome.
+   Manual sign-in still works, including when the QR flow is unavailable. The
+   tablet WebView permits only same-origin navigation (no external-IdP allowlist).
 5. Optionally connect a **current Noise-capable Sendspin server** by host:port in
    Settings. Reveal the independent Sendspin pairing token locally and provision
    it on the server. The player uses encrypted, Keystore-protected identity/trust;
@@ -273,9 +290,14 @@ pairing records persist. The screen stays awake while the Activity is visible.
   visible Encore activity; GATT, remote caching and pairing are not implemented.
   Tab A7 Lite / LineageOS 21 GSI and Portal 2 still need physical qualification.
 - Dashboard JavaScript has no native command bridge, file/content access,
-  camera/mic grants or external-intent launch path. TLS errors are not bypassed.
-  Navigation stays within the origin derived from the current ESPHome URL;
-  changing origin recreates the WebView, independently of voice and music.
+  camera/mic grants or external-intent launch path. With phone sign-in, only the
+  configured HTTPS origin's main frame can request the current HA access token
+  or revoke it via HA's external-auth bridge. TLS errors are not bypassed. The
+  QR code contains no credentials; the temporary local callback receives a
+  single-use PKCE-bound code, and HA credentials are exchanged only over HTTPS.
+  The tablet stores its refresh token encrypted with Android Keystore. Navigation
+  stays within the origin derived from the ESPHome URL; changing origin recreates
+  the WebView without sharing the session or interrupting voice or music.
 
 ## Checks
 
