@@ -40,16 +40,35 @@ class EncoreScreenTest {
     @get:Rule val compose = createComposeRule()
 
     @Test fun homeAssistantPairingAppearsOnlyInInitialSetupAndCanRetry() {
-        val state = mutableStateOf(EncoreState(name = "encore-abc", esphome = "unpaired"))
+        val state = mutableStateOf(EncoreState())
+        val microphonePermission = mutableStateOf(false)
+        var requests = 0
         var taps = 0
         compose.setContent {
-            EncoreScreen(state.value, { state.value = state.value.copy(running = true) }, {}, {}, {}, { "" }, { "" }, {}, {}, {}, {},
+            EncoreScreen(state.value, { requests++ }, {}, {}, {}, { "" }, { "" }, {}, {}, {}, {},
+                microphonePermissionGranted = microphonePermission.value,
                 onPairHomeAssistant = { taps++; state.value = state.value.copy(esphome = "waiting") })
         }
+        val allow = compose.onNodeWithText("Allow microphone access")
         val pair = compose.onNodeWithText("Pair with Home Assistant")
-        compose.onNodeWithText("Home Assistant setup").assertIsDisplayed()
+        compose.onNodeWithText("Set up Encore").assertIsDisplayed()
         pair.assertDoesNotExist()
-        compose.onNodeWithContentDescription("Start satellite").performClick()
+        allow.assertIsDisplayed().assertIsEnabled()
+        capture("android-setup-permission")
+        allow.performTouchInput { click() }
+        compose.runOnIdle { assertEquals(1, requests) }
+        allow.assertIsDisplayed()
+        pair.assertDoesNotExist()
+        compose.runOnIdle {
+            state.value = state.value.copy(name = "encore-abc", esphome = "unpaired")
+            microphonePermission.value = true
+        }
+        allow.assertDoesNotExist()
+        compose.onNodeWithText("Starting Encore…").assertIsDisplayed()
+        pair.assertDoesNotExist()
+        capture("android-setup-starting")
+        compose.runOnIdle { state.value = state.value.copy(running = true) }
+        compose.onNodeWithText("Home Assistant setup").assertIsDisplayed()
         pair.assertIsDisplayed()
         capture("android-ha-setup-ready")
         pair.performClick()
@@ -63,7 +82,11 @@ class EncoreScreenTest {
         compose.runOnIdle { assertEquals(2, taps); state.value = state.value.copy(esphome = "paired") }
         pair.assertDoesNotExist()
         compose.onNodeWithText("Your home, at a glance.").assertIsDisplayed()
+        compose.runOnIdle { state.value = state.value.copy(running = false) }
+        allow.assertDoesNotExist()
+        compose.onNodeWithText("Your home, at a glance.").assertIsDisplayed()
         openControls()
+        compose.onNodeWithText("Start satellite").assertDoesNotExist()
         compose.onNodeWithText("Settings").performClick()
         advance(400)
         pair.assertDoesNotExist()
@@ -142,8 +165,9 @@ class EncoreScreenTest {
             compose.onNodeWithTag("talk").assertIsNotEnabled()
         }
         compose.runOnIdle { state.value = EncoreState() }
-        compose.onNodeWithContentDescription("Start satellite").performTouchInput { click() }
-        assertEquals(1, starts)
+        compose.onNodeWithTag("talk").assertIsNotEnabled().performTouchInput { click() }
+        assertEquals(0, starts)
+        assertEquals(1, talks)
         compose.runOnIdle { state.value = ready() }
         compose.onNodeWithText("Talk").assertDoesNotExist()
         compose.onNodeWithTag("controls-edge").performTouchInput {

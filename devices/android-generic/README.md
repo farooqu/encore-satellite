@@ -144,9 +144,10 @@ these devices, acoustic timings or model-backed enrollment/training.
 ## Use the development app
 
 1. Install the debug APK using Android's ordinary user-approved sideloading flow.
-   Open it and choose **Start satellite**, granting microphone permission. It runs
-   a microphone/media foreground service with a persistent notification. No boot
-   receiver, root, device owner or unattended kiosk privileges are required.
+   Open Encore and choose **Allow microphone access** if prompted. Notifications
+   are optional. Encore starts its microphone/media foreground service automatically
+   once microphone access is granted. No boot receiver, root, device owner or
+   unattended kiosk privileges are required.
 2. On a trusted LAN, pair the device with Voice Incubator using the advertised
    `_voice-incubator._tcp` service, or its IP and TCP port 6055. This protocol is
    **unencrypted/unauthenticated**; do not expose it to untrusted networks.
@@ -187,9 +188,10 @@ these devices, acoustic timings or model-backed enrollment/training.
    turn reduces the music track gain to 15%, retaining player volume/mute and sync.
 
 The foreground service owns audio and network sockets independently of dashboard
-reloads and Activity rotation. Closing the notification's **Stop satellite** action
-stops it; restarting never silently reverses persisted microphone privacy.
-This initial package does not automatically resume after reboot or process death.
+reloads and Activity rotation. The notification's **Stop satellite** action stops
+it until Encore returns to the foreground; reopening never silently reverses
+persisted microphone privacy. The service does not start itself in the background
+after reboot or process death.
 The music server address/connection is entered explicitly each time; identity and
 pairing records persist. The screen stays awake while the Activity is visible.
 

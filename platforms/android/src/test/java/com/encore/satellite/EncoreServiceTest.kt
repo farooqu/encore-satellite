@@ -1,19 +1,50 @@
 package com.encore.satellite
 
+import android.Manifest
+import android.content.ComponentName
+import android.content.Intent
 import android.media.AudioManager
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
+import org.robolectric.shadows.ShadowLooper
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
 class EncoreServiceTest {
     private val manager = RuntimeEnvironment.getApplication().getSystemService(AudioManager::class.java)
     private val platform = shadowOf(manager)
+
+    @Test fun openingEncoreStartsSatelliteOnlyWithMicrophonePermission() {
+        val app = RuntimeEnvironment.getApplication()
+        val android = shadowOf(app)
+        val serviceIntent = Intent(app, EncoreService::class.java)
+        val service = Robolectric.buildService(EncoreService::class.java).create()
+        android.setComponentNameAndServiceForBindService(ComponentName(app, EncoreService::class.java), service.get().onBind(serviceIntent))
+
+        android.denyPermissions(Manifest.permission.RECORD_AUDIO)
+        val beforeGrant = Robolectric.buildActivity(MainActivity::class.java).setup()
+        ShadowLooper.idleMainLooper()
+        assertFalse("Binding is not a foreground start", android.nextStartedService.hasExtra("unmute"))
+        assertNull(android.nextStartedService)
+        beforeGrant.pause().stop().destroy()
+
+        android.grantPermissions(Manifest.permission.RECORD_AUDIO)
+        val afterGrant = Robolectric.buildActivity(MainActivity::class.java).setup()
+        ShadowLooper.idleMainLooper()
+        assertFalse(android.nextStartedService.hasExtra("unmute"))
+        val foregroundStart = android.nextStartedService
+        assertEquals(serviceIntent.component, foregroundStart.component)
+        assertFalse("Automatic start must preserve the saved mute choice", foregroundStart.getBooleanExtra("unmute", true))
+        assertNull(android.nextStartedService)
+        afterGrant.pause().stop().destroy()
+        service.destroy()
+    }
 
     @Test fun permanentLossWhileMusicKeepsPlayingRequiresExplicitResume() {
         var interrupted = true
