@@ -1,7 +1,6 @@
 package sensors_test
 
 import (
-	"context"
 	"testing"
 	"time"
 
@@ -10,49 +9,49 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-func TestMicrophoneReportsLatestStateAfterBlockedBroadcast(t *testing.T) {
+type microphonePeer struct {
+	writes  chan bool
+	unblock <-chan struct{}
+}
+
+func (p *microphonePeer) Send(msg proto.Message) error {
+	p.writes <- msg.(*api.BinarySensorStateResponse).State
+	if p.unblock != nil {
+		<-p.unblock
+	}
+	return nil
+}
+
+func (*microphonePeer) Close() error { return nil }
+
+func TestMicrophoneIsolatesSlowSubscriberAndCoalescesUpdates(t *testing.T) {
 	m := sensors.NewMicrophone(false)
-	ctx, cancel := context.WithCancel(t.Context())
-	done, unblock := make(chan struct{}), make(chan struct{})
-	defer func() { cancel(); <-done }()
+	unblock := make(chan struct{})
+	slow := &microphonePeer{writes: make(chan bool, 8), unblock: unblock}
+	fast := &microphonePeer{writes: make(chan bool, 8)}
+	defer m.Unsubscribe(slow)
+	defer m.Unsubscribe(fast)
 	defer close(unblock)
-	broadcasts := make(chan bool)
-	go func() {
-		defer close(done)
-		m.Run(ctx, func(msg proto.Message) error {
-			select {
-			case broadcasts <- msg.(*api.BinarySensorStateResponse).State:
-			case <-ctx.Done():
-			}
-			<-unblock
-			return nil
-		})
-	}()
-	receive := func(want bool) {
+	receive := func(peer *microphonePeer, want bool) {
 		t.Helper()
 		select {
-		case got := <-broadcasts:
+		case got := <-peer.writes:
 			if got != want {
 				t.Fatalf("reported mute = %t, want %t", got, want)
 			}
 		case <-time.After(time.Second):
-			t.Fatal("no microphone state broadcast")
+			t.Fatal("no microphone state received")
 		}
 	}
-	m.SetMuted(true)
-	receive(true)
-	updated := make(chan struct{})
+	m.Subscribe(slow)
+	receive(slow, false)
 	go func() {
-		m.SetMuted(false)
 		m.SetMuted(true)
-		m.SetMuted(false)
-		close(updated)
+		m.Subscribe(fast)
 	}()
-	select {
-	case <-updated:
-	case <-time.After(time.Second):
-		t.Fatal("a blocked subscriber stalled mute changes")
-	}
+	receive(fast, true) // Initial snapshot while the slow write is in flight.
+	go m.SetMuted(false)
+	receive(fast, false) // Live update, still without releasing the slow writer.
 	unblock <- struct{}{}
-	receive(false)
+	receive(slow, false) // The pending true was replaced by the latest state.
 }

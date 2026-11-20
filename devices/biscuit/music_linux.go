@@ -349,6 +349,9 @@ func (d *biscuitControls) Handle(ctx context.Context, c *esphome.Conn, msg proto
 		if err := d.state(c); err != nil {
 			return err
 		}
+		if d.microphone != nil {
+			d.microphone.Subscribe(c)
+		}
 	case *api.ExecuteServiceRequest:
 		if d.management != nil {
 			if err := d.management.execute(ctx, c, v); err != nil {
@@ -386,11 +389,6 @@ func (d *biscuitControls) state(c *esphome.Conn) error {
 	if err := bindings.SendStates(c.Send, states); err != nil {
 		return err
 	}
-	if d.microphone != nil {
-		if err := d.microphone.Send(c.Send); err != nil {
-			return err
-		}
-	}
 	if d.management != nil {
 		diagnostics, ssh := d.management.states()
 		for _, state := range diagnostics {
@@ -405,9 +403,7 @@ func (d *biscuitControls) state(c *esphome.Conn) error {
 	return nil
 }
 
-func (d *biscuitControls) broadcast() error { return d.sendToSubscribers(d.state) }
-
-func (d *biscuitControls) sendToSubscribers(send func(*esphome.Conn) error) error {
+func (d *biscuitControls) broadcast() error {
 	d.mu.Lock()
 	peers := make([]*esphome.Conn, 0, len(d.subscribers))
 	for c := range d.subscribers {
@@ -415,7 +411,7 @@ func (d *biscuitControls) sendToSubscribers(send func(*esphome.Conn) error) erro
 	}
 	d.mu.Unlock()
 	for _, c := range peers {
-		if err := send(c); err != nil {
+		if err := d.state(c); err != nil {
 			_ = c.Close()
 		}
 	}
@@ -428,6 +424,9 @@ func (d *biscuitControls) ConnClosed(c *esphome.Conn) {
 	d.mu.Lock()
 	delete(d.subscribers, c)
 	d.mu.Unlock()
+	if d.microphone != nil {
+		d.microphone.Unsubscribe(c)
+	}
 	d.Proxy.ConnClosed(c)
 }
 func (d *biscuitControls) Run(ctx context.Context) {
@@ -435,13 +434,6 @@ func (d *biscuitControls) Run(ctx context.Context) {
 	workers.Go(func() { d.Proxy.Run(ctx) })
 	if d.music != nil {
 		workers.Go(func() { d.music.Run(ctx) })
-	}
-	if d.microphone != nil {
-		workers.Go(func() {
-			d.microphone.Run(ctx, func(msg proto.Message) error {
-				return d.sendToSubscribers(func(c *esphome.Conn) error { return c.Send(msg) })
-			})
-		})
 	}
 	workers.Go(func() {
 		for {

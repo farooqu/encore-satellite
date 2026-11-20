@@ -155,11 +155,9 @@ func (r *Runtime) Start() error {
 	r.cancel = cancel
 	r.control = &esphome.Server{Info: esphome.Info{Name: r.Name(), FriendlyName: "Encore Incubator", MACAddress: r.config.MAC, Manufacturer: "Encore", Model: "Generic Android", Version: "0.1.0", ProjectName: "encore.incubator"}, PSK: &key, Handler: r, WriteTimeout: 2 * time.Second}
 	r.control.Info.BluetoothFeatures = r.proxy.Features()
-	control := r.control
-	r.done.Go(func() { r.microphone.Run(ctx, control.Broadcast) })
 	r.done.Go(func() { r.proxy.Run(ctx) })
 	if r.light.Supported() {
-		sources := r.sensors()
+		sources, control := r.sensors(), r.control
 		r.done.Go(func() { sources.Illuminance.Run(ctx, func() { _ = control.Broadcast(sources.IlluminanceState()) }) })
 	}
 	r.done.Go(func() {
@@ -181,10 +179,14 @@ func (r *Runtime) Close() {
 	r.mu.Lock()
 	cancel := r.cancel
 	r.cancel = nil
-	r.mu.Unlock()
 	if cancel != nil {
 		cancel()
 		r.engine.SetMuted(true)
+		// Shutdown gates this runtime without changing the saved preference.
+		r.microphone.SetMuted(true)
+	}
+	r.mu.Unlock()
+	if cancel != nil {
 		r.done.Wait()
 	}
 }
@@ -329,9 +331,7 @@ func (r *Runtime) Handle(ctx context.Context, c *esphome.Conn, msg proto.Message
 				return err
 			}
 		}
-		if err := r.microphone.Send(c.Send); err != nil {
-			return err
-		}
+		r.microphone.Subscribe(c)
 		r.mu.Lock()
 		v := r.config.Dashboard
 		channel := r.config.Channel
@@ -351,6 +351,11 @@ func (r *Runtime) Handle(ctx context.Context, c *esphome.Conn, msg proto.Message
 		return r.proxy.Handle(ctx, c, msg)
 	}
 	return r.proxy.Handle(ctx, c, msg)
+}
+
+func (r *Runtime) ConnClosed(c *esphome.Conn) {
+	r.microphone.Unsubscribe(c)
+	r.proxy.ConnClosed(c)
 }
 
 func (r *Runtime) setDashboard(_ *esphome.Conn, m *api.TextCommandRequest) error {

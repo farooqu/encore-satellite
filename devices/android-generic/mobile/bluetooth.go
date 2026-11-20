@@ -6,7 +6,6 @@ import (
 	"github.com/farooqu/encore-satellite/backends/bluetooth"
 	"github.com/farooqu/encore-satellite/core/ble"
 	androidhost "github.com/farooqu/encore-satellite/platforms/android"
-	esphome "github.com/ygelfand/go-esphome-device"
 )
 
 // Bluetooth is the gomobile-compatible native scanner boundary.
@@ -80,5 +79,3 @@ func (r *Runtime) BluetoothScanFailed(generation int64) {
 		r.radio.Failed(generation)
 	}
 }
-
-func (r *Runtime) ConnClosed(c *esphome.Conn) { r.proxy.ConnClosed(c) }

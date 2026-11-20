@@ -36,10 +36,9 @@ func TestMicrophoneMuteSensor(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(t.Context())
 	server := &esphome.Server{Info: esphome.Info{Name: "mute-test"}, Handler: r, WriteTimeout: time.Second}
-	published, served := make(chan struct{}), make(chan error, 1)
-	go func() { defer close(published); r.microphone.Run(ctx, server.Broadcast) }()
+	served := make(chan error, 1)
 	go func() { served <- server.Serve(ctx, listener) }()
-	t.Cleanup(func() { cancel(); <-published; <-served })
+	t.Cleanup(func() { cancel(); <-served })
 
 	send, receive := loopbackPeer(t, listener.Addr().String())
 	send(&api.ListEntitiesRequest{})
@@ -88,4 +87,31 @@ listing:
 	send(&api.SwitchCommandRequest{Key: sensor.Key, State: false})
 	send(&api.SubscribeStatesRequest{})
 	state(true) // Only the app can clear the latch.
+
+	if err := r.SetMuted(false); err != nil {
+		t.Fatal(err)
+	}
+	state(false)
+	if err := r.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(r.Close)
+	r.Close()
+	if err := r.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if !r.engine.Snapshot().Muted {
+		t.Fatal("runtime restart did not retain the shutdown capture gate")
+	}
+	// A new subscriber must see the effective gate, not the saved preference.
+	send, receive = loopbackPeer(t, listener.Addr().String())
+	send(&api.SubscribeStatesRequest{})
+	state(true)
+	reopened, err := Open(dir, silentOutput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reopened.engine.Snapshot().Muted {
+		t.Fatal("closing the runtime unexpectedly persisted mute")
+	}
 }
