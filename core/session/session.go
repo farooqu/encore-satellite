@@ -27,10 +27,12 @@ type Command struct {
 	PreRollBytes int
 	Samples      []int16
 	Reason       string
+	MonitorID    uint64
+	RequestID    uint64
 }
 
 // Link.Send must copy/enqueue without blocking on I/O, using a bounded queue.
-// discard_audio synchronously purges unsent capture without a wire command.
+// discard_audio and monitor_off synchronously revoke their queued capture.
 // Native cancel sends cancellation then closes its voice connection; the reader
 // reports Disconnect before a replacement may attach. Assist cancel stays open.
 // Overflow fails the connection, not silently drops audio. Close invalidates
@@ -64,6 +66,9 @@ type Engine struct {
 	link                            Link
 	generation                      uint64
 	turn                            uint64
+	monitorSerial                   uint64
+	monitorVisible                  bool
+	intercom                        bool
 	invocation                      string
 	responsePending                 bool
 	outputOwner                     string
@@ -108,7 +113,7 @@ func (e *Engine) Snapshot() presentation.State {
 	if s.Inhibited && e.localOutput == nil {
 		return s
 	}
-	s.Active = e.active || e.outputOpen || e.announcing || s.Alert
+	s.Active = e.active || e.outputOpen || e.announcing || s.Alert || s.MonitorID != 0
 	s.Announcing = e.announcing
 	s.TalkAllowed = !s.Active
 	// This is engine permission only. Incubator additionally checks whether
@@ -155,7 +160,7 @@ func (e *Engine) SetActivityHandler(handler func(bool)) {
 }
 
 func (e *Engine) publishActivity() {
-	active := e.active || e.outputOpen || e.announcing || e.state.Alert
+	active := e.active || e.outputOpen || e.announcing || e.state.Alert || e.intercom
 	if active != e.voiceActive {
 		e.voiceActive = active
 		if e.activityHandler != nil {
@@ -226,6 +231,7 @@ func (e *Engine) disconnect(reason string) {
 	e.runStarted = false
 	e.outputReceived = false
 	e.announcing = false
+	e.monitorVisible, e.intercom = false, false
 	e.invocation, e.outputOwner = "", ""
 	e.responsePending, e.outputAccepted, e.outputDraining, e.outputFailed = false, false, false, false
 	e.state = presentation.State{Backend: e.state.Backend, Muted: e.state.Muted, Phase: "disconnected", Reason: reason}
@@ -249,6 +255,11 @@ func (e *Engine) SetMuted(muted bool) {
 	}
 	e.state.Muted = muted
 	if muted {
+		if e.state.MonitorID != 0 {
+			// Hard fence for off-call recording, including blocked writes.
+			e.disconnect("monitor_privacy")
+			return
+		}
 		active, alert := e.active || (e.outputOpen && e.localOutput == nil) || e.announcing, e.state.Alert
 		wasCancelling := e.cancelling
 		e.cancelling = e.cancelling || active || e.discard
@@ -306,26 +317,117 @@ func (e *Engine) finishCancellation() {
 }
 
 func (e *Engine) Capture(frame audio.Frame) error {
+	_, err := e.CaptureForModels(frame)
+	return err
+}
+
+// CaptureForModels reports whether the same frame may enter local inference.
+// Monitor audio never becomes call pre-roll or a later wake-model input.
+func (e *Engine) CaptureForModels(frame audio.Frame) (bool, error) {
 	if err := frame.Validate(); err != nil {
-		return err
+		return false, err
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.state.Muted || e.cancelling || e.link == nil {
-		return nil
+		// Preserve local-model delivery policy for non-monitoring hosts;
+		// the model worker separately checks arming and generation.
+		return true, nil
 	}
 	if frame.Discontinuity || (e.haveFrame && (frame.Sequence != e.lastSequence+1 || frame.CapturedAt <= e.lastTime)) {
 		e.disconnect("capture_discontinuity")
-		return errors.New("session: capture discontinuity; reconnect required")
+		return false, errors.New("session: capture discontinuity; reconnect required")
 	}
 	e.lastSequence, e.lastTime, e.haveFrame = frame.Sequence, frame.CapturedAt, true
+	if id := e.state.MonitorID; id != 0 {
+		if e.monitorVisible {
+			return false, e.send(Command{Kind: "monitor_audio", Samples: frame.Samples, MonitorID: id})
+		}
+		return false, nil
+	}
 	if e.inputOpen {
-		return e.send(Command{Kind: "audio", Samples: frame.Samples})
+		err := e.send(Command{Kind: "audio", Samples: frame.Samples})
+		return err == nil, err
 	}
 	if !e.active && !e.discard {
 		e.pre.Add(frame.Samples)
 	}
-	return nil
+	return true, nil
+}
+
+// SetMonitor changes off-call recording for the requesting connection only.
+// The host must confirm the indicator before any frame is sent.
+func (e *Engine) SetMonitor(generation uint64, active, intercom bool, requestID uint64) (id uint64, err error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	defer e.publishActivity()
+	if generation != e.generation || e.link == nil {
+		return 0, ErrStale
+	}
+	if requestID != 0 && active {
+		// Queue the result before capture can enqueue any monitored PCM.
+		defer func() {
+			if err == nil || errors.Is(err, ErrUnavailable) {
+				if sendErr := e.send(Command{Kind: "monitor_result", MonitorID: id, RequestID: requestID}); sendErr != nil {
+					err = sendErr
+				}
+			}
+		}()
+	}
+	intercom = active && intercom
+	leaving := e.intercom && !intercom
+	if leaving {
+		e.intercom = false
+		e.fenceIntercomOutput()
+	}
+	if e.state.MonitorID != 0 && (!active || leaving || intercom != e.intercom) {
+		if err := e.revokeMonitor(); err != nil {
+			return 0, err
+		}
+	}
+	if !active || (e.state.MonitorID != 0 && e.intercom == intercom) {
+		return e.state.MonitorID, nil
+	}
+	if e.state.Muted || e.active || e.outputOpen || e.announcing || e.state.Alert || e.cancelling || (e.discard && !leaving) {
+		return 0, ErrUnavailable
+	}
+	e.intercom = intercom
+	e.monitorSerial++
+	e.state.MonitorID = e.monitorSerial
+	e.pre.Clear()
+	return e.state.MonitorID, nil
+}
+
+func (e *Engine) revokeMonitor() error {
+	id := e.state.MonitorID
+	if id == 0 {
+		return nil
+	}
+	e.state.MonitorID, e.monitorVisible = 0, false
+	return e.send(Command{Kind: "monitor_off", MonitorID: id})
+}
+
+func (e *Engine) fenceIntercomOutput() {
+	if e.discard {
+		return
+	}
+	if e.outputOpen && e.outputOwner == "intercom" {
+		e.resetOutput()
+		e.player.Flush()
+		e.outputOpen = false
+	}
+	// MONITOR off is not a playback completion. Discard until the relay's
+	// AUDIO_OUT_END so neither late speech nor its terminator can claim Drain.
+	e.discard = true
+}
+
+// ConfirmMonitor is called only after the host visibly indicates the exact request.
+func (e *Engine) ConfirmMonitor(id uint64) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if id != 0 && id == e.state.MonitorID {
+		e.monitorVisible = true
+	}
 }
 
 // FinishInput is an explicit host endpoint, not local speech recognition.
@@ -365,7 +467,7 @@ func (e *Engine) WakeState(generation uint64) (listen, stop bool) {
 		return false, false
 	}
 	stop = !e.discard && (e.outputOpen || e.announcing || e.state.Alert)
-	listen = !e.active && !e.outputOpen && !e.discard && !e.announcing && !e.state.Alert
+	listen = !e.active && !e.outputOpen && !e.discard && !e.announcing && !e.state.Alert && e.state.MonitorID == 0
 	return
 }
 
@@ -407,7 +509,7 @@ func (e *Engine) WakeFor(generation uint64, detection wake.Detection) error {
 }
 
 func (e *Engine) start(detection wake.Detection, pre []int16) error {
-	if e.state.Muted || e.cancelling || e.link == nil || e.active || e.outputOpen || e.discard {
+	if e.state.Muted || e.cancelling || e.link == nil || e.active || e.outputOpen || e.discard || e.state.MonitorID != 0 {
 		return ErrUnavailable
 	}
 	e.resetOutput()
@@ -463,6 +565,21 @@ func (e *Engine) StopFor(generation uint64) error {
 }
 
 func (e *Engine) stop() error {
+	if e.intercom {
+		if e.state.MonitorID == 0 { // local Stop already notified the peer
+			return nil
+		}
+		e.fenceIntercomOutput()
+		e.publishActivity()
+		if err := e.revokeMonitor(); err != nil {
+			return err
+		}
+		return e.send(Command{Kind: "intercom_end"})
+	}
+	if e.state.MonitorID != 0 {
+		e.disconnect("monitor_stopped")
+		return nil
+	}
 	active, alert := e.active, e.state.Alert
 	localOnly := e.localOutput != nil && !e.active && !e.announcing
 	// A timer-only stream has an unambiguous dismissal. Calls and announcements
@@ -673,6 +790,15 @@ func (e *Engine) Handle(generation uint64, event Event) error {
 // Output and EndOutput are called serially by a backend reader. They release the
 // state lock during blocking playback so Stop/mute never queue behind a drain.
 func (e *Engine) Output(generation uint64, samples []int16) error {
+	return e.outputSamples(generation, 0, samples)
+}
+
+// OutputIntercom admits queued relay PCM only for its original monitor request.
+func (e *Engine) OutputIntercom(generation, monitorID uint64, samples []int16) error {
+	return e.outputSamples(generation, monitorID, samples)
+}
+
+func (e *Engine) outputSamples(generation, monitorID uint64, samples []int16) error {
 	if len(samples) == 0 || len(samples) > 2048 {
 		return errors.New("session: invalid output block")
 	}
@@ -680,6 +806,10 @@ func (e *Engine) Output(generation uint64, samples []int16) error {
 	if generation != e.generation || e.link == nil {
 		e.mu.Unlock()
 		return ErrStale
+	}
+	if monitorID != 0 && (!e.intercom || e.state.MonitorID != monitorID) {
+		e.mu.Unlock()
+		return nil
 	}
 	if e.localOutput != nil {
 		e.mu.Unlock()
@@ -696,13 +826,12 @@ func (e *Engine) Output(generation uint64, samples []int16) error {
 		e.mu.Unlock()
 		return nil
 	}
-	// Native call output ends at HANGUP. Only explicitly signaled upstream
-	// alerts/announcements may play outside a call; idle frames cannot revive it.
+	// Outside an accepted call, only explicitly owned native streams may play.
 	if e.state.Backend == string(Incubator) {
 		// Upstream can retain an announcement task across socket reconnect.
 		// CALL_START cancels it before listening: local start alone is not
 		// authority to play PCM that arrived before upstream accepted the call.
-		if (e.active && !e.runStarted) || (!e.active && !e.state.Alert && !e.announcing) {
+		if (e.active && !e.runStarted) || (!e.active && !e.state.Alert && !e.announcing && !(e.intercom && e.state.MonitorID != 0)) {
 			e.mu.Unlock()
 			return nil
 		}
@@ -720,6 +849,9 @@ func (e *Engine) Output(generation uint64, samples []int16) error {
 	err := e.player.Write(ctx, samples)
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if monitorID != 0 && (ctx != e.output || e.state.MonitorID != monitorID) {
+		return nil // A retired relay write cannot fail the new stream or link.
+	}
 	// A blocked Write can finish after Stop, mute or connection replacement.
 	// It must not reassert playback in the newer presentation.
 	if generation == e.generation && ctx == e.output && e.outputOpen && !e.discard && !e.cancelling && !e.state.Muted {
@@ -814,6 +946,8 @@ func (e *Engine) openOutput() {
 			e.outputOwner = "alert"
 		} else if e.announcing && !e.active {
 			e.outputOwner = "announcement"
+		} else if e.intercom && !e.active {
+			e.outputOwner = "intercom"
 		}
 		e.outputAccepted, e.outputDraining, e.outputFailed = false, false, false
 		e.outputReceived = false

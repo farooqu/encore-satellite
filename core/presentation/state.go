@@ -17,7 +17,7 @@ type Speaker struct {
 // the engine; playing/draining additionally require a successful host Write.
 type Output struct {
 	State    string `json:"state"`
-	Owner    string `json:"owner"` // voice, announcement or alert
+	Owner    string `json:"owner"` // voice, announcement, alert or intercom
 	Received bool   `json:"received"`
 }
 
@@ -34,7 +34,8 @@ type State struct {
 	Generation  uint64  `json:"generation"`
 	Turn        uint64  `json:"turn"`
 	Active      bool    `json:"active"`
-	Announcing  bool    `json:"announcing"` // upstream marker, not proof of PCM
+	Announcing  bool    `json:"announcing"`           // upstream marker, not proof of PCM
+	MonitorID   uint64  `json:"monitor_id,omitempty"` // request identity for the recording indicator
 	Inhibited   bool    `json:"inhibited"`
 	Invocation  string  `json:"invocation,omitempty"` // wake, manual or follow_up
 	Input       string  `json:"input,omitempty"`      // tentative or listening

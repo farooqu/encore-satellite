@@ -25,13 +25,40 @@ type Server struct {
 	// EnableModels requires the host to deliver privacy-gated audio via Capture.
 	// Without it HELLO makes no model-execution claim (e.g. manual-only labs).
 	EnableModels bool
-	captureMu    sync.RWMutex
-	models       *modelSession
+	// CallAEC requires the host's Capture stream to come from its AEC path.
+	// Both call routes use those same samples.
+	CallAEC bool
+	// MonitorAEC requires CallAEC and a host that confirms the local recording
+	// indicator via Engine.ConfirmMonitor. It sends no unprocessed mic stream.
+	MonitorAEC bool
+	captureMu  sync.RWMutex
+	models     *modelSession
 }
 
-type link struct{ *outbox.Queue }
+type link struct {
+	*outbox.Queue
+	monitorMu sync.Mutex
+	revoked   uint64
+	writing   bool
+}
 
 func (*link) Backend() session.Backend { return session.Incubator }
+
+func (l *link) Send(c session.Command) error {
+	if c.Kind != "monitor_off" {
+		return l.Queue.Send(c)
+	}
+	l.monitorMu.Lock()
+	l.revoked = c.MonitorID
+	writing := l.writing
+	l.monitorMu.Unlock()
+	if writing {
+		// Do not wait behind a stalled peer or leave an in-flight monitor
+		// frame alive after revocation. A fresh connection must request again.
+		return l.Close()
+	}
+	return l.Queue.Send(c)
+}
 
 // Capture supplies both session pre-roll/live audio and local model inference.
 // The host must call it only inside its OS-level privacy boundary. DSP is queued
@@ -39,10 +66,11 @@ func (*link) Backend() session.Backend { return session.Incubator }
 func (s *Server) Capture(frame audio.Frame) error {
 	s.captureMu.RLock()
 	defer s.captureMu.RUnlock()
-	if err := s.Engine.Capture(frame); err != nil {
+	modelInput, err := s.Engine.CaptureForModels(frame)
+	if err != nil {
 		return err
 	}
-	if s.models != nil {
+	if modelInput && s.models != nil {
 		s.models.feed(frame)
 	}
 	return nil
@@ -118,7 +146,7 @@ func (s *Server) Serve(ctx context.Context, listener net.Listener) error {
 }
 
 func (s *Server) serveConn(ctx context.Context, conn net.Conn) error {
-	l := &link{outbox.New(conn.Close)}
+	l := &link{Queue: outbox.New(conn.Close)}
 	generation, err := s.Engine.Attach(l)
 	if err != nil {
 		return err
@@ -153,11 +181,18 @@ func (s *Server) serveConn(ctx context.Context, conn net.Conn) error {
 		}
 		return write(kind, b)
 	}
+	monitor := s.CallAEC && s.MonitorAEC
 	hello := map[string]any{
 		"protocol": 2, "name": s.Name, "mac": s.MAC, "model": "encore-core", "firmware": s.Version,
 		"sample_rate": 16000, "channels": 1, "bits_per_sample": 16,
 		"preroll_ms": audio.PreRollSamples * 1000 / audio.SampleRate,
-		"listen":     true, "aec": false, "monitor": false, "intercom": false,
+		"listen":     true, "aec": s.CallAEC, "monitor": monitor, "monitor_aec": monitor, "intercom": monitor,
+	}
+	if monitor {
+		hello["monitor_result"] = true
+	}
+	if s.CallAEC {
+		hello["aec_lead_samples"] = 0 // one capture path, no relative pipeline delay
 	}
 	if models != nil {
 		hello["wake_format"], hello["model_slots"] = "mixednet", modelSlots
@@ -173,11 +208,42 @@ func (s *Server) serveConn(ctx context.Context, conn net.Conn) error {
 		_ = l.Run(func(c session.Command) error {
 			switch c.Kind {
 			case "start":
-				return send(0x02, map[string]any{"wake_word": c.Detection.Word, "preroll_bytes": c.PreRollBytes, "aec_preroll_bytes": 0, "probability": c.Detection.Probability, "max_probability": c.Detection.MaxProbability, "cutoff": c.Detection.Cutoff})
-			case "audio":
+				aecPreRoll := 0
+				if s.CallAEC {
+					aecPreRoll = c.PreRollBytes
+				}
+				return send(0x02, map[string]any{"wake_word": c.Detection.Word, "preroll_bytes": c.PreRollBytes, "aec_preroll_bytes": aecPreRoll, "probability": c.Detection.Probability, "max_probability": c.Detection.MaxProbability, "cutoff": c.Detection.Cutoff})
+			case "audio", "monitor_audio":
 				b := make([]byte, len(c.Samples)*2)
 				for i, v := range c.Samples {
 					binary.LittleEndian.PutUint16(b[i*2:], uint16(v))
+				}
+				if c.Kind == "monitor_audio" {
+					defer clear(c.Samples)
+					defer clear(b)
+					l.monitorMu.Lock()
+					if c.MonitorID <= l.revoked {
+						l.monitorMu.Unlock()
+						return nil
+					}
+					l.writing = true
+					l.monitorMu.Unlock()
+					defer func() {
+						l.monitorMu.Lock()
+						l.writing = false
+						l.monitorMu.Unlock()
+					}()
+					if err := write(0x0C, b); err != nil {
+						return err
+					}
+					return write(0x0A, b)
+				}
+				if s.CallAEC {
+					// Supply the aligned AEC tap before the primary frame can
+					// advance the peer's wake verifier or endpointer.
+					if err := write(0x08, b); err != nil {
+						return err
+					}
 				}
 				return write(0x03, b)
 			case "cancel":
@@ -191,8 +257,10 @@ func (s *Server) serveConn(ctx context.Context, conn net.Conn) error {
 				return send(0x04, map[string]string{"reason": c.Reason})
 			case "drained":
 				return send(0x06, map[string]any{})
-			case "announcing", "announced":
+			case "announcing", "announced", "intercom_end":
 				return send(0x09, map[string]string{"type": c.Kind})
+			case "monitor_result":
+				return send(0x09, map[string]any{"type": c.Kind, "request_id": c.RequestID, "accepted": c.MonitorID != 0})
 			case "stop_alert":
 				return send(0x09, map[string]string{"type": "stop_timer"})
 			}
@@ -201,6 +269,31 @@ func (s *Server) serveConn(ctx context.Context, conn net.Conn) error {
 		_ = l.Close()
 	}()
 	defer func() { _ = l.Close(); <-done }()
+	type relayBlock struct {
+		monitorID uint64
+		pcm       []int16
+	}
+	var relayID uint64
+	var relay chan relayBlock
+	if monitor {
+		relay = make(chan relayBlock, 4)
+		relayDone := make(chan struct{})
+		go func() {
+			defer close(relayDone)
+			for block := range relay {
+				if err := s.Engine.OutputIntercom(generation, block.monitorID, block.pcm); err != nil && !errors.Is(err, context.Canceled) {
+					_ = l.Close()
+					return
+				}
+			}
+		}()
+		defer func() {
+			// EOF must cancel a blocked relay write before waiting for it.
+			s.Engine.Disconnect(generation, "connection_closed")
+			close(relay)
+			<-relayDone
+		}()
+	}
 	for {
 		kind, data, err := readFrame(conn)
 		if err != nil {
@@ -208,16 +301,26 @@ func (s *Server) serveConn(ctx context.Context, conn net.Conn) error {
 		}
 		switch kind {
 		case 0x10:
-			if len(data) == 0 || len(data)%2 != 0 {
+			if len(data) == 0 || len(data)%2 != 0 || len(data) > 4096 {
 				return errors.New("incubator: malformed PCM16")
 			}
 			pcm := make([]int16, len(data)/2)
 			for i := range pcm {
 				pcm[i] = int16(binary.LittleEndian.Uint16(data[i*2:]))
 			}
-			err = s.Engine.Output(generation, pcm)
+			if relayID != 0 {
+				// Live relay drops excess PCM rather than blocking peer off/EOF.
+				select {
+				case relay <- relayBlock{relayID, pcm}:
+				default:
+				}
+			} else {
+				err = s.Engine.Output(generation, pcm)
+			}
 		case 0x11:
-			err = s.Engine.EndOutput(generation)
+			if relayID == 0 { // Relay terminator follows monitor-off, never drains the relay.
+				err = s.Engine.EndOutput(generation)
+			}
 		case 0x12:
 			var event struct {
 				Type string `json:"type"`
@@ -274,6 +377,25 @@ func (s *Server) serveConn(ctx context.Context, conn net.Conn) error {
 				return err
 			}
 			err = s.Engine.Handle(generation, session.Event{Kind: "hangup", Reason: event.Reason, Listen: event.Listen})
+		case 0x14:
+			if monitor {
+				var request struct {
+					Active, Intercom bool
+					RequestID        uint64 `json:"request_id"`
+				}
+				if err = json.Unmarshal(data, &request); err != nil {
+					return err
+				}
+				var id uint64
+				id, err = s.Engine.SetMonitor(generation, request.Active, request.Intercom, request.RequestID)
+				relayID = 0
+				if request.Intercom {
+					relayID = id
+				}
+				if errors.Is(err, session.ErrUnavailable) && (request.RequestID != 0 || !(request.Active && request.Intercom)) {
+					err = nil // Report negotiated denial without interrupting a turn.
+				}
+			}
 		case 0x20, 0x21, 0x22, 0x23:
 			if models != nil {
 				err = models.handle(kind, data, send)

@@ -277,12 +277,16 @@ func captureLossMonitor(m captureControls) (func() (bool, error), error) {
 	}, nil
 }
 
-func capture(ctx context.Context, pcm capturePCM, loss func() (bool, error), gate *linux.Privacy, voice *incubator.Server, meter *captureMeter, probe *referenceProbe, ready func(), privacy ...func(bool)) error {
+func capture(ctx context.Context, pcm capturePCM, loss func() (bool, error), gate *linux.Privacy, voice *incubator.Server, meter *captureMeter, probe *referenceProbe, aec *loopbackAEC, ready func(), privacy ...func(bool)) error {
 	engine := voice.Engine
 	defer meter.clear()
 	if probe != nil {
 		defer probe.reset()
 	}
+	if aec != nil {
+		defer func() { *aec = loopbackAEC{} }()
+	}
+	started, discontinuity, announced := false, false, false
 	var arm *referenceArm // capture owner's per-block view; no pre-arm samples
 	stopObservation := func(err error) {
 		if arm != nil {
@@ -295,6 +299,9 @@ func capture(ctx context.Context, pcm capturePCM, loss func() (bool, error), gat
 	setPrivacy := func(muted bool, err error) {
 		if muted {
 			stopObservation(errReferencePrivacy)
+			if aec != nil && started {
+				*aec = loopbackAEC{}
+			}
 			engine.SetMuted(true)
 			meter.clear()
 		}
@@ -308,7 +315,6 @@ func capture(ctx context.Context, pcm capturePCM, loss func() (bool, error), gat
 	}
 	b := make([]byte, 320*27)
 	defer clear(b)
-	started, discontinuity, announced := false, false, false
 	var sequence uint64
 	opened := time.Now()
 	for ctx.Err() == nil {
@@ -359,6 +365,7 @@ func capture(ctx context.Context, pcm capturePCM, loss func() (bool, error), gat
 		if readErr != nil && !errors.Is(readErr, syscall.EAGAIN) && !errors.Is(readErr, syscall.EINTR) {
 			if !errors.Is(readErr, alsa.ErrOverrun) {
 				stopObservation(readErr)
+				engine.SetMuted(true)
 				return readErr
 			}
 			lost = true
@@ -367,6 +374,9 @@ func capture(ctx context.Context, pcm capturePCM, loss func() (bool, error), gat
 			clear(b)
 			meter.clear()
 			stopObservation(errReferenceLoss)
+			if aec != nil {
+				*aec = loopbackAEC{}
+			}
 			engine.SetMuted(true) // invalidate active speech immediately
 			if err := pcm.Rewind(); err != nil {
 				return err
@@ -379,6 +389,7 @@ func capture(ctx context.Context, pcm capturePCM, loss func() (bool, error), gat
 			samples, err := AveragePCM(b[:n])
 			if err != nil {
 				stopObservation(err)
+				engine.SetMuted(true)
 				return err
 			}
 			var captureErr error
@@ -389,11 +400,20 @@ func capture(ctx context.Context, pcm capturePCM, loss func() (bool, error), gat
 				capturedAt = time.Since(opened)
 				report, reportReady = probe.observe(b[:n], samples, time.Since(arm.started))
 			}
+			if aec != nil && !discontinuity {
+				if capturedAt == 0 {
+					capturedAt = time.Since(opened)
+				}
+				// Do the DSP outside the privacy lock; the second check
+				// discards the output and resets the filter if mute raced it.
+				phase := engine.Snapshot().Phase
+				aec.process(b[:n], samples, phase != "tentative" && phase != "listening")
+			}
 			muted, privacyErr = gate.Check(func() {
 				engine.SetMuted(false)
 				frameAt := time.Since(opened)
 				if capturedAt != 0 {
-					frameAt = capturedAt // do not include the diagnostic's scan time
+					frameAt = capturedAt // do not include DSP or diagnostic scan time
 				}
 				captureErr = voice.Capture(audio.Frame{Samples: samples, Sequence: sequence, CapturedAt: frameAt, Discontinuity: discontinuity})
 				if captureErr == nil && !discontinuity && ctx.Err() == nil {
@@ -407,6 +427,9 @@ func capture(ctx context.Context, pcm capturePCM, loss func() (bool, error), gat
 			})
 			if captureErr != nil {
 				stopObservation(captureErr)
+				if aec != nil {
+					*aec = loopbackAEC{}
+				}
 			}
 			setPrivacy(muted, privacyErr)
 			clear(samples)

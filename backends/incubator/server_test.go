@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -62,9 +63,14 @@ func start(t *testing.T, p *speaker) (*session.Engine, string) {
 
 func startServer(t *testing.T, p *speaker, models bool) (*incubator.Server, string) {
 	t.Helper()
-	ctx, cancel := context.WithCancel(context.Background())
 	e := session.New(p)
 	s := &incubator.Server{Engine: e, Name: "test", MAC: "02:00:00:00:00:01", Version: "0.1.0-dev.0", EnableModels: models}
+	return s, serveTest(t, s)
+}
+
+func serveTest(t *testing.T, s *incubator.Server) string {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -84,7 +90,7 @@ func startServer(t *testing.T, p *speaker, models bool) (*incubator.Server, stri
 			t.Error("server leaked connection")
 		}
 	})
-	return s, l.Addr().String()
+	return l.Addr().String()
 }
 func connect(t *testing.T, address string) net.Conn {
 	t.Helper()
@@ -126,6 +132,200 @@ func object(t *testing.T, b []byte) map[string]any {
 		t.Fatal(err)
 	}
 	return value
+}
+
+func TestNativeMonitoringRequiresIndicatorAndDoesNotReuseAudio(t *testing.T) {
+	e := session.New(&speaker{})
+	s := &incubator.Server{Engine: e, Name: "test", MAC: "02:00:00:00:00:01", CallAEC: true, MonitorAEC: true}
+	c := connect(t, serveTest(t, s))
+	hello := object(t, receive(t, c, 0x01))
+	if hello["monitor_aec"] != true || hello["monitor"] != true || hello["intercom"] != true {
+		t.Fatal(hello)
+	}
+	waitMonitor := func(active bool) uint64 {
+		t.Helper()
+		for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); time.Sleep(time.Millisecond) {
+			id := e.Snapshot().MonitorID
+			if (id != 0) == active {
+				return id
+			}
+		}
+		t.Fatalf("monitor did not reach active=%t", active)
+		return 0
+	}
+	noAudio := func() {
+		t.Helper()
+		_ = c.SetReadDeadline(time.Now().Add(25 * time.Millisecond))
+		if _, err := c.Read(make([]byte, 1)); !errors.Is(err, os.ErrDeadlineExceeded) {
+			t.Fatalf("expected no frame on an open connection, got %v", err)
+		}
+	}
+	var seq uint64
+	capture := func(value int16) {
+		t.Helper()
+		if err := s.Capture(audio.Frame{Samples: []int16{value}, Sequence: seq, CapturedAt: time.Duration(seq) * time.Millisecond}); err != nil {
+			t.Fatal(err)
+		}
+		seq++
+	}
+	capture(1200) // ordinary pre-roll must not appear in either monitor route
+	noAudio()
+	send(t, c, 0x14, []byte(`{"active":true,"intercom":false}`))
+	first := waitMonitor(true)
+	if err := e.StartManual(); !errors.Is(err, session.ErrUnavailable) {
+		t.Fatal("manual wake during monitoring:", err)
+	}
+	capture(333)
+	noAudio()
+	e.ConfirmMonitor(first)
+	capture(-513)
+	for _, kind := range []byte{0x0C, 0x0A} {
+		if got := receive(t, c, kind); !slices.Equal(got, []byte{255, 253}) {
+			t.Fatalf("monitor PCM on %#x: %v", kind, got)
+		}
+	}
+	noAudio()
+	send(t, c, 0x14, []byte(`{"active":false}`))
+	waitMonitor(false)
+	noAudio()
+	send(t, c, 0x14, []byte(`{"active":true}`))
+	second := waitMonitor(true)
+	if first == second {
+		t.Fatal("reused revoked monitor request")
+	}
+	e.ConfirmMonitor(first)
+	capture(515)
+	noAudio()
+	e.ConfirmMonitor(second)
+	capture(1000)
+	for _, kind := range []byte{0x0C, 0x0A} {
+		if got := receive(t, c, kind); !slices.Equal(got, []byte{232, 3}) {
+			t.Fatalf("rearmed monitor PCM on %#x: %v", kind, got)
+		}
+	}
+	e.SetMuted(true)
+	capture(123)
+	if _, err := c.Read(make([]byte, 1)); err != io.EOF || e.Snapshot().MonitorID != 0 {
+		t.Fatalf("mute did not revoke the monitor connection: %v", err)
+	}
+}
+
+func TestNativeIntercomSeparatesCuesAndRelay(t *testing.T) {
+	for _, end := range []string{"peer", "local", "mute"} {
+		t.Run(end, func(t *testing.T) {
+			p := &speaker{}
+			e := session.New(p)
+			s := &incubator.Server{Engine: e, Name: "test", MAC: "02:00:00:00:00:01", CallAEC: true, MonitorAEC: true}
+			c := connect(t, serveTest(t, s))
+			receive(t, c, 0x01)
+			pcm := func(value byte) { send(t, c, 0x10, []byte{value, 0}) }
+			cue := func(value byte) {
+				send(t, c, 0x12, []byte(`{"type":"announcement","data":{"active":true}}`))
+				pcm(value)
+				send(t, c, 0x11, nil)
+				receive(t, c, 0x06)
+				send(t, c, 0x12, []byte(`{"type":"announcement","data":{"active":false}}`))
+			}
+			pcm(1) // unowned, including PCM on a newly connected idle peer
+			cue(2)
+			send(t, c, 0x14, []byte(`{"active":true,"intercom":true}`))
+			pcm(3)
+			deadline := time.Now().Add(time.Second)
+			for e.Snapshot().Output.Owner != "intercom" && time.Now().Before(deadline) {
+				time.Sleep(time.Millisecond)
+			}
+			st := e.Snapshot()
+			if st.Output.Owner != "intercom" || st.MonitorID == 0 || st.WakeAllowed {
+				t.Fatalf("intercom did not own playback: %+v", st)
+			}
+			if end == "mute" {
+				e.SetMuted(true)
+				_ = c.SetReadDeadline(time.Now().Add(time.Second))
+				if _, err := c.Read(make([]byte, 1)); err != io.EOF || e.Snapshot().MonitorID != 0 {
+					t.Fatalf("physical mute did not retire intercom: %v", err)
+				}
+				return
+			}
+			if end == "local" {
+				if err := e.Stop(); err != nil {
+					t.Fatal(err)
+				}
+				if event := object(t, receive(t, c, 0x09)); event["type"] != "intercom_end" {
+					t.Fatal(event)
+				}
+				pcm(4) // already on its way when the local button was pressed
+			}
+			send(t, c, 0x14, []byte(`{"active":false}`))
+			pcm(5) // after monitor-off, still part of the relay
+			send(t, c, 0x11, nil)
+			cue(6)
+			_ = c.SetReadDeadline(time.Now().Add(25 * time.Millisecond))
+			if _, err := c.Read(make([]byte, 1)); !errors.Is(err, os.ErrDeadlineExceeded) {
+				t.Fatalf("relay terminator must not send a Drain ACK: %v", err)
+			}
+			p.mu.Lock()
+			defer p.mu.Unlock()
+			if !slices.Equal(p.pcm, []int16{2, 3, 6}) {
+				t.Fatalf("speaker got %v; want only connect cue, live relay and end cue", p.pcm)
+			}
+		})
+	}
+}
+
+func TestNativeCallAECAdvertisesAndPairsCapture(t *testing.T) {
+	e := session.New(&speaker{})
+	s := &incubator.Server{Engine: e, Name: "test", MAC: "02:00:00:00:00:01", CallAEC: true}
+	c := connect(t, serveTest(t, s))
+	hello := object(t, receive(t, c, 0x01))
+	if hello["aec"] != true || hello["aec_lead_samples"] != float64(0) || hello["monitor_aec"] == true || hello["monitor"] != false || hello["intercom"] != false {
+		t.Fatal(hello)
+	}
+	if err := s.Capture(audio.Frame{Samples: []int16{-513, 1000, 5}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Wake(wake.Detection{Word: "nabu"}); err != nil {
+		t.Fatal(err)
+	}
+	call := object(t, receive(t, c, 0x02))
+	if call["preroll_bytes"] != float64(6) || call["aec_preroll_bytes"] != float64(6) {
+		t.Fatal(call)
+	}
+	for _, kind := range []byte{0x08, 0x03} {
+		if got := receive(t, c, kind); !slices.Equal(got, []byte{255, 253, 232, 3, 5, 0}) {
+			t.Fatalf("pre-roll on %#x: %v", kind, got)
+		}
+	}
+	if err := s.Capture(audio.Frame{Samples: []int16{32767, -32768}, Sequence: 1, CapturedAt: time.Millisecond}); err != nil {
+		t.Fatal(err)
+	}
+	for _, kind := range []byte{0x08, 0x03} {
+		if got := receive(t, c, kind); !slices.Equal(got, []byte{255, 127, 0, 128}) {
+			t.Fatalf("live PCM on %#x: %v", kind, got)
+		}
+	}
+
+	send(t, c, 0x13, []byte(`{"reason":"complete","listen":true}`))
+	follow := object(t, receive(t, c, 0x02))
+	if follow["wake_word"] != "follow_up" || follow["preroll_bytes"] != float64(0) || follow["aec_preroll_bytes"] != float64(0) {
+		t.Fatal(follow)
+	}
+	if err := s.Capture(audio.Frame{Samples: []int16{-42}, Sequence: 2, CapturedAt: 2 * time.Millisecond}); err != nil {
+		t.Fatal(err)
+	}
+	for _, kind := range []byte{0x08, 0x03} {
+		if got := receive(t, c, kind); !slices.Equal(got, []byte{214, 255}) {
+			t.Fatalf("follow-up PCM on %#x: %v", kind, got)
+		}
+	}
+
+	e.SetMuted(true)
+	if err := s.Capture(audio.Frame{Samples: []int16{123}, Sequence: 3, CapturedAt: 3 * time.Millisecond}); err != nil {
+		t.Fatal(err)
+	}
+	receive(t, c, 0x04)
+	if _, err := c.Read(make([]byte, 1)); err != io.EOF {
+		t.Fatalf("muting did not end call audio: %v", err)
+	}
 }
 
 func TestNativeWireEvidenceEndpointingDrainAndFollowUp(t *testing.T) {

@@ -212,7 +212,7 @@ func Run(parent context.Context, c Config, probeReference bool) error {
 		info := esphome.Info{Name: c.Name, FriendlyName: c.Name, MACAddress: mac.String(), Manufacturer: "Encore Satellite", Model: "Echo Dot (2nd gen)", Version: "0.1.0-dev.0", ProjectName: "encore.satellite"}
 		return controls.serveAPI(ctx, KeyPath, apiAction, info, apiAd)
 	})
-	voice := &incubator.Server{Engine: engine, Name: c.Name, MAC: mac.String(), Version: "0.1.0-dev.0", EnableModels: true}
+	voice := &incubator.Server{Engine: engine, Name: c.Name, MAC: mac.String(), Version: "0.1.0-dev.0", EnableModels: true, CallAEC: true, MonitorAEC: true}
 	start(func() error {
 		return voice.Serve(ctx, voiceListener)
 	})
@@ -244,8 +244,12 @@ func Run(parent context.Context, c Config, probeReference bool) error {
 				}
 				now = time.Now()
 				reading := meter.snapshot(now)
-				if e := ring.update(voice.Snapshot(reading.ready), reading, now, ringPolicy.snapshot()); e != nil {
+				state := voice.Snapshot(reading.ready)
+				if e := ring.update(state, reading, now, ringPolicy.snapshot()); e != nil {
 					return e
+				}
+				if ringMode(state) == "monitor" {
+					engine.ConfirmMonitor(state.MonitorID)
 				}
 			}
 		}
@@ -255,8 +259,9 @@ func Run(parent context.Context, c Config, probeReference bool) error {
 	if probeReference {
 		probe = &referenceProbe{reports: make(chan referenceReport, 1)}
 	}
+	aec := &loopbackAEC{}
 	start(func() error {
-		return capture(ctx, mic, loss, gate, voice, meter, probe, func() { ready <- struct{}{} }, player.SetMusicPrivacy, controls.microphone.SetMuted)
+		return capture(ctx, mic, loss, gate, voice, meter, probe, aec, func() { ready <- struct{}{} }, player.SetMusicPrivacy, controls.microphone.SetMuted)
 	})
 	for {
 		select {
@@ -264,7 +269,7 @@ func Run(parent context.Context, c Config, probeReference bool) error {
 			if err = os.WriteFile(ReadyPath, []byte(strconv.Itoa(os.Getpid())+"\n"), 0644); err != nil {
 				return err
 			}
-			log.Printf("Encore %s ready (Incubator package); Action or app-pushed MixedNet wake models; no AEC/beamformer", c.Name)
+			log.Printf("Encore %s ready (Incubator package); Action or app-pushed MixedNet wake models", c.Name)
 			if probe != nil {
 				workers.Go(func() {
 					marker := fmt.Sprintf("/run/encore/aec-probe/arm.%d", os.Getpid())

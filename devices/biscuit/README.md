@@ -45,7 +45,7 @@ does not need this rename for physical preflight; no device migration is perform
   Linux host primitives, Biscuit wiring and the native Incubator backend only.
 - Source-backed ALSA capture: card 0/device 24, 16 kHz packed24, nine channels.
   Microphone channels 0–6 are equally averaged into bounded mono PCM16; playback
-  references 7/8 are excluded. Signed 24-bit values are summed before one division
+  references 7/8 are excluded from the average. Signed 24-bit values are summed before one division
   by 7×256, truncating toward zero. This is plain normalized averaging, without
   steering, AEC, additional gain or buffered history; real-array pickup remains
   unqualified.
@@ -68,14 +68,41 @@ does not need this rename for physical preflight; no device migration is perform
 - Experimental signed AArch64 rootfs updates with explicit trial installation;
   no live feed or physical OTA qualification is implied.
 
-**Not implemented by this package:** AEC/beamforming, speaker EQ calibration,
+**Not implemented by this package:** beamforming, speaker EQ calibration,
 Voice PE ring parity, base/kernel OTA migration or a production release service.
 Voice activation uses Action or
-app-pushed microWakeWord/MixedNet models. Incubator does not advertise AEC,
-monitoring or intercom. A source-backed
+app-pushed microWakeWord/MixedNet models. Intercom is not supported. A source-backed
 route is not an acoustic result; playback level and every physical control still
 need testing on an Encore unit. The deliberately quiet untuned output is not a
 calibrated safe-output guarantee.
+
+### Loopback AEC and Incubator monitoring
+
+Capture uses one 1,024-tap (64 ms) linear adaptive filter on the seven-mic
+average, using co-captured lane 7. Playback is unchanged. The adapter advertises
+in-call `aec` and sends the same processed PCM on the primary (`0x03`) and AEC
+(`0x08`) routes, with equal pre-roll lengths and no relative sample lead.
+The filter keeps subtracting while listening but freezes learning during tentative
+and listening phases; this is not a general double-talk detector. Capture loss,
+privacy denial and delivery errors invalidate filter history and weights.
+
+Incubator live listening uses `monitor` (`0x0A`); Enroll Voice and Teach Wake
+Word use `monitor_aec` (`0x0C`). Both use the same processed stream, only in
+response to an idle-session request from the existing trusted Incubator peer.
+The recording ring must be displayed before audio is sent. Monitoring does not
+send pre-roll or trigger calls. App stop, physical mute, Action, capture loss,
+or disconnect ends capture delivery. The native Incubator transport is not
+authenticated or encrypted; run it on a trusted network only.
+
+Intercom uses the same recording indicator and AEC capture. For prompt connect
+and end tones, pair with an Incubator app that marks those tones with its
+existing `announcement` event. The `MONITOR` intercom request owns only relayed
+speech. Ending the monitor flushes that speech without a playback-drained
+acknowledgment; an explicitly marked end tone can play afterward.
+
+Lane mapping, causal delay and tail, reference behavior at playback recovery,
+single-core cost, wake/Stop during playback, and the recording indicator are
+not qualified on hardware. The live audio stream does not report model scores.
 
 ## Home Assistant TTS announcements
 

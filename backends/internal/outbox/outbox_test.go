@@ -81,3 +81,33 @@ func TestCancelDropsQueuedCaptureButRetainsStartAndControls(t *testing.T) {
 		t.Fatal("cancel lost pipeline start/control or sent queued capture", kinds, err)
 	}
 }
+
+func TestMonitorOffPurgesQueuedMonitorBeforeRearm(t *testing.T) {
+	q := outbox.New(func() error { return nil })
+	defer q.Close()
+	for _, c := range []session.Command{
+		{Kind: "announced"},
+		{Kind: "monitor_audio", MonitorID: 1, Samples: []int16{100}},
+		{Kind: "monitor_off", MonitorID: 1},
+		{Kind: "monitor_audio", MonitorID: 2, Samples: []int16{-200}},
+		{Kind: "drained"},
+	} {
+		if err := q.Send(c); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var kinds []string
+	_ = q.Run(func(c session.Command) error {
+		kinds = append(kinds, c.Kind)
+		if c.Kind == "monitor_audio" && (c.MonitorID != 2 || !slices.Equal(c.Samples, []int16{-200})) {
+			t.Fatal("revoked monitor data reached writer", c)
+		}
+		if c.Kind == "drained" {
+			return errors.New("finished")
+		}
+		return nil
+	})
+	if !slices.Equal(kinds, []string{"announced", "monitor_audio", "drained"}) {
+		t.Fatal("monitor off lost unrelated commands", kinds)
+	}
+}

@@ -47,7 +47,7 @@ func (e *Engine) Announce(parent context.Context, stream func(context.Context, f
 		result.Outcome = "parent_canceled"
 		return result, err
 	}
-	if e.state.Muted || e.cancelling || e.discard || e.outputOpen || e.state.Alert {
+	if e.state.Muted || e.cancelling || e.discard || e.outputOpen || e.state.Alert || e.intercom {
 		e.mu.Unlock()
 		result.Outcome = "unavailable"
 		return result, ErrUnavailable

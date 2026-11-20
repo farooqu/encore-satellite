@@ -82,6 +82,8 @@ func ringMode(s presentation.State) string {
 	switch {
 	case s.Muted:
 		return "privacy"
+	case s.Connected && s.MonitorID != 0:
+		return "monitor"
 	case !s.Connected || !s.CaptureReady:
 		return "unavailable"
 	case s.Inhibited:
@@ -133,6 +135,11 @@ func RingFrame(s presentation.State, level float64, elapsed time.Duration, optio
 	for i := range 12 {
 		color, intensity := [3]float64{1, .45, .02}, .55
 		switch mode {
+		case "monitor":
+			color, intensity = [3]float64{1, .04, .27}, .85
+			if i%2 != 0 {
+				intensity = .42
+			}
 		case "input", "tentative":
 			color = [3]float64{.13, 1, .68}
 			intensity = .35
@@ -185,6 +192,10 @@ func RingFrame(s presentation.State, level float64, elapsed time.Duration, optio
 			}
 		}
 		frame[i*3+dominant] = max(1, frame[i*3+dominant])
+		if mode == "monitor" && i%2 == 0 {
+			// Keep a magenta accent distinct from privacy red at minimum PWM.
+			frame[i*3+2] = max(1, frame[i*3+2])
+		}
 	}
 	return frame
 }
@@ -226,7 +237,7 @@ func (r *ringRenderer) update(s presentation.State, mic captureReading, now time
 	frame := RingFrame(s, r.level, now.Sub(r.entered), options)
 	if r.volume != nil {
 		v := r.volume()
-		if mode == "privacy" || mode == "unavailable" || mode == "alert" || s.Inhibited {
+		if mode == "privacy" || mode == "unavailable" || mode == "alert" || mode == "monitor" || s.Inhibited {
 			// Never replay feedback that was hidden by privacy, a fault, Stop
 			// or an alert after that higher-priority condition clears.
 			r.volumeDismissed = v.at

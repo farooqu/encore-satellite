@@ -419,6 +419,7 @@ func TestVolumeRingFeedbackRangeExpiryAndPriority(t *testing.T) {
 		func(s *presentation.State) { s.Muted = true },
 		func(s *presentation.State) { s.Connected = false },
 		func(s *presentation.State) { s.Alert = true },
+		func(s *presentation.State) { s.MonitorID = 1 },
 		func(s *presentation.State) { s.Inhibited = true },
 	} {
 		now = now.Add(2 * time.Second)
@@ -468,6 +469,19 @@ func TestRingFramesDistinguishInputWorkQueuedPlaybackAndPriority(t *testing.T) {
 	}
 	if at(ready, 1, 0) != [36]byte{} {
 		t.Fatal("healthy idle is not quiet")
+	}
+	monitoring := ready
+	monitoring.MonitorID = 1
+	if frame := at(monitoring, 0, 0); frame[0] <= frame[3] || frame[3] == 0 || frame[2] == 0 {
+		t.Fatal("recording indicator is not distinct from idle or mute", frame)
+	}
+	monitoring.Night = "on"
+	if frame := RingFrame(monitoring, 0, 0, RingOptions{Brightness: 1}); frame[2] != 1 || frame[5] != 0 {
+		t.Fatal("recording indicator lost its distinction at minimum brightness", frame)
+	}
+	monitoring.Muted = true
+	if frame := at(monitoring, 0, 0); frame[0] == 0 || frame[0] != frame[3] || frame[2] != 0 {
+		t.Fatal("recording indicator replaced privacy red", frame)
 	}
 	input := ready
 	input.Active, input.Input = true, "listening"
