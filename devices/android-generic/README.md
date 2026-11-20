@@ -164,20 +164,11 @@ these devices, acoustic timings or model-backed enrollment/training.
    but controls do not appear, reload its ESPHome integration. Existing installs
    keep their key and settings and skip pairing; **Reveal ESPHome encryption key**
    in local Settings remains available for manual recovery after pairing.
-   Set the single **Dashboard URL** text entity
-   to a full URL, for example `https://home.example/lovelace/home`. This supplies
-   both the HA origin and dashboard path; no separate tablet origin setup exists.
-   Prefer HTTPS; explicitly choosing `http://` permits trusted-LAN HTTP, including
-   unencrypted HA sign-in traffic. The paired ESPHome controller can change the
-   full URL, including its origin. Invalid URLs retain the previous configuration.
-   **Reload dashboard** is a separate button entity. No dashboard list or backend
-   selector exists. Previously configured full dashboard URLs remain valid.
    The read-only **Microphone muted** (`microphone_muted`) binary sensor reports
    the app's microphone privacy latch and updates when it changes. It does not
    report Android permission or recorder readiness and cannot unmute the app.
-4. Sign into HA in the dashboard itself. Only the HA dashboard is a WebView;
-   settings, privacy, voice, waveform and music controls are Compose. Initial
-   login supports same-origin flows only (no external-IdP allowlist yet).
+4. [Choose a Home Assistant dashboard](#choose-a-home-assistant-dashboard) and sign
+   in once in Encore's dashboard. ESPHome pairing does not sign in the tablet.
 5. Optionally connect a **current Noise-capable Sendspin server** by host:port in
    Settings. Reveal the independent Sendspin pairing token locally and provision
    it on the server. The player uses encrypted, Keystore-protected identity/trust;
@@ -192,6 +183,39 @@ stops it; restarting never silently reverses persisted microphone privacy.
 This initial package does not automatically resume after reboot or process death.
 The music server address/connection is entered explicitly each time; identity and
 pairing records persist. The screen stays awake while the Activity is visible.
+
+### Choose a Home Assistant dashboard
+
+The satellite's **Dashboard URL** entity is a text field in the ESPHome
+integration, not a dashboard picker. To pick by name, use Home Assistant's
+[personal default dashboard](https://www.home-assistant.io/dashboards/dashboards/#setting-a-default-dashboard):
+
+1. In the satellite's ESPHome device page, set **Dashboard URL** to your Home
+   Assistant **base URL**, for example `https://home.example/`. Use the address
+   the tablet can reach; do not add a dashboard path for this option.
+2. In Encore on the tablet, sign into Home Assistant with the account that should
+   be able to use the dashboard. This is an ordinary HA login; the app reuses the
+   HA session on that origin while it remains valid. Initial login must stay on
+   the configured origin; external identity-provider redirects are not supported.
+3. While signed in as that same account, go to **User profile → Appearance →
+   Dashboard** and choose your dashboard. For current HA versions this setting
+   follows that account across devices, so use a separate non-admin tablet
+   account if you want a tablet-specific default. Admin-only dashboards don't
+   appear for non-admins. Use **Reload dashboard** on the satellite's ESPHome
+   device page to reopen the base URL and show the selected default. No extra
+   integration is needed.
+
+To pin one dashboard or view instead, open it in your signed-in HA browser and
+copy its full URL (for example `https://home.example/lovelace/home`) into
+**Dashboard URL**. An explicit path takes precedence over the account default.
+Previously saved URLs are unchanged, and neither option grants access the tablet
+account doesn't already have.
+
+Prefer HTTPS. Explicitly choosing `http://` permits trusted-LAN HTTP, including
+unencrypted HA sign-in traffic. The paired ESPHome controller can change the full
+URL, including its origin; invalid URLs retain the previous configuration. Do
+not include credentials, query parameters, or fragments. Only the dashboard is
+a WebView; Encore settings, privacy, voice, waveform and music controls are Compose.
 
 ## Display and privacy behavior
 
