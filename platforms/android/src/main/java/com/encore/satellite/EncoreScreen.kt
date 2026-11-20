@@ -38,6 +38,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import com.encore.engine.mobile.Mobile
 import kotlinx.coroutines.launch
 
 private val Ink = Color(0xff0c141d)
@@ -202,9 +203,9 @@ fun EncoreScreen(state: EncoreState, onStart: () -> Unit, onTalk: () -> Unit, on
             Text(listOf(music.artist, if (ducked) "Quiet for voice" else "").filter { it.isNotEmpty() }.joinToString(" · "), color = Muted, maxLines = 1, fontSize = 12.sp)
             FlowRow {
                 if (music.playing && interrupted) TextButton(onClick = { command("resume") }) { Text("Resume audio") }
-                val action = if (music.playing) "pause" else "play"
+                val action = if (music.playing) Mobile.SendspinPause else Mobile.SendspinPlay
                 TextButton(onClick = { command(action) }, enabled = action in music.commands) { Text(if (music.playing) "Pause" else "Play") }
-                TextButton(onClick = { command("next") }, enabled = "next" in music.commands) { Text("Next") }
+                TextButton(onClick = { command(Mobile.SendspinNext) }, enabled = Mobile.SendspinNext in music.commands) { Text("Next") }
             }
         }
     }

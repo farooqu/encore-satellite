@@ -13,6 +13,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/farooqu/encore-satellite/backends/bluetooth"
+	"github.com/farooqu/encore-satellite/core/music"
 	"github.com/farooqu/encore-satellite/internal/esphomepairing"
 	"github.com/farooqu/encore-satellite/platforms/linuxsendspin"
 )
@@ -98,15 +99,25 @@ func (m *musicService) configure(enabled *bool, url *string) error {
 	}
 	return nil
 }
-func (m *musicService) command(cmd linuxsendspin.Command) {
+
+// Only the intents this player implements are translated to companion commands.
+var sendspinCommands = map[music.Command]linuxsendspin.Command{
+	music.Play: linuxsendspin.Play,
+	music.Stop: linuxsendspin.Stop,
+}
+
+func (m *musicService) command(intent music.Command) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if !m.enabled || !m.running || m.runningRevision != m.revision {
+	cmd, supported := sendspinCommands[intent]
+	ready := m.enabled && m.running && m.runningRevision == m.revision
+	if !intent.CanDispatch(ready, supported) {
 		return
 	}
-	if cmd == linuxsendspin.Play {
+	switch intent {
+	case music.Play:
 		m.player.PlayMusic()
-	} else {
+	case music.Stop:
 		m.player.StopMusic()
 	}
 	// Latest explicit intent wins; privacy is independently enforced in Mixer.
@@ -326,11 +337,11 @@ func (d *biscuitControls) Handle(ctx context.Context, c *esphome.Conn, msg proto
 			return d.broadcast()
 		}
 		if d.music != nil && v.Key == musicPlayKey {
-			d.music.command(linuxsendspin.Play)
+			d.music.command(music.Play)
 			return nil
 		}
 		if d.music != nil && v.Key == musicStopKey {
-			d.music.command(linuxsendspin.Stop)
+			d.music.command(music.Stop)
 			return nil
 		}
 	case *api.ExecuteServiceRequest:

@@ -2,6 +2,7 @@ package com.encore.satellite
 
 import android.os.Handler
 import android.os.Looper
+import com.encore.engine.mobile.Mobile
 import com.sendspindroid.model.PlaybackStateType
 import com.sendspindroid.playback.SendSpinEngine
 import com.sendspindroid.sendspin.PlaybackState
@@ -10,6 +11,7 @@ import com.sendspindroid.sendspin.SyncAudioPlayer
 import com.sendspindroid.sendspin.protocol.TrackMetadata
 import com.sendspindroid.coordinator.TransportState
 import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.combine
 
 /** Sendspin is an independent connection/output; it is not an ESPHome entity. */
 class MusicPlayer(name: String, host: MusicHost, private val changed: (MusicState) -> Unit) : SendSpin.Callback {
@@ -27,10 +29,15 @@ class MusicPlayer(name: String, host: MusicHost, private val changed: (MusicStat
         override fun onPlayerStateChanged(state: PlaybackState) {}
     }, lowMemoryMode = { true }, playerMuted = { muted })
     private val client = SendSpin(name, this, host).also { engine.client = it }
+    private val commands = mapOf(
+        Mobile.SendspinPlay to client::play,
+        Mobile.SendspinPause to client::pause,
+        Mobile.SendspinNext to client::next,
+        Mobile.SendspinPrevious to client::previous,
+    )
 
     init {
         changed(state)
-        scope.launch { client.controllerState.collect { controller -> publish(state.copy(commands = controller?.supportedCommands ?: emptyList())) } }
         scope.launch { client.connectionState.collect { transport ->
             publish(state.copy(status = when (transport) {
                 TransportState.Ready -> "Connected"
@@ -38,6 +45,13 @@ class MusicPlayer(name: String, host: MusicHost, private val changed: (MusicStat
                 else -> "Disconnected"
             }))
         } }
+        scope.launch {
+            combine(client.connectionState, client.controllerState) { transport, controller ->
+                controller?.supportedCommands.orEmpty().filter { command ->
+                    Mobile.sendspinCommandAllowed(command, transport == TransportState.Ready, command in commands)
+                }
+            }.collect { publish(state.copy(commands = it)) }
+        }
     }
 
     private fun onMain(action: () -> Unit) { main.post { if (!closed) action() } }
@@ -48,8 +62,10 @@ class MusicPlayer(name: String, host: MusicHost, private val changed: (MusicStat
         client.connect(value)
     }
     fun command(command: String) {
-        if (command !in state.commands) return
-        when (command) { "play" -> client.play(); "pause" -> client.pause(); "next" -> client.next(); "previous" -> client.previous() }
+        val supported = command in client.controllerState.value?.supportedCommands.orEmpty() && command in commands
+        if (Mobile.sendspinCommandAllowed(command, !closed && client.isConnected, supported)) {
+            commands[command]?.invoke()
+        }
     }
     fun duck(active: Boolean) {
         voiceActive = active
@@ -68,11 +84,10 @@ class MusicPlayer(name: String, host: MusicHost, private val changed: (MusicStat
         engine.applyServerPlayback(when (playbackState) {
             "playing" -> PlaybackStateType.PLAYING; "paused" -> PlaybackStateType.PAUSED; else -> PlaybackStateType.STOPPED
         })
-        publish(state.copy(playing = playing, commands = client.controllerState.value?.supportedCommands ?: emptyList()))
+        publish(state.copy(playing = playing))
     }
     override fun onMetadataUpdate(metadata: TrackMetadata, positionMs: Long) = onMain {
-        publish(state.copy(title = metadata.title.orEmpty(), artist = metadata.artist.orEmpty(),
-            commands = client.controllerState.value?.supportedCommands ?: emptyList()))
+        publish(state.copy(title = metadata.title.orEmpty(), artist = metadata.artist.orEmpty()))
     }
     override fun onArtwork(imageData: ByteArray) {}
     override fun onArtworkCleared() {}

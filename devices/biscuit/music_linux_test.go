@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/farooqu/encore-satellite/backends/bluetooth"
+	"github.com/farooqu/encore-satellite/core/music"
 	"github.com/farooqu/encore-satellite/core/session"
 	"github.com/farooqu/encore-satellite/platforms/linux"
 	"github.com/farooqu/encore-satellite/platforms/linuxsendspin"
@@ -280,7 +281,7 @@ func TestMusicSwitchLifecycleAndIndependentPersistence(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	// OFF must stay off; commands from that period cannot turn into autoplay.
-	m.command(linuxsendspin.Play)
+	m.command(music.Play)
 	select {
 	case <-m.commands:
 		t.Fatal("queued Play while disabled")
