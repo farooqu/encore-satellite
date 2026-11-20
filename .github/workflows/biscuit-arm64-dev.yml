@@ -72,10 +72,16 @@ jobs:
           [[ "$SOURCE" =~ ^[0-9a-f]{40}$ ]]
           test "$(git rev-parse HEAD)" = "$SOURCE"
           git rev-list --first-parent origin/main | grep -Fx "$SOURCE" > /dev/null
-      - name: Read the external-input lock from this commit
+      - name: Select the shared release identity and external-input lock
         id: inputs
         run: |
           set -euo pipefail
+          release=$(python3 release/biscuit_dev.py "$SOURCE")
+          if [[ -z "$release" ]]; then
+            echo '::notice::This source does not advance an eligible Encore release version.'
+            exit 0
+          fi
+          read -r version revision <<< "$release"
           tag=$(PYTHONPATH=devices/biscuit/packaging/kernel61 python3 -c '
           from locked_build import HERE, read_lock
           print(read_lock((HERE / "ci-inputs.json").read_bytes())["external_bundle_tag"] or "")
@@ -84,7 +90,7 @@ jobs:
             echo '::notice::No approved external bundle is available; skipping assembly.'
             exit 0
           fi
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          printf 'tag=%s\nversion=%s\nrevision=%s\n' "$tag" "$version" "$revision" >> "$GITHUB_OUTPUT"
       - name: Fetch the locked external inputs (no prebuilt Encore assets)
         if: steps.inputs.outputs.tag != ''
         env:
@@ -104,16 +110,15 @@ jobs:
           curl --fail --silent --show-error --location --output "$inputs/go-source.tar.gz" \
             https://go.dev/dl/go1.27.4.src.tar.gz
       - name: Build starter, OTA, unsigned native A/B candidates and source kits from this commit
-        id: assemble
         if: steps.inputs.outputs.tag != ''
+        env:
+          VERSION: ${{ steps.inputs.outputs.version }}
+          REVISION: ${{ steps.inputs.outputs.revision }}
         run: |
           set -euo pipefail
-          identity=$(python3 release/biscuit_dev.py "$SOURCE")
-          read -r version revision <<< "$identity"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
           python3 devices/biscuit/packaging/kernel61/locked_build.py \
             --inputs "$RUNNER_TEMP/inputs" --output build/biscuit-arm64-dev \
-            --version "$version" --revision "$revision"
+            --version "$VERSION" --revision "$REVISION"
           git diff --exit-code
           cat build/biscuit-arm64-dev/evidence.txt >> "$GITHUB_STEP_SUMMARY"
       - name: Prepare unsigned native A/B candidate for independent review
@@ -132,7 +137,7 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: steps.inputs.outputs.tag != ''
         with:
-          name: biscuit-arm64-${{ steps.assemble.outputs.version }}
+          name: biscuit-arm64-${{ steps.inputs.outputs.version }}
           path: |
             build/biscuit-arm64-dev/primary
             build/biscuit-arm64-dev/repeat

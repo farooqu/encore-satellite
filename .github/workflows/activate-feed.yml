@@ -150,9 +150,14 @@ jobs:
           if r['target'] == 'android-generic':
               assert str(r['revision']) == os.environ['REVISION'], 'release identity mismatch'
               assert r['compatibility']['certificate_sha256'] == os.environ['EXPECTED_CERTIFICATE'], 'unexpected APK signer'
+              if os.environ['SIGNED_FEED_ARTIFACT']:
+                  assert r.get('identity') == 'main', 'automatic Android activation requires a main-derived identity'
           else:
               assert r['core_version'] == os.environ['REVISION'], 'release identity mismatch'
           subprocess.run(['git', 'merge-base', '--is-ancestor', r['source'], 'HEAD'], check=True)
+          if r['target'] == 'biscuit' or r.get('identity') == 'main':
+              history = subprocess.check_output(['git', 'rev-list', '--first-parent', 'HEAD'], text=True).splitlines()
+              assert r['source'] in history, 'Release source must be a first-parent main commit'
           PY
           # This branch must be deliberately bootstrapped; a missing checkpoint
           # branch is an error, not permission to discard old feeds/history.

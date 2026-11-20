@@ -219,6 +219,9 @@ def validate_receipt(receipt):
     review = "requires-signed-approval" if native_starter(receipt) else "approved-for-distribution"
     require(receipt["review"] == review, "source/notices/cohort review required")
     required = {"encore", "kernel", "alpine"} if receipt["target"] == "biscuit" else {"encore", "dependencies"}
+    if "identity" in receipt:
+        require(receipt["target"] == "android-generic" and receipt["identity"] == "main" and "reservation" not in receipt,
+                "invalid main-derived receipt identity")
     if receipt["target"] == "biscuit":
         suffix = "-native-seed.zip" if native_starter(receipt) else ".zip"
         require(arm64_starter(receipt) and "reservation" not in receipt
@@ -255,6 +258,10 @@ def validate_receipt(receipt):
 
 def validate_source(receipt):
     source = receipt["source"]
+    if receipt.get("identity") == "main":
+        require((receipt["core_version"], receipt["revision"]) == biscuit_dev_identity(source),
+                "Android receipt differs from its main-derived identity")
+        return
     if arm64_starter(receipt):
         require((receipt["core_version"], receipt["revision"]) == biscuit_dev_identity(source),
                 "ARM64 receipt differs from its main-derived identity")
@@ -274,12 +281,18 @@ def validate_source(receipt):
 
 def prepare(spec, output, aapt="aapt", apksigner="apksigner"):
     starter = spec["target"] == "biscuit"
+    main_android = "identity" in spec
+    if main_android:
+        require(spec["target"] == "android-generic" and spec["identity"] == "main" and "reservation" not in spec,
+                "Android main identity cannot be combined with a reservation")
     require(not run("git", "status", "--porcelain", "--untracked-files=normal"), "commit source before preparing a candidate")
     source = run("git", "rev-parse", "HEAD").decode().strip()
     if starter:
         require(spec.get("format") in {ARM64_STARTER, NATIVE_STARTER} and "reservation" not in spec,
                 "expected ARM64 starter without reservation")
+    if starter or main_android:
         core, revision = biscuit_dev_identity(source)
+        require(revision <= 2_100_000_000, "main-derived revision exceeds limit")
     else:
         registry = validate(read_json(ROOT / "release/targets.json"))
         ledger = validate_ledger(read_json(ROOT / "release/ledger.json"), registry)
@@ -328,6 +341,8 @@ def prepare(spec, output, aapt="aapt", apksigner="apksigner"):
                 "ARM64 build inputs differ from the clean release source")
         receipt["compatibility"] = {"format": ARM64_STARTER}
         verify_biscuit_sources(receipt, manifest, sources)
+    elif main_android:
+        receipt["identity"] = "main"
     else:
         receipt["reservation"] = spec["reservation"]
     receipt["compatibility"] = inspect_artifact(receipt, paths["artifact"], aapt, apksigner)
@@ -536,6 +551,7 @@ def main():
     android.add_argument("apk", type=Path)
     android.add_argument("--revision", required=True, type=int)
     android.add_argument("--version", required=True)
+    android.add_argument("--core-version", help="Expected embedded core version (defaults to legacy inventory)")
     android.add_argument("--certificate-sha256", required=True)
     android.add_argument("--aapt", default="aapt")
     android.add_argument("--apksigner", default="apksigner")
@@ -567,7 +583,8 @@ def main():
         prepare_native_ci(args.build, args.output)
     elif args.command == "inspect-android":
         receipt = {"target": "android-generic", "revision": args.revision,
-                   "core_version": json.loads((ROOT / "release/targets.json").read_text())["core_version"]}
+                   "core_version": args.core_version or read_json(ROOT / "release/targets.json")["core_version"]}
+        require(SEMVER.fullmatch(receipt["core_version"]) and 0 < args.revision <= 2_100_000_000, "invalid core or revision")
         apk = inspect_artifact(receipt, args.apk, args.aapt, args.apksigner)
         require(apk["version"] == args.version, "unexpected APK versionName")
         require(apk["certificate_sha256"] == args.certificate_sha256, "unexpected APK signer")
@@ -575,10 +592,12 @@ def main():
     elif args.command == "sign-receipt":
         data = (args.directory / "receipt.json").read_bytes()
         receipt = validate_receipt(json.loads(data, object_pairs_hook=unique))
-        if args.receipt_sha256 is not None or arm64_starter(receipt):
+        main_android = receipt.get("identity") == "main"
+        if args.receipt_sha256 is not None or arm64_starter(receipt) or main_android:
             require(hashlib.sha256(data).hexdigest() == args.receipt_sha256, "reviewed receipt SHA256 mismatch or missing")
-        if arm64_starter(receipt):
+        if main_android or arm64_starter(receipt):
             verify_assets(args.directory, receipt, signed=False)
+        if arm64_starter(receipt):
             require(run("openssl", "pkey", "-in", str(args.key), "-pubout", "-outform", "DER") ==
                     BISCUIT_ARM64_ROOT, "wrong signing key for Biscuit ARM64")
         sign(receipt, RECEIPT_TYPE, args.key, args.directory / "receipt.jws")

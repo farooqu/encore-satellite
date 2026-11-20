@@ -10,6 +10,18 @@ advance Dev; PR/check artifacts cannot. Signing stays restricted to protected
 `main` with verified commits. Stable always selects an exact qualified version
 manually.
 
+New Dev builds for Biscuit and Android use the same frozen first-parent anchor
+(`release/biscuit_dev.py`). A source commit deterministically fixes the core
+version and increasing OTA revision (also Android's `versionCode`). Android
+main-derived receipts use `identity: main`, without a reservation. The old
+ledger is retained to verify historical receipts; do not allocate new entries.
+After the versioning cutover, `feat` advances the minor, a breaking change
+advances the major, and every other main commit advances the patch. Automatic
+builds remain on `0.1.x` while `0.2.0` is on hold; subsequent patches do not
+publish a held minor or major in disguise. Both packages build an eligible
+shared version from the same main push tip; the APK and native seed/OTA
+identify the core they contain.
+
 ## Biscuit native A/B GitHub signing
 
 The keyless Biscuit build uploads `biscuit-native-unsigned` after an exact main

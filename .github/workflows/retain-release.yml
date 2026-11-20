@@ -108,8 +108,10 @@ jobs:
           assert r['target'] == os.environ['TARGET'], 'unexpected target/root'
           if r['target'] == 'android-generic':
               assert r['compatibility']['certificate_sha256'] == os.environ['EXPECTED_CERTIFICATE'], 'unexpected APK signer'
+              if os.environ['SIGNED_ARTIFACT']:
+                  assert r.get('identity') == 'main', 'automatic Android publication requires a main-derived identity'
           subprocess.run(['git', 'merge-base', '--is-ancestor', r['source'], 'HEAD'], check=True)
-          if r['target'] == 'biscuit' or os.environ['SIGNED_ARTIFACT']:
+          if r['target'] == 'biscuit' or r.get('identity') == 'main':
               history = subprocess.check_output(['git', 'rev-list', '--first-parent', 'HEAD'], text=True).splitlines()
               assert r['source'] in history, 'Release source must be a first-parent main commit'
           PY

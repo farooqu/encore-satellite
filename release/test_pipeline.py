@@ -11,6 +11,7 @@ import unittest
 import zipfile
 
 import pipeline
+from biscuit_dev import ANCHOR, SEMVER_BASE
 from test_fixtures import inventory
 
 
@@ -264,6 +265,64 @@ class PipelineTests(unittest.TestCase):
             path.write_text(data)
             self.cli("prepare", self.spec_path, "--output", self.build / "rejected", "--aapt", self.aapt, "--apksigner", self.signer, success=False)
             path.write_text(original)
+
+    def test_main_derived_android_signing_uses_exact_source_version(self):
+        # Set the synthetic initial commit as the anchor, then build the next one.
+        resolver = self.repo / "release/biscuit_dev.py"
+        resolver.write_text(resolver.read_text().replace(ANCHOR, self.source))
+        self.git("add", str(resolver))
+        self.git("commit", "-qm", "first release after anchor")
+        self.source = self.git("rev-parse", "HEAD").strip()
+        self.spec.pop("reservation")
+        self.spec["identity"] = "main"
+        core, revision = "0.1.2", 1_000_000_001
+        badging = self.build / "badging"
+        badging.write_text(badging.read_text().replace("versionCode='5'", f"versionCode='{revision}'").replace("1.2.0", core))
+        manifest = self.build / "manifest"
+        manifest.write_text(manifest.read_text().replace("1.2.0", core))
+        self.cli("inspect-android", self.spec["artifact"], "--revision", revision, "--core-version", core,
+                 "--version", f"{core}-incubator", "--certificate-sha256", self.spec["certificate_sha256"],
+                 "--aapt", self.aapt, "--apksigner", self.signer)
+        self.spec_path.write_text(json.dumps(self.spec))
+        self.cli("prepare", self.spec_path, "--output", self.output, "--aapt", self.aapt, "--apksigner", self.signer)
+        path = self.output / "receipt.json"
+        original = path.read_bytes()
+        self.receipt = json.loads(original)
+        self.assertEqual((self.receipt["core_version"], self.receipt["revision"], self.receipt["source"]),
+                         (core, revision, self.source))
+        self.assertNotIn("reservation", self.receipt)
+        for change in ({"core_version": "0.1.3"}, {"revision": revision + 1}):
+            path.write_text(json.dumps({**self.receipt, **change}))
+            result = self.cli("sign-receipt", self.output, "--key", self.key, "--receipt-sha256", pipeline.digest(path), success=False)
+            self.assertIn("Android receipt differs from its main-derived identity", result.stderr)
+        path.write_bytes(original)
+        self.sha = pipeline.digest(path)
+        self.cli("sign-receipt", self.output, "--key", self.key, "--receipt-sha256", self.sha)
+        dev, stable = (pipeline.verify_jws(self.feed(channel), pipeline.ANDROID_FEED_TYPE, self.public)
+                       for channel in ("dev", "stable"))
+        self.assertEqual({**dev, "channel": "stable"}, stable)
+
+    def test_release_history_advances_lockstep_and_holds_minor(self):
+        # Synthetic old anchor and one height-versioned commit before cutover.
+        self.git("commit", "--allow-empty", "-qm", "last height-versioned source")
+        base = self.git("rev-parse", "HEAD").strip()
+        resolver = self.repo / "release/biscuit_dev.py"
+        resolver.write_text(resolver.read_text().replace(ANCHOR, self.source).replace(SEMVER_BASE, base))
+
+        def resolve(source):
+            return subprocess.check_output([sys.executable, resolver, source], cwd=self.repo, text=True).strip()
+
+        self.assertEqual(resolve(base), "0.1.2 1000000001")
+        for subject, expected in (
+            ("docs: explain feeds", "0.1.3 1000000002"),
+            ("fix(core): fix shared startup", "0.1.4 1000000003"),
+            ("perf(biscuit): reduce boot reads", "0.1.5 1000000004"),
+            ("feat(core): held minor bump", ""),
+            ("fix: do not leak a held minor through a patch", ""),
+        ):
+            self.git("commit", "--allow-empty", "-qm", subject)
+            self.assertEqual(resolve(self.git("rev-parse", "HEAD").strip()), expected)
+        self.assertEqual(resolve(base), "0.1.2 1000000001")
 
 
 class NativeMetadataTests(unittest.TestCase):
