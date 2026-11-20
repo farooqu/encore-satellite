@@ -39,17 +39,28 @@ func ReadWAV(r io.Reader, consume func([]int16) error) error {
 			var samples [320]int16
 			var total int64
 			for unknown || total < size {
-				want := int64(len(pcm))
+				want := len(pcm)
 				if !unknown {
-					want = min(want, size-total)
+					want = min(want, int(size-total))
 				}
-				n, err := io.ReadFull(r, pcm[:want])
+				// ReadFull can hide a transport error at a full-block boundary
+				// or turn clean EOF into ErrUnexpectedEOF on a partial block.
+				var n int
+				var err error
+				for n < want && err == nil {
+					var read int
+					read, err = r.Read(pcm[n:want])
+					n += read
+				}
+				if err != nil && err != io.EOF {
+					return err
+				}
+				if !unknown && n < want {
+					return io.ErrUnexpectedEOF
+				}
 				total += int64(n)
 				if total > maxBytes || n%2 != 0 {
 					return errors.New("audio: invalid or excessive WAV PCM")
-				}
-				if err != nil && !(unknown && (err == io.EOF || err == io.ErrUnexpectedEOF)) {
-					return io.ErrUnexpectedEOF
 				}
 				for i := 0; i < n/2; i++ {
 					samples[i] = int16(binary.LittleEndian.Uint16(pcm[2*i:]))
@@ -59,7 +70,10 @@ func ReadWAV(r io.Reader, consume func([]int16) error) error {
 						return err
 					}
 				}
-				if err != nil {
+				if err == io.EOF {
+					if !unknown && total < size {
+						return io.ErrUnexpectedEOF
+					}
 					if total == 0 {
 						return errors.New("audio: empty WAV")
 					}

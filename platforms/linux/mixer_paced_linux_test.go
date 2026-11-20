@@ -7,10 +7,12 @@ import (
 	"errors"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/farooqu/encore-satellite/core/audio"
+	"github.com/farooqu/encore-satellite/core/session"
 	"github.com/farooqu/encore-satellite/platforms/linux"
 )
 
@@ -424,5 +426,119 @@ func TestMixerPacedFalseReadinessFailsClosed(t *testing.T) {
 		}
 	case <-ctx.Done():
 		t.Fatal("owner did not fail closed on repeated readiness at full target")
+	}
+}
+
+type announcementLink struct{ events []string }
+
+func (*announcementLink) Backend() session.Backend { return session.Incubator }
+func (*announcementLink) Close() error             { return nil }
+func (l *announcementLink) Send(c session.Command) error {
+	l.events = append(l.events, c.Kind)
+	return nil
+}
+
+func TestAnnouncementDoesNotCompleteAfterMixerLosesAcceptedPCM(t *testing.T) {
+	for _, name := range []string{"before drain", "during drain", "before next write", "blocked source"} {
+		t.Run(name, func(t *testing.T) {
+			p := newPacedTestPCM()
+			m := linux.NewMixer(p, testMixAhead)
+			defer m.Close()
+			m.SetVolume(1)
+			p.waitBuffered(t, testMixAhead)
+			e := session.New(m)
+			link := &announcementLink{}
+			if _, err := e.Attach(link); err != nil {
+				t.Fatal(err)
+			}
+			wantDrain := "not_attempted"
+			if name == "during drain" {
+				wantDrain = "canceled"
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+			defer cancel()
+			fault := make(chan struct{}, 1)
+			m.MusicStart(1, nil, func() { fault <- struct{}{} })
+			accepted, resume := make(chan struct{}), make(chan struct{})
+			done := make(chan error, 1)
+			go func() {
+				result, err := e.Announce(ctx, func(out context.Context, write func([]int16) error) error {
+					if err := write(make([]int16, 320)); err != nil {
+						return err
+					}
+					close(accepted)
+					if name == "blocked source" {
+						select {
+						case <-out.Done():
+							return out.Err()
+						case <-ctx.Done():
+							return ctx.Err()
+						}
+					}
+					select {
+					case <-resume:
+					case <-ctx.Done():
+						return ctx.Err()
+					}
+					if name == "before next write" {
+						return write([]int16{-1000, 2000})
+					}
+					return nil
+				})
+				if result != (session.AnnouncementResult{AcceptedBlocks: 1, AcceptedSamples: 320, Outcome: "playback_underrun", Drain: wantDrain}) {
+					t.Error("wrong interruption receipt", result)
+				}
+				done <- err
+			}()
+			select {
+			case <-accepted:
+			case <-ctx.Done():
+				t.Fatal("first block was not accepted")
+			}
+			if name == "during drain" {
+				wakes := p.wakeCalls.Load()
+				close(resume)
+				// Drain queues the filter tail and wakes the owner. The fake
+				// clock hasn't advanced, so Drain cannot retire that tail.
+				for p.wakeCalls.Load() == wakes {
+					select {
+					case <-ctx.Done():
+						t.Fatal("Drain did not queue its tail")
+					case <-time.After(time.Millisecond):
+					}
+				}
+			}
+			// The first block is still pending when the owner recovers.
+			p.mu.Lock()
+			p.delayErr = syscall.EPIPE
+			p.mu.Unlock()
+			p.WakePlayback()
+			select {
+			case <-fault:
+			case <-ctx.Done():
+				t.Fatal("PCM owner did not recover")
+			}
+			if name != "during drain" {
+				close(resume)
+			}
+			tick := time.NewTicker(time.Millisecond)
+			defer tick.Stop()
+			for {
+				select {
+				case err := <-done:
+					if !errors.Is(err, audio.ErrPlaybackUnderrun) {
+						t.Fatalf("announcement did not report loss of accepted PCM: %v", err)
+					}
+					if len(link.events) != 1 || link.events[0] != "announcing" {
+						t.Fatal("interrupted playback sent unexpected native events", link.events)
+					}
+					return
+				case <-tick.C:
+					p.advance(1024)
+				case <-ctx.Done():
+					t.Fatal("announcement stuck after recovery")
+				}
+			}
+		})
 	}
 }

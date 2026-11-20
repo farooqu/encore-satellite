@@ -4,13 +4,18 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -26,7 +31,7 @@ type announcementSink struct {
 	mu      sync.Mutex
 	samples []int16
 	drain   chan struct{}
-	release chan struct{}
+	release chan error
 }
 
 func (p *announcementSink) Write(ctx context.Context, samples []int16) error {
@@ -44,15 +49,51 @@ func (p *announcementSink) Drain(ctx context.Context) error {
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
-	case <-p.release:
-		return nil
+	case err := <-p.release:
+		return err
 	}
+}
+
+type announcementLogs struct {
+	lines chan string
+	leak  atomic.Bool
+}
+
+func (l *announcementLogs) Write(p []byte) (int, error) {
+	line := string(p)
+	if strings.Contains(line, "fixture-private-token") {
+		l.leak.Store(true)
+	}
+	if strings.Contains(line, "dot: announcement revision=") {
+		l.lines <- line
+	}
+	return len(p), nil
 }
 
 func TestAnnouncementsEncryptedAPIHTTPPCMAndIncubatorLifecycle(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	p := &announcementSink{drain: make(chan struct{}, 1), release: make(chan struct{})}
+	logs, previous := &announcementLogs{lines: make(chan string, 16)}, log.Writer()
+	log.SetOutput(logs)
+	t.Cleanup(func() {
+		log.SetOutput(previous)
+		if logs.leak.Load() {
+			t.Error("announcement logged sensitive input")
+		}
+	})
+	receipt := func(want string) {
+		t.Helper()
+		select {
+		case line := <-logs.lines:
+			_, fields, _ := strings.Cut(line, " outcome=")
+			if strings.TrimSpace(fields) != want {
+				t.Fatal("wrong announcement receipt; wanted", want)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("missing announcement receipt", want)
+		}
+	}
+	p := &announcementSink{drain: make(chan struct{}, 1), release: make(chan error)}
 	engine := session.New(p)
 	player := newSpeaker(&speakerPCM{})
 	defer player.Close()
@@ -161,21 +202,80 @@ listing:
 	for i, sample := range want {
 		binary.LittleEndian.PutUint16(wav[44+2*i:], uint16(sample))
 	}
+	fixed := slices.Clone(wav)
+	binary.LittleEndian.PutUint32(fixed[4:], uint32(len(fixed)-8))
+	binary.LittleEndian.PutUint32(fixed[40:], uint32(len(fixed)-44))
+	// Match the direct attempt's lengths, with synthetic audio after 2s silence.
+	full := make([]byte, 640078)
+	copy(full, wav[:36])
+	binary.LittleEndian.PutUint32(full[4:], uint32(len(full)-8))
+	copy(full[36:], "JUNK\x1a\x00\x00\x00")
+	copy(full[70:], "data")
+	binary.LittleEndian.PutUint32(full[74:], 640000)
+	full[78+64000] = 37
 	stalled, interrupted := make(chan struct{}, 1), make(chan struct{}, 1)
+	allowTruncatedEOF := make(chan struct{})
 	httpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/stalled.wav" {
+		switch r.URL.Path {
+		case "/stalled.wav":
 			w.Write(wav[:44])
 			w.(http.Flusher).Flush()
 			stalled <- struct{}{}
 			<-r.Context().Done()
 			interrupted <- struct{}{}
 			return
+		case "/truncated.wav":
+			// One whole block arrives and the second is one byte short.
+			short := append(slices.Clone(wav[:44]), make([]byte, 1279)...)
+			binary.LittleEndian.PutUint32(short[4:], 36+1280)
+			binary.LittleEndian.PutUint32(short[40:], 1280)
+			w.Write(short)
+			w.(http.Flusher).Flush()
+			select {
+			case <-allowTruncatedEOF:
+			case <-r.Context().Done():
+			}
+			return
+		case "/unterminated.wav":
+			conn, rw, err := w.(http.Hijacker).Hijack()
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			defer conn.Close()
+			// All declared PCM is present, but chunked transfer never ends cleanly.
+			fmt.Fprintf(rw, "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n%x\r\n%s\r\n", len(fixed), fixed)
+			if err := rw.Flush(); err != nil {
+				t.Error(err)
+			}
+			return
+		case "/trailing.wav":
+			w.Write(fixed[:4])
+			var riffSize [4]byte
+			const tail = "JUNK\x04\x00\x00\x00tail"
+			binary.LittleEndian.PutUint32(riffSize[:], uint32(len(fixed)+len(tail)-8))
+			w.Write(riffSize[:])
+			w.Write(fixed[8:])
+			w.(http.Flusher).Flush()
+			io.WriteString(w, tail)
+			return
+		case "/excess-trailing.wav":
+			w.Write(fixed)
+			w.Write(make([]byte, 64*1024+1))
+			return
+		case "/bad-redirect.wav":
+			http.Redirect(w, r, "file:///unavailable?fixture-private-token", http.StatusFound)
+			return
+		case "/full.wav":
+			w.Header().Set("Content-Length", "640078")
+			w.Write(full)
+			return
 		}
 		w.Write(wav)
 	}))
 	defer func() { cancel(); httpServer.Close() }()
 	play := func(path string) {
-		peer.send(&api.MediaPlayerCommandRequest{Key: entity.Key, HasMediaUrl: true, MediaUrl: httpServer.URL + path, HasAnnouncement: true, Announcement: true})
+		peer.send(&api.MediaPlayerCommandRequest{Key: entity.Key, HasMediaUrl: true, MediaUrl: httpServer.URL + path + "?signature=fixture-private-token", HasAnnouncement: true, Announcement: true})
 	}
 	play("/response.wav")
 	event(0x09, "announcing")
@@ -184,14 +284,54 @@ listing:
 	if engine.Snapshot().Output.State != "draining" {
 		t.Fatal("physical drain not retained")
 	}
-	p.release <- struct{}{}
+	p.release <- nil
 	event(0x09, "announced")
 	state(api.MediaPlayerState_MEDIA_PLAYER_STATE_IDLE)
+	receipt("completed accepted_blocks=1 accepted_samples=7 drain=ok")
 	p.mu.Lock()
 	if !slices.Equal(p.samples, want) {
 		t.Error("wrong decoded response", p.samples)
 	}
 	p.mu.Unlock()
+
+	play("/full.wav")
+	event(0x09, "announcing")
+	<-p.drain
+	state(api.MediaPlayerState_MEDIA_PLAYER_STATE_PLAYING)
+	p.release <- nil
+	event(0x09, "announced")
+	state(api.MediaPlayerState_MEDIA_PLAYER_STATE_IDLE)
+	receipt("completed accepted_blocks=1000 accepted_samples=320000 drain=ok")
+
+	play("/bad-redirect.wav")
+	receipt("http_failed accepted_blocks=0 accepted_samples=0 drain=not_attempted")
+	play("/truncated.wav")
+	event(0x09, "announcing")
+	state(api.MediaPlayerState_MEDIA_PLAYER_STATE_PLAYING)
+	close(allowTruncatedEOF)
+	state(api.MediaPlayerState_MEDIA_PLAYER_STATE_IDLE)
+	receipt("wav_incomplete accepted_blocks=1 accepted_samples=320 drain=not_attempted")
+	play("/unterminated.wav")
+	event(0x09, "announcing")
+	receipt("wav_incomplete accepted_blocks=1 accepted_samples=7 drain=not_attempted")
+	play("/excess-trailing.wav")
+	event(0x09, "announcing")
+	receipt("wav_failed accepted_blocks=1 accepted_samples=7 drain=not_attempted")
+	play("/trailing.wav")
+	event(0x09, "announcing")
+	<-p.drain
+	state(api.MediaPlayerState_MEDIA_PLAYER_STATE_PLAYING)
+	p.release <- nil
+	event(0x09, "announced")
+	state(api.MediaPlayerState_MEDIA_PLAYER_STATE_IDLE)
+	receipt("completed accepted_blocks=1 accepted_samples=7 drain=ok")
+	play("/response.wav")
+	event(0x09, "announcing")
+	<-p.drain
+	state(api.MediaPlayerState_MEDIA_PLAYER_STATE_PLAYING)
+	p.release <- errors.New("fixture-private-token")
+	state(api.MediaPlayerState_MEDIA_PLAYER_STATE_IDLE)
+	receipt("drain_failed accepted_blocks=1 accepted_samples=7 drain=failed")
 
 	for _, privacy := range []bool{false, true} {
 		play("/stalled.wav")
@@ -207,15 +347,21 @@ listing:
 			t.Fatal("Stop/privacy did not cancel blocked HTTP")
 		}
 		state(api.MediaPlayerState_MEDIA_PLAYER_STATE_IDLE)
+		if privacy {
+			receipt("mute_fence accepted_blocks=0 accepted_samples=0 drain=not_attempted")
+		} else {
+			receipt("ha_stop accepted_blocks=0 accepted_samples=0 drain=not_attempted")
+		}
 		engine.SetMuted(false)
 	}
 	play("/response.wav") // No poisoned lane after either cancelled fetch.
 	event(0x09, "announcing")
 	<-p.drain
 	state(api.MediaPlayerState_MEDIA_PLAYER_STATE_PLAYING)
-	p.release <- struct{}{}
+	p.release <- nil
 	event(0x09, "announced")
 	state(api.MediaPlayerState_MEDIA_PLAYER_STATE_IDLE)
+	receipt("completed accepted_blocks=1 accepted_samples=7 drain=ok")
 
 	play("/stalled.wav")
 	<-stalled
@@ -225,12 +371,14 @@ listing:
 	case <-time.After(time.Second):
 		t.Fatal("replacement did not cancel the old HTTP request")
 	}
+	receipt("ha_replaced accepted_blocks=0 accepted_samples=0 drain=not_attempted")
 	event(0x09, "announcing")
 	<-p.drain
 	state(api.MediaPlayerState_MEDIA_PLAYER_STATE_PLAYING)
-	p.release <- struct{}{}
+	p.release <- nil
 	event(0x09, "announced")
 	state(api.MediaPlayerState_MEDIA_PLAYER_STATE_IDLE)
+	receipt("completed accepted_blocks=1 accepted_samples=7 drain=ok")
 
 	play("/stalled.wav")
 	<-stalled
@@ -240,4 +388,5 @@ listing:
 	case <-time.After(time.Second):
 		t.Fatal("owning HA connection loss did not cancel blocked HTTP")
 	}
+	receipt("ha_disconnected accepted_blocks=0 accepted_samples=0 drain=not_attempted")
 }

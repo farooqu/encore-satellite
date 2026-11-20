@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"io"
 	"slices"
 	"testing"
 	"testing/iotest"
@@ -51,6 +52,17 @@ func TestReadWAVStreamsKnownAndPipeLengths(t *testing.T) {
 		})
 		if err != nil || !slices.Equal(got, want) {
 			t.Fatalf("pipe=%v: wrong decoded PCM: length%d/%d, err%v", pipe, len(got), len(want), err)
+		}
+		if pipe {
+			// A truncated HTTP body can return ErrUnexpectedEOF alongside its
+			// last bytes. Unlike clean EOF, that does not complete a pipe WAV.
+			dataOffset := len(b) - 2*len(want)
+			for _, samples := range []int{640, 643} {
+				body := iotest.DataErrReader(io.MultiReader(bytes.NewReader(b[:dataOffset+2*samples]), iotest.ErrReader(io.ErrUnexpectedEOF)))
+				if err := audio.ReadWAV(body, func([]int16) error { return nil }); !errors.Is(err, io.ErrUnexpectedEOF) {
+					t.Errorf("accepted truncated transport after %d samples: %v", samples, err)
+				}
+			}
 		}
 	}
 	for name, change := range map[string]func([]byte) []byte{

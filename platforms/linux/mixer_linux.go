@@ -13,6 +13,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/farooqu/encore-satellite/core/audio"
 	"github.com/farooqu/encore-satellite/platforms/linux/alsa"
 )
 
@@ -71,6 +72,7 @@ type Mixer struct {
 	voicePending        int
 	voiceStarted        bool
 	generation          uint64
+	voiceCancel         context.CancelCauseFunc
 	resample            interpolator
 	tail                bool
 	epoch               uint64
@@ -150,6 +152,21 @@ func (m *Mixer) wait(ctx context.Context, generation uint64, ready func() bool) 
 	}
 }
 
+type voiceStreamKey struct{}
+
+func (*Mixer) StreamContext(parent context.Context) context.Context {
+	ctx, cancel := context.WithCancelCause(parent)
+	return context.WithValue(ctx, voiceStreamKey{}, cancel)
+}
+
+func (m *Mixer) invalidateVoice(cause error) {
+	m.generation++
+	if m.voiceCancel != nil {
+		m.voiceCancel(cause)
+		m.voiceCancel = nil
+	}
+}
+
 func (m *Mixer) voiceOp(ctx context.Context, op func(uint64) error) error {
 	m.mu.Lock()
 	g := m.generation
@@ -164,6 +181,11 @@ func (m *Mixer) voiceOp(ctx context.Context, op func(uint64) error) error {
 	defer m.mu.Unlock()
 	if err := m.wait(ctx, g, func() bool { return true }); err != nil {
 		return err
+	}
+	// Bind only when playback starts, not during HTTP setup. Keep the fence
+	// between operations so a later Write or Drain cannot adopt a new generation.
+	if cancel, ok := ctx.Value(voiceStreamKey{}).(context.CancelCauseFunc); ok {
+		m.voiceCancel = cancel
 	}
 	return op(g)
 }
@@ -217,6 +239,7 @@ func (m *Mixer) Drain(ctx context.Context) error {
 		if err := m.wait(ctx, g, func() bool { return m.voicePending == 0 }); err != nil {
 			return err
 		}
+		m.voiceCancel = nil
 		m.voiceStarted = false
 		m.resample.reset()
 		return nil
@@ -228,7 +251,7 @@ func (m *Mixer) Drain(ctx context.Context) error {
 func (m *Mixer) Flush() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.generation++
+	m.invalidateVoice(audio.ErrPlaybackInterrupted)
 	m.voice = m.voice[:0]
 	m.resample.reset()
 	m.tail = false
@@ -416,7 +439,7 @@ func (m *Mixer) rebuild(voice, music bool) {
 	}
 	for _, f := range m.hardware {
 		if drop && f.voiced {
-			m.generation++
+			m.invalidateVoice(audio.ErrPlaybackInterrupted)
 			m.voice = m.voice[:0]
 			m.resample.reset()
 			m.tail = false
@@ -467,7 +490,7 @@ func (m *Mixer) recover(err error) {
 	}
 	wasPurging := m.purging
 	m.purging = true
-	m.generation++
+	m.invalidateVoice(audio.ErrPlaybackUnderrun)
 	m.voice, m.hardware, m.pending = m.voice[:0], m.hardware[:0], m.pending[:0]
 	m.voicePending, m.tail = 0, false
 	m.voiceStarted = false
@@ -486,6 +509,7 @@ func (m *Mixer) recover(err error) {
 
 func (m *Mixer) fail(err error) {
 	if m.err == nil {
+		m.invalidateVoice(audio.ErrPlaybackInterrupted)
 		m.notifyOwner()
 		m.err = err
 		m.signal()

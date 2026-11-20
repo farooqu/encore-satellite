@@ -82,7 +82,7 @@ type Engine struct {
 	lastTime                        time.Duration
 	haveFrame                       bool
 	output                          context.Context
-	cancelOutput                    context.CancelFunc
+	cancelOutput                    context.CancelCauseFunc
 	localOutput                     context.Context
 	activityHandler                 func(bool)
 	voiceActive                     bool
@@ -215,7 +215,7 @@ func (e *Engine) disconnect(reason string) {
 		_ = e.link.Close()
 		e.link = nil
 	}
-	e.cancelOutput()
+	e.cancelOutput(outputFence("session_disconnected"))
 	e.localOutput = nil
 	e.player.Flush()
 	e.pre.Clear()
@@ -252,7 +252,7 @@ func (e *Engine) SetMuted(muted bool) {
 		active, alert := e.active || (e.outputOpen && e.localOutput == nil) || e.announcing, e.state.Alert
 		wasCancelling := e.cancelling
 		e.cancelling = e.cancelling || active || e.discard
-		e.cancelOutput()
+		e.cancelOutput(outputFence("mute_fence"))
 		e.localOutput = nil
 		e.player.Flush()
 		e.pre.Clear()
@@ -469,7 +469,7 @@ func (e *Engine) stop() error {
 	// do not: an ordinary end/HANGUP may already be buffered before Stop.
 	retire := e.state.Backend == string(Incubator) && !e.cancelling &&
 		(e.active || e.announcing || (e.outputOpen && !e.outputTimer && !localOnly))
-	e.cancelOutput()
+	e.cancelOutput(outputFence("session_stop"))
 	e.localOutput = nil
 	e.player.Flush()
 	e.pre.Clear()
@@ -590,7 +590,7 @@ func (e *Engine) Handle(generation uint64, event Event) error {
 			e.state.Speaker = presentation.Speaker{}
 			// HANGUP ends the call, not the healthy native connection. Closing
 			// it here makes ordinary wake rejection trigger upstream backoff.
-			e.cancelOutput()
+			e.cancelOutput(outputFence("native_hangup"))
 			e.player.Flush()
 			e.outputOpen, e.outputReceived = false, false
 			if !e.discard {
@@ -827,10 +827,10 @@ func (e *Engine) openOutput() {
 
 func (e *Engine) resetOutput() {
 	if e.cancelOutput != nil {
-		e.cancelOutput()
+		e.cancelOutput(nil)
 	}
 	e.localOutput = nil
-	e.output, e.cancelOutput = context.WithCancel(context.Background())
+	e.output, e.cancelOutput = context.WithCancelCause(context.Background())
 }
 
 func (e *Engine) send(command Command) error {

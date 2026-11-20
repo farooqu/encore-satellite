@@ -3,7 +3,7 @@ package biscuit
 import (
 	"context"
 	"errors"
-	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -25,6 +25,10 @@ type mediaRequest struct {
 	revision uint64
 }
 
+type requestFence string
+
+func (f requestFence) Error() string { return string(f) }
+
 // announcementPlayer fetches HA's converted WAV on one bounded worker, using
 // the engine's existing voice lane. It is independent of Sendspin music.
 type announcementPlayer struct {
@@ -36,7 +40,7 @@ type announcementPlayer struct {
 	mu       sync.Mutex
 	revision uint64
 	owner    *esphome.Conn
-	cancel   context.CancelFunc
+	cancel   context.CancelCauseFunc
 	playing  bool
 }
 
@@ -64,11 +68,11 @@ func (m *announcementPlayer) signal() {
 	}
 }
 
-func (m *announcementPlayer) stopLocked() {
+func (m *announcementPlayer) stopLocked(reason requestFence) {
 	m.revision++
 	if m.cancel != nil {
-		m.cancel()
-		_ = m.engine.StopAnnouncement()
+		m.cancel(reason)
+		_ = m.engine.StopAnnouncement(reason)
 	}
 	select {
 	case <-m.requests:
@@ -92,13 +96,13 @@ func (m *announcementPlayer) command(c *esphome.Conn, cmd *api.MediaPlayerComman
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if cmd.HasCommand {
-		m.stopLocked()
+		m.stopLocked("ha_stop")
 	}
 	if cmd.HasMediaUrl {
 		m.revision++
 		m.owner = c
 		if m.cancel != nil {
-			m.cancel()
+			m.cancel(requestFence("ha_replaced"))
 		}
 		select {
 		case <-m.requests:
@@ -113,7 +117,7 @@ func (m *announcementPlayer) closed(c *esphome.Conn) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.owner == c {
-		m.stopLocked()
+		m.stopLocked("ha_disconnected")
 		m.owner = nil
 	}
 }
@@ -124,16 +128,17 @@ func (m *announcementPlayer) run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case request := <-m.requests:
-			child, cancel := context.WithCancel(ctx)
+			child, cancel := context.WithCancelCause(ctx)
 			m.mu.Lock()
 			if request.revision != m.revision {
 				m.mu.Unlock()
-				cancel()
+				cancel(nil)
 				continue
 			}
 			m.cancel = cancel
 			m.mu.Unlock()
-			err := m.engine.Announce(child, func(output context.Context, write func([]int16) error) error {
+			inputFailure := "http_failed"
+			result, _ := m.engine.Announce(child, func(output context.Context, write func([]int16) error) error {
 				req, err := http.NewRequestWithContext(output, http.MethodGet, request.url, nil)
 				if err != nil {
 					return err
@@ -144,9 +149,11 @@ func (m *announcementPlayer) run(ctx context.Context) {
 				}
 				defer response.Body.Close()
 				if response.StatusCode != http.StatusOK {
-					return fmt.Errorf("dot: announcement HTTP status %d", response.StatusCode)
+					inputFailure = "http_status"
+					return errors.New("dot: announcement HTTP status not OK")
 				}
-				return audio.ReadWAV(response.Body, func(samples []int16) error {
+				inputFailure = "wav_failed"
+				err = audio.ReadWAV(response.Body, func(samples []int16) error {
 					if err := write(samples); err != nil {
 						return err
 					}
@@ -161,16 +168,38 @@ func (m *announcementPlayer) run(ctx context.Context) {
 					}
 					return nil
 				})
+				if err == nil {
+					// A fixed-length WAV ends at its data chunk, not necessarily
+					// at the HTTP body boundary. Require clean transport EOF;
+					// allow bounded trailing metadata without buffering it.
+					const maxTrailing = 64 * 1024
+					var trailing int64
+					trailing, err = io.Copy(io.Discard, io.LimitReader(response.Body, maxTrailing+1))
+					if err == nil && trailing > maxTrailing {
+						err = errors.New("dot: excessive trailing WAV data")
+					}
+				}
+				if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
+					inputFailure = "wav_incomplete"
+				}
+				return err
 			})
-			cancel()
+			if result.Outcome == "parent_canceled" {
+				result.Outcome = "worker_canceled"
+				if fence, ok := context.Cause(child).(requestFence); ok {
+					result.Outcome = string(fence)
+				}
+			} else if result.Outcome == "stream_failed" {
+				result.Outcome = inputFailure
+			}
+			cancel(nil)
 			m.mu.Lock()
 			m.cancel, m.playing = nil, false
 			m.mu.Unlock()
 			m.signal()
-			if err != nil && !errors.Is(err, context.Canceled) {
-				// HTTP errors can embed signed URLs. Never log them or speech data.
-				log.Print("Announcement failed or output was busy; no completed playback claimed")
-			}
+			// Only fixed labels and counts; HTTP errors may embed signed URLs.
+			log.Printf("dot: announcement revision=%d outcome=%s accepted_blocks=%d accepted_samples=%d drain=%s",
+				request.revision, result.Outcome, result.AcceptedBlocks, result.AcceptedSamples, result.Drain)
 		}
 	}
 }

@@ -42,6 +42,19 @@ type Playback interface {
 	Flush()
 }
 
+// PlaybackStream is implemented by outputs that can invalidate a whole stream
+// even when no Write or Drain is in progress. StreamContext must not block on
+// output. Use the child for the source, Writes and Drain; cancel its parent at
+// the end of the stream.
+type PlaybackStream interface {
+	StreamContext(context.Context) context.Context
+}
+
+var (
+	ErrPlaybackUnderrun    = errors.New("audio: playback underrun")
+	ErrPlaybackInterrupted = errors.New("audio: playback interrupted")
+)
+
 // PreRoll is a bounded mono ring, owned by a single session lock.
 type PreRoll struct {
 	samples [PreRollSamples]int16
