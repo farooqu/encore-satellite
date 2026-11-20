@@ -14,6 +14,7 @@ on:
 # Direct pushes to main can change this workflow. It must never have access
 # to the Echo Dot signing key or a privileged publication credential.
 permissions:
+  actions: read
   contents: read
 
 jobs:
@@ -22,6 +23,7 @@ jobs:
     if: >-
       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
        (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' &&
+        github.repository == 'farooqu/encore-satellite' && github.ref == 'refs/heads/main' && github.ref_protected &&
         github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' &&
         github.event.workflow_run.head_repository.full_name == github.repository)
     runs-on: ubuntu-24.04
@@ -35,7 +37,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       SOURCE: ${{ github.event.workflow_run.head_sha || inputs.source || github.sha }}
     steps:
-      - name: Install release build tools
+      - name: Prepare pinned release environment and planning tools
         run: |
           # Bootstrap HTTPS, then install build dependencies from signed, dated indexes.
           apt-get update
@@ -56,15 +58,14 @@ jobs:
           Check-Valid-Until: no
           EOF
           apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            git gh make gcc gcc-aarch64-linux-gnu libc6-dev libssl-dev libelf-dev \
-            bc patch curl perl python3 flex bison
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git gh jq python3
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ env.SOURCE }}
           fetch-depth: 0
           persist-credentials: false
       - name: Check exact first-parent main source
+        id: source
         run: |
           set -euo pipefail
           # Checkout trusts the mounted workspace only in its temporary HOME.
@@ -72,7 +73,16 @@ jobs:
           [[ "$SOURCE" =~ ^[0-9a-f]{40}$ ]]
           test "$(git rev-parse HEAD)" = "$SOURCE"
           git rev-list --first-parent origin/main | grep -Fx "$SOURCE" > /dev/null
+          if test -f release/dev_plan.py; then echo 'planning=true' >> "$GITHUB_OUTPUT"; fi
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        if: github.event_name == 'workflow_run' && steps.source.outputs.planning == 'true'
+        with:
+          name: dev-release-plan
+          path: ${{ runner.temp }}/dev-release-plan
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
       - name: Select the shared release identity and external-input lock
+        if: github.event_name == 'workflow_dispatch' || steps.source.outputs.planning == 'true'
         id: inputs
         run: |
           set -euo pipefail
@@ -82,6 +92,12 @@ jobs:
             exit 0
           fi
           read -r version revision <<< "$release"
+          if test "$GITHUB_EVENT_NAME" = workflow_run; then
+            plan="$RUNNER_TEMP/dev-release-plan/plan.json"
+            jq -e --arg source "$SOURCE" --arg version "$version" --argjson revision "$revision" \
+              '.source == $source and .version == $version and .revision == $revision' "$plan" >/dev/null
+            if ! jq -e '.targets | index("biscuit") != null' "$plan" >/dev/null; then exit 0; fi
+          fi
           tag=$(PYTHONPATH=devices/biscuit/packaging/kernel61 python3 -c '
           from locked_build import HERE, read_lock
           print(read_lock((HERE / "ci-inputs.json").read_bytes())["external_bundle_tag"] or "")
@@ -91,6 +107,11 @@ jobs:
             exit 0
           fi
           printf 'tag=%s\nversion=%s\nrevision=%s\n' "$tag" "$version" "$revision" >> "$GITHUB_OUTPUT"
+      - name: Install release build tools
+        if: steps.inputs.outputs.tag != ''
+        run: |
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            make gcc gcc-aarch64-linux-gnu libc6-dev libssl-dev libelf-dev bc patch curl perl flex bison
       - name: Fetch the locked external inputs (no prebuilt Encore assets)
         if: steps.inputs.outputs.tag != ''
         env:
@@ -127,6 +148,13 @@ jobs:
           set -euo pipefail
           python3 release/pipeline.py prepare-native-ci build/biscuit-arm64-dev \
             --output "$RUNNER_TEMP/native-candidate" | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: github.event_name == 'workflow_run' && steps.inputs.outputs.tag != ''
+        with:
+          name: dev-release-plan
+          path: ${{ runner.temp }}/dev-release-plan
+          if-no-files-found: error
+          overwrite: true
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: steps.inputs.outputs.tag != ''
         with:

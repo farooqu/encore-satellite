@@ -18,9 +18,19 @@ ledger is retained to verify historical receipts; do not allocate new entries.
 After the versioning cutover, `feat` advances the minor, a breaking change
 advances the major, and every other main commit advances the patch. Automatic
 builds remain on `0.1.x` while `0.2.0` is on hold; subsequent patches do not
-publish a held minor or major in disguise. Both packages build an eligible
-shared version from the same main push tip; the APK and native seed/OTA
-identify the core they contain.
+publish a held minor or major in disguise. After Foundation checks, one Dev
+plan compares the push tip against each device's own last immutable published
+release on first-parent `main`. Shared package inputs select both targets;
+device-only inputs select that device. An unpublished build, draft, or bare
+tag does not consume pending changes. A skipped target leaves its published
+release and feed untouched and can jump SemVer and OTA revision numbers on its
+next build. The APK and native seed/OTA identify the shared version they contain.
+
+The Foundation run summary and its `dev-release-plan` artifact contain the
+version's changelog, including an explicit **No build** for skipped targets
+(even if neither target builds). Each selected target's GitHub release uses
+that same changelog. Reviewed manual candidate builds remain available and do
+not automatically publish or promote Stable.
 
 ## Biscuit native A/B GitHub signing
 

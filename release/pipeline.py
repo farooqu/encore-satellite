@@ -482,24 +482,32 @@ def stage_feed(receipt, feed, public_key, site, channel, now=None):
     (site / ".nojekyll").touch()
 
 
-def publish(directory, receipt, execute, *, automatic_dev=False):
+def publish(directory, receipt, execute, *, automatic_dev=False, dev_plan=None):
     release_tag = tag(receipt)
     changelog = f"release/changelogs/{receipt['core_version']}.md"
+    notes = ""
+    if dev_plan is not None:
+        require(automatic_dev and dev_plan["source"] == receipt["source"] and
+                dev_plan["version"] == receipt["core_version"] and dev_plan["revision"] == receipt["revision"] and
+                receipt["target"] in dev_plan["targets"], "Dev release plan differs from signed candidate")
+        notes = dev_plan["changelog"].rstrip() + "\n"
     if arm64_starter(receipt):
         source = receipt["source"]
         summary = ("Biscuit ARM64 native A/B pilot. The seed ZIP is for a fresh install; the OTA ZIP requires a signed native feed."
                    if native_starter(receipt) else
                    "Biscuit ARM64 development build. Use the ZIP for a fresh install; rootfs.tar.gz requires a signed runtime OTA feed.")
-        notes = (summary + "\n\n"
-                 f"[Source commit](https://github.com/{REPOSITORY}/commit/{source}) · "
-                 f"[Install guide](https://github.com/{REPOSITORY}/blob/{source}/devices/biscuit/packaging/kernel61/README.md)\n")
-    elif run("git", "ls-tree", "--name-only", receipt["source"], "--", changelog).strip():
-        notes = run("git", "show", f"{receipt['source']}:{changelog}").decode()
-    else:
-        # Older manually reserved snapshots predate generated changelogs. Do
-        # not invent a previous release: include their complete commit history.
-        notes = "Initial retained experimental snapshot; not stable qualification. No channel activation.\n\n" + run(
-            "git", "log", "--reverse", "--format=- %s (%H)", receipt["source"]).decode()
+        notes = (notes + "\n## Biscuit installation\n\n" if notes else "") + (
+            summary + "\n\n"
+            f"[Source commit](https://github.com/{REPOSITORY}/commit/{source}) · "
+            f"[Install guide](https://github.com/{REPOSITORY}/blob/{source}/devices/biscuit/packaging/kernel61/README.md)\n")
+    elif dev_plan is None:
+        if run("git", "ls-tree", "--name-only", receipt["source"], "--", changelog).strip():
+            notes = run("git", "show", f"{receipt['source']}:{changelog}").decode()
+        else:
+            # Older manually reserved snapshots predate generated changelogs. Do
+            # not invent a previous release: include their complete commit history.
+            notes = "Initial retained experimental snapshot; not stable qualification. No channel activation.\n\n" + run(
+                "git", "log", "--reverse", "--format=- %s (%H)", receipt["source"]).decode()
     commands = [
         ["gh", "release", "create", release_tag, "--repo", REPOSITORY, "--target", receipt["source"],
          "--draft", "--prerelease", "--title", (f"Biscuit ARM64 {receipt['core_version']}" if arm64_starter(receipt)
@@ -577,6 +585,7 @@ def main():
         if name == "publish":
             sub.add_argument("--execute", action="store_true")
             sub.add_argument("--automatic-dev", action="store_true", help="Use the repository's required immutability setting instead of an admin preflight")
+            sub.add_argument("--dev-plan", type=Path, help="Version-specific changelog and target selection from Foundation checks")
         if name in {"feed", "stage-feed"}:
             sub.add_argument("--channel", choices=("dev", "stable"), required=True)
         if name == "feed":
@@ -615,7 +624,8 @@ def main():
     else:
         receipt = verify(args.directory, args.public_key, args.receipt_sha256)
         if args.command == "publish":
-            publish(args.directory, receipt, args.execute, automatic_dev=args.automatic_dev)
+            publish(args.directory, receipt, args.execute, automatic_dev=args.automatic_dev,
+                    dev_plan=read_json(args.dev_plan) if args.dev_plan else None)
         elif args.command == "feed":
             feed_type = ARM64_FEED_TYPE if arm64_starter(receipt) else ANDROID_FEED_TYPE
             if arm64_starter(receipt):

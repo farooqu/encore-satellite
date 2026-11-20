@@ -73,8 +73,10 @@ jobs:
     outputs:
       core_version: ${{ steps.release.outputs.core_version }}
       receipt_sha256: ${{ steps.candidate.outputs.receipt_sha256 }}
+      plan_run: ${{ steps.candidate.outputs.plan_run }}
     env:
       BUILD_RUN: ${{ github.event.workflow_run.id || inputs.build_run }}
+      OPERATION: ${{ inputs.operation }}
       SOURCE: ${{ inputs.source }}
       RECEIPT_SHA256: ${{ inputs.receipt_sha256 }}
       CHANNEL: ${{ (github.event_name == 'workflow_run' || inputs.operation == 'deliver-dev') && 'dev' || inputs.channel }}
@@ -114,6 +116,15 @@ jobs:
             .compatibility.format == "encore-biscuit-native-ab-v1"' "$receipt" > /dev/null
           printf 'SOURCE=%s\nRECEIPT_SHA256=%s\n' "$SOURCE" "$RECEIPT_SHA256" >> "$GITHUB_ENV"
           printf 'receipt_sha256=%s\n' "$RECEIPT_SHA256" >> "$GITHUB_OUTPUT"
+          if test "$GITHUB_EVENT_NAME" = workflow_run || test "$OPERATION" = deliver-dev; then
+            artifacts=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BUILD_RUN/artifacts?name=dev-release-plan")
+            if jq -e 'any(.artifacts[]; .expired == false)' <<< "$artifacts" >/dev/null; then
+              printf 'plan_run=%s\n' "$BUILD_RUN" >> "$GITHUB_OUTPUT"
+            elif test -n "$(git ls-tree --name-only "$SOURCE" -- release/dev_plan.py)" && test "$GITHUB_EVENT_NAME" = workflow_run; then
+              echo '::error::Missing the Dev release plan for this automatic build.'
+              exit 1
+            fi
+          fi
       - name: Sign the receipt and optional feed with the pinned Ed25519 root
         if: steps.candidate.outputs.receipt_sha256 != ''
         env:
@@ -172,12 +183,14 @@ jobs:
       !cancelled() && needs.sign.result == 'success' &&
       (github.event_name == 'workflow_run' || inputs.operation == 'deliver-dev')
     permissions:
+      actions: read
       contents: write
     uses: ./.github/workflows/retain-release.yml
     with:
       signed_artifact: biscuit-native-signed
       target: biscuit
       receipt_sha256: ${{ needs.sign.outputs.receipt_sha256 }}
+      plan_run: ${{ needs.sign.outputs.plan_run }}
 
   advance-dev:
     needs: [sign, retain-dev]

@@ -12,6 +12,9 @@ import unittest
 from unittest.mock import patch
 import zipfile
 
+import biscuit_dev
+import check
+import dev_plan
 import pipeline
 from biscuit_dev import ANCHOR, SEMVER_BASE
 from test_fixtures import inventory
@@ -354,6 +357,108 @@ class PipelineTests(unittest.TestCase):
         dev, stable = (pipeline.verify_jws(self.feed(channel), pipeline.ANDROID_FEED_TYPE, self.public)
                        for channel in ("dev", "stable"))
         self.assertEqual({**dev, "channel": "stable"}, stable)
+        notes = "## Android\n\n- Fix startup\n\n## Biscuit\n\n- No build\n"
+        plan = {"source": self.source, "version": core, "revision": revision,
+                "targets": ["android-generic"], "changelog": notes}
+        plan_path = self.build / "plan.json"
+        plan_path.write_text(json.dumps(plan))
+        command = json.loads(self.verified("publish", "--automatic-dev", "--dev-plan", plan_path).stdout)["commands"][0]
+        self.assertEqual(command[command.index("--notes") + 1], notes)
+        plan_path.write_text(json.dumps({**plan, "targets": ["biscuit"]}))
+        rejected = self.verified("publish", "--automatic-dev", "--dev-plan", plan_path, success=False)
+        self.assertIn("Dev release plan differs from signed candidate", rejected.stderr)
+
+    def test_selective_dev_plans_follow_each_published_source_and_stage_revision_gaps(self):
+        def commit(subject, path):
+            entry = self.repo / path
+            entry.parent.mkdir(parents=True, exist_ok=True)
+            entry.write_text(subject)
+            self.git("add", path)
+            self.git("commit", "-qm", subject)
+            return self.git("rev-parse", "HEAD").strip()
+
+        releases = []
+
+        def publish(tag, source, draft=False):
+            self.git("tag", tag, source)
+            release = {"tag_name": tag, "immutable": not draft, "draft": draft,
+                       "assets": [{"name": name} for name in ("receipt.json", "receipt.jws")]}
+            releases.append(release)
+            return release
+
+        android, biscuit = "android-generic", "biscuit"
+        base = commit("last lockstep build", "core/session/session.go")
+        publish("android-generic-r1000000001", base)
+        publish("biscuit-0.1.2", base)
+        docs = commit("docs: explain setup", "docs/setup.md")
+        android_tip = commit("fix(android): handle reconnect", "devices/android-generic/app/Host.java")
+        # A recovery tag and draft cannot establish a release baseline.
+        android_release = publish("android-generic-r1000000003", android_tip, draft=True)
+        biscuit_tip = commit("fix(biscuit): update kernel notice", "devices/biscuit/packaging/kernel61/README.md")
+        registry, _ = inventory("1.2.0")
+
+        def plan(source):
+            with (patch.object(biscuit_dev, "ROOT", self.repo), patch.object(check, "ROOT", self.repo),
+                  patch.multiple(dev_plan, ROOT=self.repo, ANCHOR=self.source),
+                  patch.object(biscuit_dev, "ANCHOR", self.source),
+                  patch.object(biscuit_dev, "SEMVER_BASE", base)):
+                return dev_plan.plan(source, releases, registry, [android, biscuit])
+
+        docs_plan = plan(docs)
+        self.assertEqual(docs_plan["targets"], [])
+        self.assertEqual(docs_plan["changelog"].count("No build"), 2)
+        android_plan = plan(android_tip)
+        self.assertEqual(android_plan["targets"], [android])
+        self.assertIn("## Biscuit\n\n- No build", android_plan["changelog"])
+        self.assertEqual(plan(biscuit_tip)["targets"], [android, biscuit])  # Accumulated unpublished Android fix.
+        android_release.update(immutable=True, draft=False)
+        biscuit_plan = plan(biscuit_tip)
+        self.assertEqual(biscuit_plan["targets"], [biscuit])
+        self.assertIn("## Android\n\n- No build", biscuit_plan["changelog"])
+        self.assertIn("fix(biscuit): update kernel notice", biscuit_plan["changelog"])
+        self.assertNotIn("handle reconnect", biscuit_plan["changelog"])
+        publish("biscuit-0.1.5", biscuit_tip)
+        self.assertEqual(plan(android_tip), android_plan)  # Same-source and later releases are ignored on replay.
+        linux_tip = commit("fix(biscuit): update native OTA", "platforms/linuxupdate/verify.go")
+        self.assertEqual(plan(linux_tip)["targets"], [biscuit])
+        shared_tip = commit("fix(core): restore session state", "core/session/session.go")
+        shared = plan(shared_tip)
+        self.assertEqual(shared["targets"], [android, biscuit])
+        self.assertEqual(shared["changelog"].count("fix(core): restore session state"), 2)
+        self.assertIn("fix(biscuit): update native OTA", shared["changelog"].split("## Biscuit", 1)[1])
+        self.assertNotIn("update native OTA", shared["changelog"].split("## Biscuit", 1)[0])
+        publish("android-generic-r1000000006", shared_tip)
+        publish("biscuit-0.1.7", shared_tip)
+        build_inputs = commit("fix(build): pin shared Go modules", "go.sum")
+        self.assertEqual(plan(build_inputs)["targets"], [android, biscuit])
+        held = plan(commit("feat(core): next minor", "core/session/session.go"))
+        self.assertEqual((held["version"], held["targets"]), ("0.2.0", []))
+
+        self.assertEqual((android_plan["version"], android_plan["revision"]), ("0.1.4", 1000000003))
+        self.assertEqual((biscuit_plan["version"], biscuit_plan["revision"]), ("0.1.5", 1000000004))
+        self.prepare()
+        site = self.build / "site"
+        receipts = {
+            android: self.receipt,
+            biscuit: {"target": biscuit, "backend": "incubator",
+                      "artifact": {"name": "seed.zip"}, "ota": {"name": "ota.zip", "size": 200, "sha256": "2" * 64},
+                      "compatibility": {"format": pipeline.NATIVE_STARTER, "base_sha256": "1" * 64}},
+        }
+        feeds = {}
+        for offset, release in enumerate((plan(base), docs_plan, android_plan, biscuit_plan)):
+            for target in release["targets"]:
+                receipt = {**receipts[target], "source": release["source"], "core_version": release["version"],
+                           "revision": release["revision"]}
+                issued = self.now + offset
+                feed = self.build / f"{target}-{issued}.jws"
+                metadata = pipeline.metadata(receipt, "dev", issued, issued + 3600)
+                kind = pipeline.ANDROID_FEED_TYPE if target == android else pipeline.ARM64_FEED_TYPE
+                pipeline.sign(metadata, kind, self.key, feed)
+                pipeline.stage_feed(receipt, feed, self.public, site, "dev", now=issued)
+                feeds[target] = (metadata, feed.read_bytes())
+            for metadata, previous in feeds.values():
+                self.assertEqual((site / metadata["target"] / "incubator/dev.jws").read_bytes(), previous)
+        self.assertEqual([feeds[target][0]["revision"] for target in (android, biscuit)], [1000000003, 1000000004])
 
     def test_release_history_advances_lockstep_and_holds_minor(self):
         # Synthetic old anchor and one height-versioned commit before cutover.

@@ -92,3 +92,41 @@ jobs:
         run: make biscuit-check biscuit-build
       # Deliberately not make lab-test: it needs pinned HA, onboarding and
       # Amp-supervised service restart support. See release/README.md.
+
+  dev-plan:
+    needs: lab-foundation
+    if: >-
+      github.repository == 'farooqu/encore-satellite' && github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' && github.ref_protected
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Reuse an existing plan on reruns
+        id: existing
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?name=dev-release-plan" \
+            --jq '"exists=\(any(.artifacts[]; .expired == false))"' >> "$GITHUB_OUTPUT"
+      - name: Plan Dev builds and generate the shared changelog
+        if: steps.existing.outputs.exists != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA" --jq '.commit.verification.verified' | grep -Fx true
+          python3 release/dev_plan.py "$GITHUB_SHA" "$RUNNER_TEMP/dev-release-plan"
+          cat "$RUNNER_TEMP/dev-release-plan/"*.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: steps.existing.outputs.exists != 'true'
+        with:
+          name: dev-release-plan
+          path: ${{ runner.temp }}/dev-release-plan
+          if-no-files-found: error

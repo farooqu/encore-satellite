@@ -3,6 +3,11 @@ name: Android APK checks and signing
 on:
   pull_request:
   push:
+    branches-ignore: [main]
+  workflow_run:
+    workflows: [Foundation checks]
+    types: [completed]
+    branches: [main]
   workflow_dispatch:
     inputs:
       signed_candidate:
@@ -15,32 +20,89 @@ permissions:
 
 jobs:
   check:
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.repository == 'farooqu/encore-satellite' && github.ref == 'refs/heads/main' && github.ref_protected &&
+       github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.head_repository.full_name == github.repository)
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    permissions:
+      actions: read
+      contents: read
+    env:
+      SOURCE: ${{ github.event.workflow_run.head_sha || github.sha }}
     outputs:
       core: ${{ steps.dev.outputs.core }}
       revision: ${{ steps.dev.outputs.revision }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          ref: ${{ github.event.workflow_run.head_sha || '' }}
           fetch-depth: 0
           persist-credentials: false
+      - name: Check for a source with selective Dev planning
+        if: github.event_name == 'workflow_run'
+        id: planning
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE"
+          git rev-list --first-parent origin/main | grep -Fx "$SOURCE" >/dev/null
+          if test -f release/dev_plan.py; then echo 'enabled=true' >> "$GITHUB_OUTPUT"; fi
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        if: steps.planning.outputs.enabled == 'true'
+        with:
+          name: dev-release-plan
+          path: ${{ runner.temp }}/dev-release-plan
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+      - name: Select an eligible verified main commit
+        id: dev
+        if: >-
+          steps.planning.outputs.enabled == 'true' ||
+          (github.repository == 'farooqu/encore-satellite' && github.ref == 'refs/heads/main' && github.ref_protected &&
+           github.event_name == 'workflow_dispatch' && inputs.signed_candidate)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/commits/$SOURCE" --jq '.commit.verification.verified' | grep -Fx true
+          test "$(git rev-parse HEAD)" = "$SOURCE"
+          identity=$(python3 release/biscuit_dev.py "$SOURCE")
+          test -n "$identity" || exit 0
+          read -r core revision extra <<< "$identity"
+          [[ "$core" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "$revision" =~ ^[1-9][0-9]*$ &&
+            "$revision" -gt 8 && "$revision" -le 2100000000 && -z "$extra" ]]
+          if test "$GITHUB_EVENT_NAME" = workflow_run; then
+            plan="$RUNNER_TEMP/dev-release-plan/plan.json"
+            jq -e --arg source "$SOURCE" --arg version "$core" --argjson revision "$revision" \
+              '.source == $source and .version == $version and .revision == $revision' "$plan" >/dev/null
+            if ! jq -e '.targets | index("android-generic") != null' "$plan" >/dev/null; then exit 0; fi
+          fi
+          printf 'core=%s\nrevision=%s\n' "$core" "$revision" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        if: github.event_name != 'workflow_run' || steps.dev.outputs.revision != ''
         with:
           go-version: '1.27.4'
           cache: false
       - name: Use Java 21
+        if: github.event_name != 'workflow_run' || steps.dev.outputs.revision != ''
         run: echo "JAVA_HOME=$JAVA_HOME_21_X64" >> "$GITHUB_ENV"
       - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+        if: github.event_name != 'workflow_run' || steps.dev.outputs.revision != ''
         with:
           packages: platform-tools
       - name: Install SDK and NDK
+        if: github.event_name != 'workflow_run' || steps.dev.outputs.revision != ''
         run: sdkmanager 'platforms;android-36' 'build-tools;36.0.0' 'ndk;28.0.13004108'
       - name: Install AEC3 build tools
+        if: github.event_name != 'workflow_run' || steps.dev.outputs.revision != ''
         run: sudo apt-get update && sudo apt-get install -y meson ninja-build
       - name: Regenerate engine, assemble, test and lint
+        if: github.event_name != 'workflow_run' || steps.dev.outputs.revision != ''
         run: devices/android-generic/build-android :app:assembleDebug :app:testDebugUnitTest :app:lintDebug
       - name: Exercise release assembly and inspection with a disposable key
+        if: github.event_name != 'workflow_run' || steps.dev.outputs.revision != ''
         env:
           ENCORE_STORE_PASSWORD: ci-only
           ENCORE_KEY_PASSWORD: ci-only
@@ -62,34 +124,12 @@ jobs:
           python3 release/pipeline.py inspect-android devices/android-generic/app/build/outputs/apk/release/app-release.apk \
             --revision "$ENCORE_VERSION_CODE" --version "$ENCORE_VERSION_NAME" --certificate-sha256 "$cert"
           python3 release/android_dev.py devices/android-generic/app/build/outputs/apk/release/app-release.apk
-      - name: Select an eligible verified main commit
-        id: dev
-        if: >-
-          github.repository == 'farooqu/encore-satellite' && github.ref == 'refs/heads/main' &&
-          github.ref_protected &&
-          (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.signed_candidate))
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          if test "$GITHUB_EVENT_NAME" = push &&
-            ! jq -e '.automatic_dev_targets | index("android-generic") != null' release/dev-automation.json >/dev/null; then
-            exit 0
-          fi
-          gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA" --jq '.commit.verification.verified' | grep -Fx true
-          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          identity=$(python3 release/biscuit_dev.py "$GITHUB_SHA")
-          test -n "$identity" || exit 0
-          read -r core revision extra <<< "$identity"
-          [[ "$core" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "$revision" =~ ^[1-9][0-9]*$ &&
-            "$revision" -gt 8 && "$revision" -le 2100000000 && -z "$extra" ]]
-          printf 'core=%s\nrevision=%s\n' "$core" "$revision" >> "$GITHUB_OUTPUT"
 
   signed-candidate:
     needs: check
     if: needs.check.outputs.revision != ''
     # Automatic Dev and the existing reviewed manual candidate use different environments.
-    environment: ${{ github.event_name == 'push' && 'android-dev-signing' || 'android-signing' }}
+    environment: ${{ github.event_name == 'workflow_run' && 'android-dev-signing' || 'android-signing' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     outputs:
@@ -98,6 +138,7 @@ jobs:
       signed_artifact: ${{ steps.receipt.outputs.signed_artifact }}
       signed_feed_artifact: ${{ steps.receipt.outputs.signed_feed_artifact }}
     env:
+      SOURCE: ${{ github.event.workflow_run.head_sha || github.sha }}
       ENCORE_CORE_VERSION: ${{ needs.check.outputs.core }}
       ENCORE_VERSION_CODE: ${{ needs.check.outputs.revision }}
       ENCORE_VERSION_NAME: ${{ needs.check.outputs.core }}
@@ -107,12 +148,13 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ env.SOURCE }}
           fetch-depth: 0
           persist-credentials: false
       - name: Validate candidate identity and derive the APK's feed trust root
         run: |
-          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE"
           python3 release/check.py
           python3 - <<'PY'
           import base64, os, re, subprocess
@@ -153,7 +195,7 @@ jobs:
           unset KEYSTORE_BASE64
           apk=devices/android-generic/app/build/outputs/apk/release/app-release.apk
           export PATH="$ANDROID_HOME/build-tools/36.0.0:$PATH"
-          if test "$GITHUB_EVENT_NAME" = push; then
+          if test "$GITHUB_EVENT_NAME" = workflow_run; then
             work="$RUNNER_TEMP/android-build"
             mkdir "$work"
             devices/android-generic/build-android clean :app:assembleRelease --no-build-cache
@@ -179,7 +221,7 @@ jobs:
           if-no-files-found: error
           retention-days: 30
       - name: Verify the repeat build and prepare the release receipt
-        if: github.event_name == 'push'
+        if: github.event_name == 'workflow_run'
         id: receipt
         run: |
           set -euo pipefail
@@ -189,7 +231,7 @@ jobs:
           printf 'sha256=%s\nsigned_artifact=android-dev-signed-%s\nsigned_feed_artifact=android-dev-signed-feed-%s\n' \
             "$sha" "$GITHUB_RUN_ATTEMPT" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
       - name: Sign the Android receipt and Dev entry with the APK's OTA root
-        if: github.event_name == 'push'
+        if: github.event_name == 'workflow_run'
         env:
           PRIVATE_KEY: ${{ secrets.ANDROID_METADATA_KEY_PEM }}
           RECEIPT_SHA256: ${{ steps.receipt.outputs.sha256 }}
@@ -214,13 +256,13 @@ jobs:
             --receipt-sha256 "$RECEIPT_SHA256" --channel dev --issued "$issued" \
             --expires "$((issued + 604800))" --output "$feed/dev.jws"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        if: github.event_name == 'push'
+        if: github.event_name == 'workflow_run'
         with:
           name: ${{ steps.receipt.outputs.signed_artifact }}
           path: ${{ runner.temp }}/android-release
           if-no-files-found: error
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        if: github.event_name == 'push'
+        if: github.event_name == 'workflow_run'
         with:
           name: ${{ steps.receipt.outputs.signed_feed_artifact }}
           path: ${{ runner.temp }}/android-feed/dev.jws
@@ -228,14 +270,16 @@ jobs:
 
   retain-dev:
     needs: signed-candidate
-    if: github.event_name == 'push' && needs.signed-candidate.outputs.receipt_sha256 != ''
+    if: github.event_name == 'workflow_run' && needs.signed-candidate.outputs.receipt_sha256 != ''
     permissions:
+      actions: read
       contents: write
     uses: ./.github/workflows/retain-release.yml
     with:
       target: android-generic
       signed_artifact: ${{ needs.signed-candidate.outputs.signed_artifact }}
       receipt_sha256: ${{ needs.signed-candidate.outputs.receipt_sha256 }}
+      plan_run: ${{ format('{0}', github.event.workflow_run.id) }}
 
   advance-dev:
     needs: [signed-candidate, retain-dev]
