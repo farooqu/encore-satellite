@@ -110,6 +110,7 @@ func Open(directory string, output Audio) (*Runtime, error) {
 	r.engine = session.New(androidhost.NewPlayback(output))
 	r.engine.SetMuted(r.config.Muted)
 	r.microphone = sensors.NewMicrophone(r.config.Muted)
+	// Keep wire AEC and remote recording off until their routes are qualified.
 	r.voice = &incubator.Server{Engine: r.engine, Name: r.Name(), MAC: r.config.MAC, Version: "0.1.0-android", EnableModels: true}
 	r.proxy = r.newBluetooth(nil)
 	return r, nil
@@ -209,6 +210,19 @@ func (r *Runtime) Capture(pcm []byte) error {
 
 func (r *Runtime) Talk() error { return r.engine.StartManual() }
 func (r *Runtime) Stop()       { _ = r.engine.Stop() }
+
+// SetMonitorVisible applies the Android overlay state for one exact request.
+func (r *Runtime) SetMonitorVisible(id int64, visible bool) {
+	if id <= 0 {
+		return
+	}
+	if visible {
+		r.engine.ConfirmMonitor(uint64(id))
+	} else {
+		r.engine.HideMonitor(uint64(id))
+	}
+}
+
 func (r *Runtime) SetMuted(muted bool) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()

@@ -1,6 +1,7 @@
 package com.encore.satellite
 
 import android.provider.Settings
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.Button
 import androidx.compose.material3.Text
@@ -37,6 +38,43 @@ import kotlin.math.sin
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 class EncoreScreenTest {
     @get:Rule val compose = createComposeRule()
+
+    @Test fun remoteRequestShowsOverlayWithoutATapAndStopAndMuteDismissIt() {
+        val state = mutableStateOf(ready())
+        val visibility = mutableListOf<Pair<Long, Boolean>>()
+        compose.setContent {
+            EncoreScreen(state.value, {}, {}, { state.value = ready() },
+                { state.value = ready().copy(muted = it) }, { "" }, { "" }, {}, {}, {}, {},
+                reducedMotion = true, dashboardContent = { Box(Modifier.fillMaxSize().background(androidx.compose.ui.graphics.Color.DarkGray)) },
+                onMonitorOverlay = { id, visible -> visibility += id to visible })
+        }
+        compose.onNodeWithTag("voice-overlay").assertDoesNotExist()
+        compose.runOnIdle {
+            state.value = ready().copy(voiceActive = true, monitorId = 41,
+                waveform = List(64) { (0.6 * sin(it * 0.29)).toFloat() })
+        }
+        compose.onNodeWithTag("voice-visual").assertIsDisplayed().assertContentDescriptionEquals("Live microphone waveform")
+        compose.onNodeWithText("Remote microphone active").assertDoesNotExist()
+        capture("android-monitor-waveform")
+        compose.runOnIdle {
+            ShadowLooper.idleMainLooper(32, TimeUnit.MILLISECONDS)
+            assertEquals(listOf(41L to true), visibility)
+        }
+        compose.onNodeWithTag("stop").performClick()
+        compose.onNodeWithTag("voice-overlay").assertDoesNotExist()
+        compose.runOnIdle { assertTrue((41L to false) in visibility) }
+
+        compose.runOnIdle { state.value = ready().copy(voiceActive = true, monitorId = 42) }
+        compose.onNodeWithTag("voice-visual").assertIsDisplayed().assertContentDescriptionEquals("Microphone waveform awaiting samples")
+        compose.runOnIdle {
+            ShadowLooper.idleMainLooper(32, TimeUnit.MILLISECONDS)
+            assertFalse((42L to true) in visibility)
+        }
+        compose.onNodeWithTag("privacy").performClick()
+        compose.onNodeWithTag("voice-overlay").assertDoesNotExist()
+        compose.onNodeWithTag("privacy").assertIsOn()
+        compose.runOnIdle { assertTrue((42L to false) in visibility) }
+    }
 
     @OptIn(ExperimentalTestApi::class)
     @Test @Config(sdk = [30]) fun voiceBlocksDashboardButNotStopOrPrivacy() {

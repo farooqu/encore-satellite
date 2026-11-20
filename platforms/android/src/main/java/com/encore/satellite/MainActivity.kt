@@ -28,6 +28,7 @@ class MainActivity : ComponentActivity() {
         override fun onServiceConnected(name: ComponentName, binder: IBinder) {
             service = (binder as EncoreService.LocalBinder).service
             service?.bluetooth?.visible(this@MainActivity, lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED))
+            service?.monitorScreenVisible(lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED) && hasWindowFocus())
         }
         override fun onServiceDisconnected(name: ComponentName) { service = null }
     }
@@ -53,7 +54,8 @@ class MainActivity : ComponentActivity() {
                 onMusicCommand = { service?.musicCommand(it) },
                 onDismiss = { permissionProblem = ""; service?.dismissProblem() },
                 onUpdate = { startActivity(Intent(this, UpdateActivity::class.java)) },
-                onBluetooth = { startActivity(Intent(this, BluetoothActivity::class.java)) })
+                onBluetooth = { startActivity(Intent(this, BluetoothActivity::class.java)) },
+                onMonitorOverlay = { id, visible -> connectedService?.setMonitorOverlay(id, visible) })
         }
     }
 
@@ -65,7 +67,19 @@ class MainActivity : ComponentActivity() {
             arrayOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.POST_NOTIFICATIONS) else arrayOf(Manifest.permission.RECORD_AUDIO))
     }
     private fun startSatellite(unmute: Boolean) { startForegroundService(Intent(this, EncoreService::class.java).putExtra("unmute", unmute)) }
-    override fun onResume() { super.onResume(); service?.bluetooth?.visible(this, true) }
-    override fun onPause() { service?.bluetooth?.visible(this, false); super.onPause() }
+    override fun onResume() {
+        super.onResume()
+        service?.bluetooth?.visible(this, true)
+        service?.monitorScreenVisible(hasWindowFocus())
+    }
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        service?.monitorScreenVisible(hasFocus && lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED))
+    }
+    override fun onPause() {
+        service?.monitorScreenVisible(false)
+        service?.bluetooth?.visible(this, false)
+        super.onPause()
+    }
     override fun onDestroy() { unbindService(connection); super.onDestroy() }
 }

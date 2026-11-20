@@ -106,6 +106,41 @@ until measured; the shared Biscuit precedent sends the **same** cleaned mono
 PCM on `0x08` before `0x03` with zero relative lead and matching pre-roll. No
 second physical lane is required by the protocol.
 
+The existing model-upload path accepts compatible mixednet models; collecting
+training samples is a separate capability. Off-call Live Monitor, Enroll Voice,
+Teach Wake Word, and two-way intercom remain unadvertised pending qualification.
+Android connects the existing foreground voice overlay to the shared monitor gate.
+With microphone permission granted and Encore's mic unmuted, a fresh request from
+the authorized, current Incubator connection brings up the overlay without a local
+tap or additional opt-in. Android confirms the exact request **after** drawing the
+microphone waveform and **before** the gate sends PCM. The gate sends no pre-roll
+and does not resume a previous stream automatically. Stop cancels the request;
+Mute cancels it and latches mic privacy. Permission/capture loss, overlay loss and
+disconnect also end the stream. The foreground-service notification and OS mic dot
+do not replace the overlay. Keep this unauthenticated protocol on an isolated trusted LAN.
+
+For full intercom and explicit monitor admission, the required companion is
+the unpublished `encore-loopback-intercom` revision
+`ef556aea47337be17340d1499acd99e9b2f3b9ce`, based on upstream
+[`ffd4f23`](https://github.com/OHF-Voice/voice-incubator/commit/ffd4f23520d8e4c845741a0c9da797b50995d5f6).
+See the [paired verification and patch handoff](https://ampcode.com/threads/T-01a1f425-c4ad-7081-b906-3b3728b201d8).
+Stock `v0.3.3` emits unmarked connect tones. The compatible companion marks
+cues as announcements, waits for both connect drains before relay, correlates
+request IDs with `monitor_result`, and retires both relay streams on Stop without
+acknowledging discarded playback as drained. The companion is necessary, not
+sufficient: Android still needs its own route qualification and recording gate.
+
+On the exact LineageOS Tab A7 Lite and Meta Portal units, record model/ABI,
+OS and vendor builds, selected routes and input effect state. Compare identical
+levels and speech with a pre-AEC3 build, the current build, and (as a separate
+comparator) Android's session AEC on `VOICE_COMMUNICATION`. Measure echo reduction, self-wake/false
+Stop, near-end and overlapping speech, Stop latency, route/focus recovery,
+sustained delay/drift, CPU/heat and underruns. Use real Incubator model push,
+wake/reply and follow-up; then qualify monitor indicator and teardown, intercom,
+Live Monitor and actual enrollment/training with the matched companion. Neither
+the synthetic Android tests nor prior Biscuit virtual intercom runs qualify
+these devices, acoustic timings or model-backed enrollment/training.
+
 ## Use the development app
 
 1. Install the debug APK using Android's ordinary user-approved sideloading flow.

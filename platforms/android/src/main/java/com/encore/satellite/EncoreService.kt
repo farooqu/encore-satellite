@@ -40,6 +40,7 @@ class EncoreService : Service() {
     private var music: MusicPlayer? = null
     private var light: LightSensorHost? = null
     private var microphoneForeground = false
+    private var monitorScreenVisible = false
     private val focus by lazy {
         SatelliteAudioFocus(getSystemService(AudioManager::class.java)) { focused ->
             mutable.value = mutable.value.copy(audioInterrupted = !focused)
@@ -63,6 +64,10 @@ class EncoreService : Service() {
                     val microphoneProblem = audio.captureProblem
                     runCatching { EncoreState.parse(engine.snapshot(microphoneProblem.isEmpty()), mutable.value) }
                         .onSuccess { snapshot ->
+                            if (snapshot.monitorId != 0L && (!monitorScreenVisible || !snapshot.microphoneVisible)) {
+                                engine.setMonitorVisible(snapshot.monitorId, false)
+                                return@onSuccess
+                            }
                             val frame = audio.microphoneFrame(snapshot.generation, snapshot.turn, snapshot.microphoneVisible)
                             val next = snapshot.copy(level = frame.level, waveform = frame.waveform,
                                 playbackLevel = if (snapshot.visual != "none" && snapshot.outputState in setOf("playing", "draining")) audio.playbackLevel() else null,
@@ -72,6 +77,7 @@ class EncoreService : Service() {
                             focus.update(next.voiceActive || next.music.playing, resume = newVoiceActivity)
                             music?.duck(next.voiceActive)
                         }.onFailure {
+                            engine.setMonitorVisible(mutable.value.monitorId, false)
                             audio.clearVisualization()
                             mutable.value = mutable.value.copy(voiceKnown = false, level = 0f, waveform = emptyList(), playbackLevel = null,
                                 heard = "", reply = "", speakerName = "", speakerRGB = emptyList())
@@ -84,6 +90,17 @@ class EncoreService : Service() {
     }
 
     override fun onBind(intent: Intent): IBinder = binder
+
+    fun monitorScreenVisible(visible: Boolean) {
+        monitorScreenVisible = visible
+        if (!visible) setMonitorOverlay(mutable.value.monitorId, false)
+    }
+
+    fun setMonitorOverlay(id: Long, visible: Boolean) {
+        val current = mutable.value
+        runtime?.setMonitorVisible(id, visible && monitorScreenVisible && current.monitorId == id &&
+            current.microphoneVisible && audio.captureReady)
+    }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == "stop") { shutdown(); stopSelf(); return START_NOT_STICKY }

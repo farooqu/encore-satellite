@@ -39,6 +39,7 @@ data class EncoreState(
     val voiceKnown: Boolean = false,
     val generation: Long = 0,
     val turn: Long = 0,
+    val monitorId: Long = 0,
     val inhibited: Boolean = false,
     val input: String = "",
     val inputOpen: Boolean = false,
@@ -58,7 +59,7 @@ data class EncoreState(
     val interactionVisible: Boolean get() = running && connected && !muted && !inhibited &&
         (voiceActive || announcing || alert || outputState in setOf("queued", "playing", "draining"))
     val microphoneVisible: Boolean get() = running && microphoneReady && voiceKnown && connected && captureReady && !muted && !inhibited &&
-        (inputOpen || input in setOf("tentative", "listening"))
+        (monitorId != 0L || inputOpen || input in setOf("tentative", "listening"))
     val visual: String get() = when {
         !running || !voiceKnown || muted || !connected || inhibited -> "none"
         alert || (outputOwner == "alert" && outputState in setOf("playing", "draining")) -> "alert"
@@ -76,6 +77,7 @@ data class EncoreState(
         !voiceKnown -> "Voice status unavailable"
         !connected -> "Voice disconnected"
         inhibited -> if (phase == "stopping") "Stopping" else "Stopped · waiting for voice"
+        monitorId != 0L && microphoneVisible -> "Listening"
         alert -> "Alert"
         outputState == "failed" -> "Playback unavailable"
         outputState == "draining" -> when (outputOwner) { "announcement" -> "Finishing announcement"; "alert" -> "Finishing alert"; else -> "Finishing response" }
@@ -113,7 +115,7 @@ data class EncoreState(
             return previous.copy(voiceKnown = true, phase = voice.getString("phase"), connected = voice.getBoolean("connected"),
                 muted = voice.getBoolean("muted"), models = data.getInt("models"),
                 heard = voice.optString("heard"), reply = voice.optString("reply"), alert = voice.getBoolean("alert"),
-                generation = voice.optLong("generation"), turn = voice.optLong("turn"),
+                generation = voice.optLong("generation"), turn = voice.optLong("turn"), monitorId = voice.optLong("monitor_id"),
                 voiceActive = voice.optBoolean("active"), announcing = voice.optBoolean("announcing"), inhibited = voice.optBoolean("inhibited"),
                 talkAllowed = voice.optBoolean("talk_allowed"),
                 input = voice.optString("input"), inputOpen = voice.optBoolean("input_open"), invocation = voice.optString("invocation"),

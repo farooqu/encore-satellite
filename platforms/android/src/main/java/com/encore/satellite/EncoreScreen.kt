@@ -32,6 +32,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.*
 import androidx.compose.ui.text.style.TextAlign
@@ -53,10 +54,15 @@ fun EncoreScreen(state: EncoreState, onStart: () -> Unit, onTalk: () -> Unit, on
     onMusicCommand: (String) -> Unit, onDismiss: () -> Unit, onUpdate: () -> Unit = {},
     onBluetooth: () -> Unit = {},
     reducedMotion: Boolean = systemReducedMotion(),
+    onMonitorOverlay: (Long, Boolean) -> Unit = { _, _ -> },
     dashboardContent: @Composable () -> Unit = { Dashboard(state) }) {
     var settings by remember { mutableStateOf(false) }
     val drawer = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
+    val monitorId = state.monitorId.takeIf { state.microphoneVisible } ?: 0L
+    LaunchedEffect(monitorId) {
+        if (monitorId != 0L) { settings = false; drawer.close() }
+    }
     MaterialTheme(colorScheme = darkColorScheme(primary = Mint, background = Ink, surface = Color(0xff152330))) {
         ModalNavigationDrawer(drawerState = drawer, gesturesEnabled = drawer.isOpen, drawerContent = {
             ModalDrawerSheet(Modifier.width(340.dp)) {
@@ -90,7 +96,9 @@ fun EncoreScreen(state: EncoreState, onStart: () -> Unit, onTalk: () -> Unit, on
                     val top = maxHeight * if (maxHeight < 320.dp) .07f else .22f
                     VoiceOverlay(state, reducedMotion,
                         Modifier.align(Alignment.TopCenter).padding(top = top, start = 8.dp, end = 8.dp).widthIn(max = 880.dp)
-                            .fillMaxWidth(.96f).height((maxHeight - top - 96.dp).coerceAtLeast(72.dp)))
+                            .fillMaxWidth(.96f).height((maxHeight - top - 96.dp).coerceAtLeast(72.dp)),
+                        monitorId.takeUnless { settings || drawer.isOpen || drawer.targetValue == DrawerValue.Open } ?: 0L,
+                        onMonitorOverlay)
                 }
                 if (state.problem.isNotEmpty()) Surface(Modifier.align(Alignment.TopCenter).statusBarsPadding()
                     .padding(horizontal = 20.dp, vertical = 4.dp), shape = RoundedCornerShape(12.dp)) {
@@ -102,10 +110,10 @@ fun EncoreScreen(state: EncoreState, onStart: () -> Unit, onTalk: () -> Unit, on
                 }
                 // Restrict the closed-drawer gesture to the edge, preserving dashboard swipes elsewhere.
                 Box(Modifier.align(Alignment.CenterStart).width(20.dp).fillMaxHeight().testTag("controls-edge")
-                    .pointerInput(Unit) {
+                    .pointerInput(monitorId) {
                         var distance = 0f
                         detectHorizontalDragGestures(onDragStart = { distance = 0f }, onDragEnd = {
-                            if (distance > 48.dp.toPx()) scope.launch { drawer.open() }
+                            if (distance > 48.dp.toPx() && monitorId == 0L) scope.launch { drawer.open() }
                         }) { change, drag -> change.consume(); distance += drag }
                     })
                 Row(Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(16.dp),
@@ -126,7 +134,7 @@ fun EncoreScreen(state: EncoreState, onStart: () -> Unit, onTalk: () -> Unit, on
                                     else -> "Talk"
                                 }
                                 stateDescription = state.status
-                                customActions = listOf(CustomAccessibilityAction("Open satellite controls") {
+                                customActions = if (monitorId != 0L) emptyList() else listOf(CustomAccessibilityAction("Open satellite controls") {
                                     scope.launch { drawer.open() }; true
                                 })
                             }) {
@@ -142,7 +150,7 @@ fun EncoreScreen(state: EncoreState, onStart: () -> Unit, onTalk: () -> Unit, on
                             contentDescription = if (state.muted) "Unmute mic" else "Mute mic"
                             stateDescription = if (state.muted) "Microphone muted" else "Microphone unmuted"
                             // Alternate drawer access without a visible menu button.
-                            customActions = listOf(CustomAccessibilityAction("Open satellite controls") {
+                            customActions = if (monitorId != 0L) emptyList() else listOf(CustomAccessibilityAction("Open satellite controls") {
                                 scope.launch { drawer.open() }; true
                             })
                         }) {
@@ -169,10 +177,30 @@ fun EncoreScreen(state: EncoreState, onStart: () -> Unit, onTalk: () -> Unit, on
     }
 }
 
-@Composable private fun VoiceOverlay(state: EncoreState, reducedMotion: Boolean, modifier: Modifier) {
+@Composable private fun VoiceOverlay(state: EncoreState, reducedMotion: Boolean, modifier: Modifier,
+    monitorId: Long, onMonitorOverlay: (Long, Boolean) -> Unit) {
     Column(modifier.testTag("voice-overlay").padding(12.dp)) {
+        val indicator = if (monitorId != 0L) key(monitorId) {
+            val view = LocalView.current
+            val notify by rememberUpdatedState(onMonitorOverlay)
+            val drawn = remember(view) { Runnable { if (view.isShown && view.hasWindowFocus()) notify(monitorId, true) } }
+            val reported = remember(view) { booleanArrayOf(false) }
+            DisposableEffect(view, drawn) {
+                onDispose {
+                    view.removeCallbacks(drawn)
+                    notify(monitorId, false)
+                }
+            }
+            Modifier.drawWithContent {
+                drawContent()
+                if (!reported[0] && state.waveform.isNotEmpty() && view.isShown && view.hasWindowFocus()) {
+                    reported[0] = true
+                    view.postOnAnimation(drawn)
+                }
+            }
+        } else Modifier
         VoiceVisualization(state, reducedMotion,
-            Modifier.fillMaxWidth().height(48.dp).testTag("voice-visual"), lightSurface = true)
+            Modifier.fillMaxWidth().height(48.dp).testTag("voice-visual").then(indicator), lightSurface = true)
         if (state.heard.isNotEmpty() || state.reply.isNotEmpty()) key(state.generation, state.turn) {
             Box(Modifier.weight(1f).fillMaxWidth().testTag("voice-transcripts")
                 .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
