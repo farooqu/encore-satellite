@@ -94,7 +94,10 @@ def repack(data, replacements):
     return gzip.compress(buf.getvalue(), mtime=0)
 
 
-def initramfs(busybox, rootfs_hash, microphone_firmware, store_rootfs=STORE_ROOTFS, *, starter=False, signed=None):
+def initramfs(busybox, rootfs_hash, microphone_firmware, store_rootfs=STORE_ROOTFS, *, starter=False, signed=None,
+              recovery_rearm=False):
+    if recovery_rearm and (not starter or signed is None):
+        raise ValueError("recovery re-arm requires a verified-update starter")
     init = (HERE / "init").read_text().replace(
         "@ROOTFS_SHA256@", rootfs_hash).replace(
         "/store/encore/kernel61-trial/rootfs.tar.gz", store_rootfs)
@@ -162,6 +165,23 @@ if [ "$state" = update ]; then
   : > /run/encore/arm64-update-trial || rescue trial-marker
 fi
 ''' + init[end:]
+        if recovery_rearm:
+            # Kaeru consumes the one-shot command before loading p12. Restore
+            # it only after a verified rootfs and before spending an OTA trial.
+            start = init.index('if [ "$state" = update ]; then\n')
+            init = init[:start] + '''\
+misc=/dev/mmcblk0p8
+[ -b "$misc" ] && [ "$($BB cat /sys/class/block/mmcblk0p8/partition)" = 8 ] || rescue misc-device
+$BB dd if="$misc" of=/run/encore/misc-command bs=32 count=1 2>/dev/null || rescue misc-read
+$BB dd if=/dev/zero of=/run/encore/misc-empty bs=32 count=1 2>/dev/null || rescue misc-buffer
+printf boot-recovery | $BB dd of=/run/encore/misc-recovery bs=32 count=1 conv=sync 2>/dev/null || rescue misc-buffer
+if ! $BB cmp -s /run/encore/misc-recovery /run/encore/misc-command; then
+  $BB cmp -s /run/encore/misc-empty /run/encore/misc-command || rescue misc-command
+  $BB dd if=/run/encore/misc-recovery of="$misc" bs=32 count=1 conv=notrunc,fsync 2>/dev/null &&
+    $BB dd if="$misc" of=/run/encore/misc-command bs=32 count=1 2>/dev/null &&
+    $BB cmp -s /run/encore/misc-recovery /run/encore/misc-command || rescue misc-write
+fi
+''' + init[start:]
         # Keep arm/commit bound to the slot whose verified rootfs was unpacked.
         # A fallback changes the selector, not either slot's health or attempts.
         init = init.replace("moved=\n", '''\

@@ -3,8 +3,7 @@
 **Experimental, not hardware-qualified.** Biscuit builds use Linux 6.1.178,
 Alpine 3.22 AArch64, the native Encore runtime and a separate USB recovery
 environment. See [the current build and fresh-install instructions](packaging/kernel61/README.md).
-The ARMv7 setup below is historical evidence, not an installation, build or
-update path for new devices. Other Echo models are not supported.
+The Linux 3.18/ARMv7 release path is retired. Other Echo models are not supported.
 
 ## Internal names
 
@@ -22,9 +21,8 @@ selection, key codes and ring wiring remain Biscuit-local. No generic MT8163
 API or speculative `devices/radar` package is introduced.
 
 The unpublished target/discovery board ID is `biscuit`, the package format is
-`encore-biscuit-v1`, and default generated names use `encore-biscuit-…`.
-The backend remains `incubator`; configuration/key locations and recovery/slot
-mechanics are unchanged. There are no legacy source aliases or target mappings.
+`encore-biscuit-arm64-starter-v1`, and default generated names use
+`encore-biscuit-…`. The packaged backend is `incubator`.
 
 ESPHome reports manufacturer `Encore Satellite` and model `Echo Dot (2nd gen)`. The
 firmware-update product title is `Encore Echo Dot` (formerly
@@ -41,9 +39,9 @@ promised. Do not rewrite retained provenance, source kits, backups or device dat
 The frozen first private candidate remains built from its original commit and
 does not need this rename for physical preflight; no device migration is performed.
 
-## Historical ARMv7 baseline and shared device behavior
+## Runtime and device behavior
 
-- Static Go Linux ARMv7 executable explicitly assembling the shared engine,
+- Static Go Linux AArch64 executable explicitly assembling the shared engine,
   Linux host primitives, Biscuit wiring and the native Incubator backend only.
 - Source-backed ALSA capture: card 0/device 24, 16 kHz packed24, nine channels.
   Microphone channels 0–6 are equally averaged into bounded mono PCM16; playback
@@ -54,8 +52,8 @@ does not need this rename for physical preflight; no device migration is perform
 - Source-backed speaker routing, conservative software volume, 16→48 kHz stereo
   output to card 0/device 23, filtered voice interpolation and source-scoped drain.
 - Optional official Sendspin SDK companion with authenticated Music Assistant
-  pairing, private persistent trust and an independent default-OFF music switch.
-  Voice and music share one ALSA mixer, not competing speaker devices.
+  pairing was built for the retired ARMv7 package. The ARM64 starter does not
+  ship a music companion; voice still uses Encore's ALSA mixer.
 - Authoritative hardware privacy-state reads around acquisition/delivery, buffer
   invalidation on mute, Action start/stop, volume buttons and a full-ring renderer.
   Driver-first mute is not toggled a second time. Never read `power_button_state`.
@@ -65,11 +63,10 @@ does not need this rename for physical preflight; no device migration is perform
   selector or fallback, and the binary excludes the Assist adapter.
   The configured name is used for hostname, discovery and backend identity;
   the real wlan0 MAC identifies the device. No lab HTTP controls are packaged.
-- Clean application state, first-boot Improv BLE or prompted USB Wi-Fi credentials, optional custom name,
-  recovery/misc backups, USB transfer read-back checks and two Encore rootfs slots.
-- Experimental signed Linux application OTA, persistent dev/stable selection,
-  ESPHome availability and explicit trial installation, with locally provisioned
-  trust and no production feed/key or physical OTA qualification.
+- Clean application state, first-boot Improv BLE, optional custom name, recovery
+  and MISC backups, USB transfer read-back checks and two Encore rootfs slots.
+- Experimental signed AArch64 rootfs updates with explicit trial installation;
+  no live feed or physical OTA qualification is implied.
 
 **Not implemented by this package:** AEC/beamforming, speaker EQ calibration,
 Voice PE ring parity, base/kernel OTA migration or a production release service.
@@ -292,7 +289,7 @@ One frame writer coalesces unchanged driver payloads and recomputes the current
 state rather than resuming a saved sequence. Provisioning/update/music status
 animations and other Echo models are not implemented here. Independent music,
 capture processing, release scope and audio cancellation policy are unchanged.
-Fake-PCM/clock/sink and encrypted-control tests plus ARMv7 cross-builds validate
+Fake-PCM/clock/sink and encrypted-control tests plus cross-builds validate
 software behavior only; actual LED order, diffuser color, brightness/night comfort,
 capture-to-light latency and resource/audio continuity still require an authorized
 physical-device run.
@@ -397,6 +394,9 @@ exception. Host namespace packet tests do not qualify the Dot's vendor kernel.
 
 ## Sendspin music
 
+The following describes the optional companion integration exercised with the
+retired ARMv7 package, not setup instructions for the current ARM64 starter.
+
 The encrypted ESPHome endpoint exposes `Sendspin music`, `Sendspin server`,
 `Resume music` and `Stop music` in the Incubator package. Set the server to
 `ws://YOUR_MA_HOST:8927/sendspin`, then enable music. This is a WebSocket carrier
@@ -443,312 +443,17 @@ session. Automatic room targeting, “play here” intents, wake-over-music and 
 are not implemented. Physical presentation latency, acoustic quality, power,
 CPU/RAM, underruns, Wi-Fi/BLE coexistence and timer recovery remain Dot tests.
 
-## Base and recovery prerequisites
+## Build, fresh install and updates
 
-Initial installation requires an already-unlocked **biscuit** with root adb in
-compatible recovery (tested host-side contract is TWRP-style), the expected
-partition layout and its own usable Wi-Fi firmware. Unlocking,
-exploitation and bootloader modification are out of scope.
+Use the [AArch64 build and install guide](packaging/kernel61/README.md) for
+current inputs, recovery preflight, fresh enrollment, persistent boot routing and
+rollback. Compatible signed runtime updates stage an inactive Encore rootfs slot;
+kernel and recovery changes are separate. Neither path writes the stock system
+slots. Check the guide for the exact starter's limits before acting on a device.
 
-**Staging TWRP does not need Bluetooth or an installed Linux environment.** The
-installation bundle includes Encore's project-built Bluetooth-enabled biscuit
-kernel. The installer assembles the recovery image automatically and preserves
-the original TWRP backup. Preflight
-checks the actual kernel's embedded configuration (`CONFIG_BT=y`,
-`CONFIG_BT_HCIVHCI=y`), requires both appended device trees to match the unit's
-saved recovery byte-for-byte, and preserves its load addresses. Missing/different
-device trees require investigation, not a forced flash. The installer never
-silently substitutes TWRP's kernel. Update staging restores the previously saved
-Encore image; changing the shared kernel is not an app-slot update.
-
-There is **no Fire OS version check, no requirement to boot or restore Fire OS,
-and no migration of its Wi-Fi, Amazon account, Techo5 configuration or HA keys**.
-The Wi-Fi firmware remains a genuine hardware dependency: `WMT_SOC.cfg`,
-`WIFI_RAM_CODE_8163` and ROM `*_hdr.bin` patches. The installer reads an already
-accessible vendor firmware directory or accepts `--firmware-dir`; it never bundles
-or downloads vendor blobs. A unit that no longer has usable firmware needs its
-own saved files, not a cosmetic version-string bypass.
-
-Factory calibration/identity partitions are **not** erased. “Clean slate” means
-new Encore state under `/data/encore`, not formatting the eMMC. An existing
-Encore install is refused by `install`; use `update` to preserve it.
-
-The prototype boot chain uses recovery because biscuit boot_a/b adds
-`skip_initramfs`. Installation replaces recovery only after saving TWRP on the
-host and device. It leaves bootloader, Android boot/system slots and factory
-partitions alone. Cache (p15) holds `/encore/{slots/a,slots/b,firmware}`; userdata
-(p16) holds `/encore` configuration and Noise identity. MISC's recovery command
-field selects Linux on future boots; Android slot metadata is not changed.
-
-## Historical ARMv7 build recipe
-
-Requirements: Linux x86-64, Go from `go.mod`, Python 3.12+, Git, kernel build tools
-(see the workflow below), CMake 3.22+, Ninja, a host C++20 compiler, binutils/readelf,
-and Docker for Alpine base assembly. The music builder downloads checksum-locked
-Zig 0.14.1 for the ARMv7 musl userspace build, targeting Linux 3.18/Cortex-A7;
-the AOSP kernel compiler is not used for C++ userspace.
-No root or QEMU is required by the builder when Docker is already available.
-The host image is digest-pinned; apk verifies Alpine ARMv7 package signatures.
-Repository packages can advance: retain the exact resulting base tarball and its
-installed apk database for app updates. This is not a reproducible release lock
-or a commitment to support the old recovery kernel indefinitely.
-The host-built base used here resolves BlueZ 5.82-r0 and D-Bus 1.16.2-r1; neither
-has been tested on a Dot kernel. Those versions are build inventory, not a proven
-minimum or a compatibility promise.
-
-```sh
-make check biscuit-check biscuit-build
-make biscuit-base
-make biscuit-package BISCUIT_REVISION=1
-```
-
-Use a new monotonically increasing **local development** revision for each build.
-The builder prints the ZIP SHA256 and records source commit, dirty-tree status,
-core version, backend variant (`incubator`), base digest and payload digests.
-`make biscuit-check` also verifies that the Dot dependency closure includes Incubator
-and excludes Assist. The ZIP contains only the rootfs,
-recovery initramfs, project kernel, kernel provenance and manifest, with no
-credentials or separately supplied Wi-Fi/Bluetooth radio firmware. The kernel
-does embed `i2s_to_spi_v34.bin` audio FPGA firmware; its redistribution terms are
-unresolved. The owner-approved [good-faith exception](packaging/FPGA-PROVENANCE.txt)
-covers this exact binary for dev and production distributions, not legal
-clearance or approval of a particular publication. Preserve the decision with
-the distribution and meet the remaining [source obligations](packaging/KERNEL-SOURCE.md).
-Its Linux-base identity binds the kernel bytes,
-kernel build inputs, Alpine base and recovery initramfs. The recovery image is
-assembled per unit using its saved header/load addresses and the bundled kernel.
-No package has been published and the central released revision remains zero.
-
-### Sendspin artifact
-
-`make biscuit-sendspin` builds the locked official SDK and dependencies from
-`platforms/linuxsendspin/dependencies.lock.json`. `make biscuit-package` requires
-this artifact as well as the kernel. The stripped static ARM hard-float companion
-needs no added Alpine shared libraries or C++ loader, so companion-only changes
-do not change the base identity. It lives in each application slot. Packaging verifies
-the target ABI, integration-source hashes, dependency lock and artifact digests;
-it refuses a host binary, damaged output or stale integration build.
-
-Keep `build/biscuit/sendspin/` (or `BISCUIT_SENDSPIN_ROOT`) with its `source.tar.gz`,
-notices and provenance. The source kit includes the exact SDK/dependency trees,
-integration recipe and bundled runtime sources. The rootfs carries the companion,
-provenance and notices, not the build toolchain or Music Assistant server. The
-source kit must accompany any eventual binary distribution; the local development
-ZIP alone is not a completed license audit or release process. These are build
-checks, not evidence that the ARM binary has played through a physical Dot.
-
-### Project-owned kernel artifact
-
-`make biscuit-package` builds or verifies/reuses the required kernel artifact via
-`make biscuit-kernel`. The kernel is not recompiled for every Satellite build. It
-uses the Techo5 Dot recipe at
-`b2a50c74bbe8b34785748574aa39fbd045fc4e46` using AOSP arm-eabi 4.8 at
-`26e93f6af47f7bd3a9beb5c102a5f45e19bfa38a`. It needs the normal Linux kernel
-build tools (including make, host C compiler, Perl, bc, patch, curl, tar and xz).
-It verifies the Amazon and upstream Linux source hashes, applies the pinned
-Bluetooth/security patch series, validates the resulting configuration and
-embedded image, and retains output under
-`build/biscuit/kernel/<build-inputs-sha256>/`. That directory contains
-`zImage-dtb`, its config/System.map, `provenance.json` and `source.tar.gz` with
-the prepared corresponding kernel source, patches and build inputs. The rootfs
-includes the kernel's COPYING and source-kit instructions. It never flashes a device.
-
-The recipe and toolchain caches live under `.amp/in/orb-backup/biscuit-kernel`.
-Build inputs are locked in `packaging/kernel-inputs.json`; the identity also
-includes the builder script. The builder fixes the kernel build timestamp/version,
-records actual tool versions/environment, checks cached artifacts before reuse,
-and refuses to overwrite a damaged artifact. Input changes select a new directory;
-an artifact's actual kernel/source hashes identify its exact bytes. Input identity
-alone does not guarantee identical bytes on different hosts. Keep the exact
-artifact you qualify. `BISCUIT_KERNEL_ROOT` changes the artifact store location.
-
-[Echo Dot Linux kernel CI](../../.github/workflows/biscuit-kernel.yml) runs for kernel
-input changes or explicit workflow dispatch, using a digest-pinned Ubuntu image.
-It caches only checksum-verified source downloads. Kernel/source-kit uploads are
-withheld pending concrete publication approval; adopting the FPGA exception does
-not enable automatic uploads. Build local artifacts under `build/biscuit/kernel/`; packaging verifies
-them against the current inputs and all recorded file hashes. CI verification
-does not clear binary or source-kit distribution. No workflow signs, publishes
-a release or flashes hardware.
-
-These Encore builds have not booted on a Dot. Techo5's previously booted `.4`
-binary remains reference evidence, not proof for our compiled bytes. Linux 3.18
-with the pinned security backports still needs security maintenance and target
-qualification. Before binary publication, retain the corresponding source kit
-and build inputs durably with the exact release, and complete the system license
-audit. See [kernel source/rebuild instructions](packaging/KERNEL-SOURCE.md).
-
-## Initial USB provisioning
-
-Start with read-only preflight; substitute the exact adb serial and trusted local
-build hash. Omit `--name` for deterministic `encore-biscuit-<six hex digits derived
-from serial>`, or supply a lowercase DNS name such as `office-speaker` (63 characters
-maximum). Default setup is Improv BLE after flashing; no Wi-Fi data is taken from
-Fire OS. Alternatively add `--wifi-ssid YOUR_SSID` to prompt for its WPA2 passphrase
-over USB when applying. The passphrase is never a command-line argument or log
-field; only a private derived PSK is stored. WPA-Enterprise/open networks are not
-implemented by this setup path.
-
-```sh
-python3 devices/biscuit/packaging/install.py install \
-  --serial YOUR_ADB_SERIAL --bundle build/biscuit/encore-biscuit-1.zip \
-  --sha256 TRUSTED_BUILD_SHA256 --backup-dir /your/private/dot-backup \
-  --name office-speaker
-```
-
-Add `--apply --allow-development` to perform the reviewed writes. This flag
-explicitly acknowledges an **unsigned, local development** bundle; its out-of-band
-hash is not a production signature or a secure OTA mechanism. Backups must be
-retained privately. The tool does not reboot automatically: after success, reboot
-to recovery to start Encore. Neither a successful transfer nor a startup marker
-means this untested image has passed device acceptance.
-
-The installer generates a unique Noise encryption key and saves a private copy at
-`BACKUP_DIR/encore-api-key.txt`. Keep it for ESPHome onboarding in HA after Improv
-joins Wi-Fi; it is not included in advertising or the setup URL. This avoids
-needing a second USB connection just to retrieve the key.
-
-If Wi-Fi is unavailable, the physical USB CDC serial console remains the fallback.
-It is a root shell regardless of SSH enablement: physical USB access grants root.
-Use it to correct `/data/encore/config.json` or the supplicant configuration and
-reboot. Assist's generated Noise key is `/data/encore/noise.psk`; read it privately
-over this console for HA pairing, never publish it in a log or screenshot.
-
-## Historical ARMv7 updates and recovery
-
-From the USB console, `encore-recovery twrp --apply` restores the verified saved
-TWRP image and reboots into it. Run `install.py update` with `--serial`, `--bundle`
-and `--sha256` (preflight by default, or `--apply --allow-development`). It retains
-Encore's name, Wi-Fi and Noise key and stages only the **inactive** rootfs slot.
-This USB development path preserves the installed backend and channel. A future
-Assist variant would require explicit application-package replacement with tested
-state migration/recovery, not a config edit, ordinary update or Linux-base reflash.
-That cross-variant replacement is not implemented. Older local prototypes with a
-`backend` config field or missing manifest variant are rejected; they were never
-released, and no automatic migration is claimed.
-The current active slot must be healthy. Revisions cannot be reused or downgraded,
-including after a failed trial. Any change to the kernel, its build inputs, the
-Alpine base or recovery initramfs is refused as an app update. Both rootfs slots
-share the recovery kernel, so replacing it could break both fallbacks. A safe
-base-migration updater is not yet implemented; it is not silently approximated
-by overwriting recovery during a normal update.
-
-The old good slot stays intact. The new slot gets two trial boots and is committed
-only after the runtime validates BLE, opens its capture/control paths and remains
-alive for 30 seconds. Waiting for first-boot Wi-Fi credentials does not spend a
-three-minute update health timeout or commit a slot. A failed trial falls back;
-when neither slot is bootable the recovery
-initramfs stays in USB rescue, never silently boots old Android. Initial installs
-seed both slots on trial; neither is assumed known-good. Do not overwrite both
-slots during an update and lose the recovery copy. A later successful update
-naturally uses the other slot again.
-
-The updater restores the same locally saved Encore recovery image after TWRP;
-the bundle must identify the same Linux base/kernel. The saved `twrp.img`/`linux.img`
-and their checksums are in `/cache/encore` from recovery (`/store/encore` in Linux).
-A failed/partial initial installation or stale install-lock requires inspection
-while recovery is still running, not blindly rerunning or erasing partitions.
-Power-loss boot/rollback, USB enumeration and restoration remain hardware tests,
-not guarantees established by filesystem unit tests.
-
-### Signed selected-channel application OTA (experimental)
-
-The USB/TWRP installer above remains an unsigned local **dev** path and preserves
-the installed channel. The Linux runtime separately implements signed network
-application-slot updates through its **encrypted** ESPHome management endpoint:
-
-- **Update channel** (`update_channel`) has exactly `dev` and `stable`. Desired
-  channel and a generation counter are persisted privately in
-  `/data/encore/update-state.json` before acknowledgment. The shared `config.json`
-  is unchanged so the previous good runtime can still read it after rollback;
-  older-runtime settings changes also leave updater state intact. An absent
-  updater-state file initializes from the installed manifest,
-  not a version suffix. Selection clears old availability and cancels old work;
-  it never downloads, installs or restarts anything. A dev→stable→dev change also
-  invalidates the original dev authorization.
-- **Check for updates** (`check_updates`) and the `linux_update` entity's CHECK
-  command discover only. Discovery also runs hourly. Installed and latest strings
-  include core SemVer and package revision. Missing trust, network failures and
-  compatibility/recovery failures report unknown with a reason, not up-to-date.
-- Only an explicit `linux_update` UPDATE command requests download, inactive-slot
-  staging, trial activation and an orderly reboot. Downloaded, staged, activated
-  and health-accepted are distinct states. No automatic installation occurs.
-
-An eligible already-published release counts: there is no switch-time watermark.
-Its signed selected-channel `core_version` must be strictly newer than the actual
-installed core under SemVer precedence, **and** its revision must exceed the
-highest attempted revision (including failed trials). Build metadata, equal core
-at a higher revision and older cores do not qualify. A selected channel behind
-installed waits; no downgrade or automatic fallback is allowed. Stable forbids
-prereleases. Installed provenance stays immutable and separate from selection.
-
-Linux and Android share these control semantics, not installers or privileges.
-The Linux implementation is `platforms/linuxupdate` plus this device's adapter;
-no Android or shared backend is imported by its updater.
-
-#### Feed trust and offline approval
-
-There is **no production endpoint or key built in**. A separately approved local
-operator must provision `/data/encore/update-trust.json` (0600, root-owned, inside
-the private device directory) with `base_url` (HTTPS) and `public_key` (base64 raw
-32-byte Ed25519 public key). Optional `root_ca_pem` supplies a locally trusted HTTPS
-CA PEM; otherwise Go uses system roots. The maintenance base may not contain a CA
-bundle, so provision this CA explicitly when required. Never disable TLS validation.
-The device clock must be correct: stale or implausibly future signed metadata
-fails closed. This task does not provision trust, time services or any device.
-
-Fetch exactly `<base_url>/biscuit/incubator/<dev|stable>.jws`. Metadata is compact
-JWS (RFC 7515, EdDSA/RFC 8037) with the exact protected header
-`{"alg":"EdDSA","typ":"encore-linux-update+jws"}`. Payload fields are:
-
-`target`, `backend`, `format`, `channel`, `core_version`, `revision`, `base_sha256`,
-`url`, `size`, `sha256`, `issued`, `expires`.
-
-Times are Unix seconds; validity is at most seven days, with five minutes of
-future-issued tolerance. Metadata is bounded to 32 KiB and bundles to 256 MiB.
-HTTPS is required for metadata, artifacts and redirects, without URL credentials
-or fragments. Query strings are allowed for hosts such as GitHub Releases that
-redirect to temporary signed download URLs. Put the permanent versioned release
-URL in metadata, not the expiring redirect URL.
-Private per-channel replay checkpoints reject lower issue
-times/revisions and replacement of an observed revision's immutable identity.
-The signed SHA-256 covers the entire ZIP, binding its manifest and all payloads;
-individual members and exact decompressed size limits are checked again locally.
-
-`packaging/feed.py` validates an inspected local dev bundle and signs its metadata
-using an **offline Ed25519 PEM key** and OpenSSL 3. Its arguments are `--bundle`,
-`--url`, `--channel`, `--expires`, `--key`, `--output`, and optional `--issued`.
-It refuses output overwrite and performs no upload or device operation. A stable
-entry promotes the exact existing dev-provenance bytes/revision of a non-prerelease
-core; it does not rewrite or rebuild the bundle. Channel is signed feed policy,
-not a reason to modify installed provenance. A signature is publisher approval,
-not evidence of hardware qualification. Key rotation/revocation and publication
-need their own reviewed operational procedure; feed data cannot replace trust.
-
-#### Staging, activation and recovery boundaries
-
-Before staging and again before activation, the running slot must equal active
-and be `good`; target/backend/format and the exact shared-base identity must match.
-Saved Linux/TWRP hashes, the live recovery image and padded MISC `boot-recovery`
-selection must be intact. The existing USB install lock serializes writes. A
-stale lock fails closed and needs physical recovery inspection, not auto-deletion.
-
-The updater verifies the ZIP, extracts a bounded safe rootfs into private staging,
-fsyncs its files/directories, durably reserves the revision, invalidates the
-inactive slot, and replaces **only that slot**. Active remains the running good
-slot until a generation-fenced explicit activation writes `trial 2` and switches
-active last. Cancellation can leave an unactivated bad inactive slot/reserved
-revision, never authorization to reuse that revision. The lock is released before
-the orderly reboot. If activation/reboot durability is uncertain, further requests
-are blocked until reboot/inspection rather than claiming success or retrying.
-
-The unchanged initramfs/health service owns the two-boot trial, health commitment
-and old-good-slot fallback described above. OTA never writes the kernel, initramfs,
-recovery or MISC and never mutates Wi-Fi, SSH keys, pairing or saved recovery
-backups. **Base/kernel migration remains unsupported.** Host filesystem/Noise/TLS
-tests exercise this path, but actual power-loss behavior and physical-device OTA
-acceptance remain unqualified. Existing devices do not gain OTA until a separately
-approved installation of an OTA-capable runtime and local trust provisioning.
+The old Linux 3.18/ARMv7 kernel, fresh-install bundle and release feed have been
+retired. Historical recipes and released bytes, if retained, are evidence only;
+do not use them to install or update an AArch64 device.
 
 ## Provenance and qualification
 

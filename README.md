@@ -64,15 +64,13 @@ stay with Home Assistant or Voice Incubator.
 **Early implementation has started; no device is release-supported.** An
 [Incubator-only Android development APK](devices/android-generic/README.md)
 can be built locally; device support has not been verified. An
-[experimental Echo Dot (2nd gen) package](devices/biscuit/README.md) builds the Linux
-environment itself: kernel, recovery initramfs, Alpine radio services and ARMv7
-runtime, with clean-slate recovery provisioning/update tools. It has not been
-booted or acoustically tested on hardware. Activation supports Action and
-Voice Incubator-pushed microWakeWord/MixedNet models. Improv BLE provisioning and a default-off
-Bluetooth proxy with active connections are integrated, but require a compatible
-Bluetooth-enabled kernel and hardware validation. The installer stages the
-bundled project-built kernel from ordinary TWRP; no installed Linux or Fire OS
-version is required.
+[experimental Echo Dot (2nd gen) package](devices/biscuit/README.md) provides
+an AArch64 Linux 6.1 kernel, recovery initramfs, Alpine userspace and Encore's
+native runtime. One private build demonstrated clean Wi-Fi enrollment over
+Improv BLE and Action-gated Home Assistant setup on hardware. This is not
+general install, reboot, OTA or audio qualification. See the
+[Biscuit build and install guide](devices/biscuit/packaging/kernel61/README.md)
+for the current requirements and limits. The Linux 3.18/ARMv7 release path is retired.
 Internal board names are **Biscuit** for Echo Dot (2nd gen) and **Radar** for
 Echo (2nd gen). Radar has no device implementation here; shared Linux helpers
 do not establish board compatibility. The unpublished internal target is
@@ -90,10 +88,9 @@ separate Home Assistant Assist pipeline package later. Changing backend requires
 application-package replacement, not a runtime switch. See the
 [foundation scope](docs/foundation.md) for what works and what remains.
 Android starts with Incubator and shared dashboard controls.
-Dot packages contain only native Incubator. The encrypted common-control endpoint handles the optional
-Bluetooth proxy and Sendspin independently of voice. Sendspin uses an authenticated
-official SDK companion and the Dot's shared audio mixer; physical music/audio
-qualification is still outstanding.
+Dot packages contain only native Incubator. The encrypted common-control endpoint
+handles the optional Bluetooth proxy independently of voice. The current ARM64
+starter does not ship the experimental Sendspin companion.
 
 ## Devices
 
@@ -124,17 +121,19 @@ hear from you.
 
 The [foundation checks](.github/workflows/check.yml) run code and build checks;
 the real-service suites run separately in the lab. The
-[CI and release policy](release/README.md) explains that boundary and why there
-are no device releases, updater or signing trust yet.
+[CI and release policy](release/README.md) distinguishes offline build and
+update preparation from approved public distribution.
 
 Encore-owned code and documentation are available under the [MIT License](LICENSE)
 so others can build on the work. Included third-party code, dependencies, models,
 assets and operating-system components retain their own licenses and notices;
 the MIT license does not relicense them.
 
-Encore's design and proof of concept build on Techo5, Techo5 Panel and their
-upstream foundations. [Acknowledgements](ACKNOWLEDGEMENTS.md) distinguish that
-design credit from the implementation actually included and its required notices.
+Encore is its own implementation. Techo5, Kiosk Satellite, LibreEcho and the
+Voice Preview Edition Incubator work helped show what was possible. Encore
+borrows ideas, combines approaches and sometimes takes a different route.
+[Acknowledgements](ACKNOWLEDGEMENTS.md) credit those contributions and identify
+the sources and licenses of material Encore actually includes.
 
 Encore Satellite is an independent community project, not an official Home
 Assistant or Nabu Casa product.

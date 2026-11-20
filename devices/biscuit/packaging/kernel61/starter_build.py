@@ -64,6 +64,14 @@ fi''')
     return repack(clean.getvalue(), files)
 
 
+def source_hashes():
+    paths = {p for directory in ("devices/biscuit", "platforms", "core", "backends", "internal", "cmd/btbridge")
+             for p in (ROOT / directory).rglob("*.go")}
+    paths.update(p for directory in (HERE, HERE.parent) for p in directory.iterdir() if p.is_file())
+    paths.update((ROOT / "go.mod", ROOT / "go.sum"))
+    return {str(p.relative_to(ROOT)): sha(p.read_bytes()) for p in sorted(paths)}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sealed-base", type=Path, required=True)
@@ -86,11 +94,7 @@ def main():
         fpga = archive.extractfile("lib/firmware/i2s_to_spi_v34.bin").read()
         alpine = archive.extractfile("etc/alpine-release").read().decode().strip()
 
-    paths = {p for directory in ("devices/biscuit", "platforms", "core", "backends", "internal", "cmd/btbridge")
-             for p in (ROOT / directory).rglob("*.go")}
-    paths.update(p for directory in (HERE, HERE.parent) for p in directory.iterdir() if p.is_file())
-    paths.update((ROOT / "go.mod", ROOT / "go.sum"))
-    sources = {str(p.relative_to(ROOT)): sha(p.read_bytes()) for p in sorted(paths)}
+    sources = source_hashes()
     output = args.output.resolve()
     output.mkdir(mode=0o700, parents=True)
     env = dict(os.environ, CGO_ENABLED="0", GOOS="linux", GOARCH="arm64")
@@ -107,7 +111,7 @@ def main():
     binaries["arm64-verify"] = verifier.read_bytes()
     rootfs = starter_rootfs(base, binaries, version, ca)
     ramdisk = initramfs(busybox, sha(rootfs), fpga, starter=True,
-                        signed=(args.core_version, args.revision, binaries["arm64-verify"]))
+                        signed=(args.core_version, args.revision, binaries["arm64-verify"]), recovery_rearm=True)
     recovery = boot_image(header, image, dtb, ramdisk)
     if any(sha((ROOT / path).read_bytes()) != digest for path, digest in sources.items()):
         raise RuntimeError("source changed during starter assembly")
@@ -116,6 +120,7 @@ def main():
     manifest = {"format": FORMAT, "backend": "incubator", "package_revision": args.revision,
                 "core_version": args.core_version,
                 "api_key_provisioning": True,
+                "recovery_rearm": True,
                 "architecture": "aarch64", "distribution": "Alpine " + alpine, "release": False,
                 "retained_base_sha256": BASE_SHA, "kernel_image_sha256": IMAGE_SHA, "dtb_sha256": DTB_SHA,
                 "go": subprocess.check_output(["go", "version"], text=True).strip(), "sources": sources,

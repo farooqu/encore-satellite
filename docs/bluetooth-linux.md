@@ -74,12 +74,12 @@ Never open `/dev/stpbt` directly alongside btbridge. Unlike the direct scanner's
 18.75 ms/200 ms budget, BlueZ discovery's scan duty cycle is owned by BlueZ;
 audio/Wi-Fi coexistence needs target measurement, not an assumed identical budget.
 
-## Echo Dot 2 prerequisites (biscuit, Alpine ARMv7)
+## Echo Dot 2 prerequisites (Biscuit, Alpine AArch64)
 
-The stock/TWRP kernel must not be assumed to supply Bluetooth. A real
-Bluetooth-enabled compatible kernel is an external prerequisite until one is
-built and qualified for Encore. A Fire OS version string, a working raw H4 scan,
-or successful Wi-Fi bring-up is not a substitute.
+The [Biscuit starter](../devices/biscuit/packaging/kernel61/README.md) supplies
+Encore's pinned Linux 6.1 kernel and AArch64 userspace. The stock/TWRP kernel is
+not the runtime Bluetooth stack. A Fire OS version string, a working raw H4
+scan or successful Wi-Fi is not a substitute for validating the packaged stack.
 
 1. Vendor MediaTek drivers, unit-specific firmware and WMT initialization must
    expose and initialize `/dev/stpbt`. `wmtup` alone does not create BlueZ/HCI.
@@ -90,7 +90,7 @@ or successful Wi-Fi bring-up is not a substitute.
    `python3 tools/check_ble_kernel.py <built.config[.gz]>` checks these built-in
    prerequisites. Module builds need a separately verified ABI/load contract.
    This checker neither builds nor approves a kernel or its security state.
-3. Build included `cmd/btbridge` statically for ARMv7. After WMT initialization,
+3. Build included `cmd/btbridge` statically for AArch64. After WMT initialization,
    use the stable factory controller address and the audited Dot workarounds:
    `btbridge -bdaddr <factory-bt-address> -max-feature-page 1 -accept-as-peripheral`.
    It owns `/dev/stpbt` exclusively and presents the controller through `/dev/vhci`.
@@ -127,23 +127,11 @@ Imported MIT portions and their tests come from `farooqu/techo5` at
 and small proxy conversions. Notices are in `ACKNOWLEDGEMENTS.md` and
 `licenses/Techo5-MIT.txt`.
 
-`farooqu/techo5-dot` at `b2a50c74bbe8b34785748574aa39fbd045fc4e46` supplies the
-audited kernel/base approach, not an Encore-qualified kernel:
-
-- `tools/linux/build-kernel.sh`, `tools/linux/kernel-bt.fragment`,
-  `tools/linux/kernel-patches/**` and
-  `docs/dumps/biscuit-fireos6-echolocal-boot-3.18.19.config`.
-- Dot Amazon source `Echo_Dot_src-6.5.7.1-20251024.tar.bz2`, SHA256
-  `2f6b7eed8c09cecf7633f01909c6a4085bef691c29ed0d106c75e7b48c7b4721`.
-  Omitted Bluetooth sources restored from upstream `linux-3.18.19.tar.xz`, SHA256
-  `3d80d3b8d98c3141d9e26f6c25d73575d688f1c1651b8076f0f2bfd76325b7c9`.
-  Reuse the pinned build script's security backports and its license/source
-  obligations; don't transplant only the config and call an old kernel secure.
-- `tools/linux/rootfs/usr/local/sbin/techo5-bt` for bridge quirks and lifecycle;
-  `tools/linux/packages-bt.txt` pins BlueZ 5.86-r2 and D-Bus 1.16.2-r2 there.
-  These are source-audit pins, **not** verified minimum versions or a demand to
-  replace Alpine 3.22 packages. The integrating Dot prototype uses BlueZ 5.82-r0
-  and D-Bus 1.16.2-r1. That exact combination remains to be tested on the Dot.
+`farooqu/techo5-dot` at `b2a50c74bbe8b34785748574aa39fbd045fc4e46` was a
+reference for bridge quirks and service lifecycle. It is not the current base.
+Biscuit uses [pinned LibreEcho-Linux source and Encore patches](../devices/biscuit/packaging/kernel61/README.md#build-locally).
+See the [historical source kit](../devices/biscuit/packaging/KERNEL-SOURCE.md)
+for the retired Linux 3.18 build and its obligations.
 
 On Linux 3.18, BlueZ may have GATT but no `LEAdvertisingManager1` because the
 kernel lacks Add Advertising. `Provision` uses narrowly scoped legacy HCI

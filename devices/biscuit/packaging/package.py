@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the Dot Linux environment, including the project-built kernel."""
+"""Shared archive helpers and historical ARMv7 package fixtures."""
 
 import gzip
 import hashlib
@@ -305,7 +305,3 @@ def build(base, binary, wmtup, btbridge, revision, output, kernel_directory, sen
             # Like the tar/cpio payloads, ZIP headers must not record the build clock.
             archive.writestr(zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0)), data)
     print(f"Development bundle: {output}\nSHA256: {sha(Path(output).read_bytes())}")
-
-
-if __name__ == "__main__":
-    raise SystemExit("The ARMv7 package is retired; use make biscuit-package for Linux 6.1/AArch64")

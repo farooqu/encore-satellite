@@ -6,8 +6,16 @@ historical ARMv7 packages nor RAM-root trial artifacts are install inputs.
 
 ## Private persistent ARM64 starter
 
-`make biscuit-package BISCUIT_SEALED_BASE=/path/to/starter-inputs
-BISCUIT_REVISION=1` writes a new `build/biscuit/encore-biscuit-1/starter.zip`.
+```sh
+make biscuit-package BISCUIT_SEALED_BASE=/path/to/starter-inputs \
+  BISCUIT_CA_BUNDLE=/path/to/ca-certificates.crt \
+  BISCUIT_CORE_VERSION="$REVIEWED_VERSION" BISCUIT_REVISION="$UNUSED_REVISION"
+```
+
+This writes a new `build/biscuit/encore-biscuit-$UNUSED_REVISION/starter.zip`.
+Use a complete SemVer and a positive, previously unused package revision for a
+candidate. For main-based public dev identities, see the
+[publishing runbook](../../../../release/publishing.md#biscuit-arm64-public-dev-starter).
 Put the retained audiofix1 `rootfs.tar.gz` and `audited-header.bin` and the
 `6.1.178-encore-biscuit-arm64-stpfix1` `Image` and `biscuit-arm64-probe.dtb`
 in that directory. The starter reuses the pinned AArch64 Alpine 3.22.8 packages
@@ -51,6 +59,33 @@ Fastboot is the demonstrated recovery entry point on the unlocked bench unit:
 it can flash and select recovery. `fastboot boot` without flashing has not been
 verified. A TWRP-free installer would still need a booted rescue environment
 to verify/mount ext4, stage the files and verify full partition read-back.
+
+### Recovery routing on normal restart and power-on
+
+The loader consumes `boot-recovery` before entering p12. New starters marked
+`recovery_rearm` still need one explicit first recovery boot. After verifying and
+unpacking a bootable rootfs, and before spending an update trial, recovery
+re-arms only the first 32 bytes of MISC (p8) if they are all zero. It leaves an
+already correct command alone. An unexpected command, invalid device, or failed
+read, write, checked device flush or read-back stops in USB rescue. It never writes p13/p14
+(`system_a`/`system_b`); the stock firmware checks and read-only mounts are
+unchanged. Probes and older bundles without the marker do not re-arm MISC.
+
+The re-arm covers the next ordinary reboot or power cycle after it completes.
+It does not cover a power cut after the loader consumes the command but before
+recovery writes it back. A successful explicit recovery boot does not qualify
+ordinary or cold boot. Verify both routes separately on the exact hardware.
+
+Do not run the fresh installer to add routing to an enrolled starter. For an
+existing R22 installation, review a separate recovery-only payload that retains
+the original R22 seed digest, signed-slot verifier and version floor. Verify the
+specific unit, current full p12/MISC, slot state and independent fastboot/TWRP
+return route; keep private rollback copies of p12 and MISC. Obtain separate
+approval for the exact p12 payload, the bounded MISC re-arm on first recovery
+boot, and ordinary/cold boot tests. Preserve p15 and p16, including enrollment.
+On failure stop rather than repeating the flash or wiping state. Roll back the
+verified prior p12 and exact prior command field under separate authorization;
+do not restore the full MISC partition over potentially changed slot metadata.
 
 The first boot checks the published selector and embedded rootfs digest before
 starting the RAM root. Upgrade-capable starters also authenticate a later
@@ -132,10 +167,10 @@ with fresh state and checks existing stock firmware read-only. It does not
 depend on a live upgrade run.
 
 An update requires a healthy running slot, muted physical privacy and read-only
-confirmation that MISC already selects recovery. Fresh installation and OTA do
-not change MISC. Check that a normal reboot returns to Encore on the exact
-target and that the device has a valid clock for TLS and feed expiry; do not
-bypass either check. An approved update stages only the inactive cache slot,
+confirmation that MISC already selects recovery. The installer and OTA app do
+not write MISC; only marked recovery init re-arms it. Check that a normal reboot
+returns to Encore on the exact target and that the clock is valid for TLS and
+feed expiry; do not bypass either check. An approved update stages only the inactive cache slot,
 sets a durable high-water mark before publishing the selector, and requests a
 reboot. Recovery spends the trial attempt before switching to the new root.
 The health service commits only after sustained runtime readiness; a failed

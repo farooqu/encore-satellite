@@ -8,7 +8,6 @@ import argparse
 import base64
 import gzip
 import hashlib
-import importlib.util
 import io
 import json
 from pathlib import Path
@@ -16,17 +15,23 @@ import re
 import shutil
 import subprocess
 import sys
-import tarfile
 import tempfile
 import time
 import zipfile
 
+from biscuit_dev import identity as biscuit_dev_identity
 from check import ROOT, SEMVER, validate, validate_ledger
 
 REPOSITORY = "farooqu/encore-satellite"
 RECEIPT_TYPE = "encore-release-receipt+jws"
-FEED_TYPES = {"biscuit": "encore-linux-update+jws",
-              "android-generic": "encore-android-update+jws"}
+ANDROID_FEED_TYPE = "encore-android-update+jws"
+ARM64_STARTER = "encore-biscuit-arm64-starter-v1"
+BISCUIT_ARM64_ROOT = bytes.fromhex("302a300506032b6570032100") + base64.b64decode(
+    "Ggx1WlubkJjSPNpKoaEDzPZYMzUxbiPunioZcmvxsuc=")  # Same root as BiscuitARM64Root in platforms/linuxupdate.
+
+
+def arm64_starter(receipt):
+    return receipt.get("compatibility", {}).get("format") == ARM64_STARTER
 
 
 def require(condition, message):
@@ -97,6 +102,8 @@ def verify_jws(path, kind, public_key):
 
 
 def tag(receipt):
+    if arm64_starter(receipt):
+        return f"biscuit-{receipt['core_version']}"
     return f"{receipt['target']}-r{receipt['revision']}"
 
 
@@ -110,24 +117,19 @@ def record(path):
     return {"name": path.name, "size": path.stat().st_size, "sha256": digest(path)}
 
 
-def linux_feed():
-    # Reuse the bundle validator and metadata contract, never a parallel format.
-    directory = ROOT / "devices/biscuit/packaging"
-    sys.path.insert(0, str(directory))
-    spec = importlib.util.spec_from_file_location("biscuit_feed", directory / "feed.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+def load_biscuit_starter(path, artifact_sha256):
+    sys.path.insert(0, str(ROOT / "devices/biscuit/packaging"))
+    from kernel61.starter_install import load_bundle
+    return load_bundle(path, artifact_sha256)[0]
 
 
 def inspect_artifact(receipt, path, aapt="aapt", apksigner="apksigner"):
     if receipt["target"] == "biscuit":
-        module = linux_feed()
-        manifest, _ = module.load_bundle(path, digest(path))
-        require(manifest.get("source_dirty") is False, "dirty bundle source")
-        require((manifest["source_commit"], manifest["core_version"], manifest["package_revision"])
-                == (receipt["source"], receipt["core_version"], receipt["revision"]), "bundle identity mismatch")
-        return {"format": manifest["format"], "base_sha256": manifest["base_sha256"]}
+        manifest = load_biscuit_starter(path, receipt["artifact"]["sha256"])
+        require(manifest.get("recovery_rearm") is True and manifest.get("api_key_provisioning") is True
+                and (manifest.get("core_version"), manifest["package_revision"]) ==
+                (receipt["core_version"], receipt["revision"]), "wrong ARM64 starter identity or install policy")
+        return {"format": manifest["format"], "base_sha256": manifest["retained_base_sha256"]}
     badging = run(aapt, "dump", "badging", str(path)).decode()
     certificates = run(apksigner, "verify", "--verbose", "--print-certs", str(path)).decode()
     manifest = run(aapt, "dump", "xmltree", str(path), "AndroidManifest.xml").decode()
@@ -148,14 +150,18 @@ def inspect_artifact(receipt, path, aapt="aapt", apksigner="apksigner"):
 
 def validate_receipt(receipt):
     require(receipt["schema"] == 1 and receipt["repository"] == REPOSITORY, "wrong receipt schema/repository")
-    require(receipt["target"] in FEED_TYPES and receipt["backend"] == "incubator", "wrong target/backend")
+    require(receipt["target"] in {"biscuit", "android-generic"} and receipt["backend"] == "incubator", "wrong target/backend")
     require(type(receipt["revision"]) is int and 0 < receipt["revision"] <= 2100000000, "invalid revision")
     require(SEMVER.fullmatch(receipt["core_version"]) and re.fullmatch(r"[0-9a-f]{40}", receipt["source"]), "invalid core/source")
     require(receipt["toolchain"].strip() and receipt["recipe"].strip(), "exact toolchain/build recipe required")
     require(receipt["built_channel"] == "dev", "retain original dev build identity")
     require(receipt["reproduction"] == "byte-identical-reassembly", "repeat-assembly evidence required")
     require(receipt["review"] == "approved-for-distribution", "source/notices/cohort review required")
-    required = {"encore", "kernel", "sendspin", "alpine"} if receipt["target"] == "biscuit" else {"encore", "dependencies"}
+    required = {"encore", "kernel", "alpine"} if receipt["target"] == "biscuit" else {"encore", "dependencies"}
+    if receipt["target"] == "biscuit":
+        require(arm64_starter(receipt) and "reservation" not in receipt
+                and receipt["artifact"]["name"] == f"encore-biscuit-arm64-{receipt['core_version']}.zip",
+                "Biscuit requires an ARM64 starter named for its public dev version")
     require(set(receipt["sources"]) == required, "matching corresponding-source roles required")
     names = []
     for item in [receipt["artifact"], receipt["evidence"], *receipt["sources"].values()]:
@@ -168,7 +174,6 @@ def validate_receipt(receipt):
     compatibility = receipt["compatibility"]
     if receipt["target"] == "biscuit":
         require(set(compatibility) == {"format", "base_sha256"}
-                and compatibility["format"] == "encore-biscuit-v1"
                 and re.fullmatch(r"[0-9a-f]{64}", compatibility["base_sha256"]), "invalid Linux compatibility")
     else:
         require(set(compatibility) == {"application_id", "version", "min_sdk", "abis", "certificate_sha256"}
@@ -182,6 +187,19 @@ def validate_receipt(receipt):
 
 def validate_source(receipt):
     source = receipt["source"]
+    if arm64_starter(receipt):
+        require((receipt["core_version"], receipt["revision"]) == biscuit_dev_identity(source),
+                "ARM64 receipt differs from its main-derived identity")
+        inputs = json.loads(run("git", "show", f"{source}:devices/biscuit/packaging/kernel61/ci-inputs.json"),
+                            object_pairs_hook=unique)
+        tag = inputs.get("release_tag")
+        require(isinstance(tag, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", tag),
+                "ARM64 input release is not pinned at the receipt source")
+        names = {"kernel": "kernel-source.tar.gz", "alpine": "alpine-go-source.tar.gz"}
+        require(all(receipt["sources"][role]["name"] == name for role, name in names.items())
+                and inputs.get("source_sha256") == {name: receipt["sources"][role]["sha256"] for role, name in names.items()},
+                "ARM64 source archives do not match the pins at the receipt source")
+        return
     registry = validate(json.loads(run("git", "show", f"{source}:release/targets.json")))
     ledger = validate_ledger(json.loads(run("git", "show", f"{source}:release/ledger.json")), registry)
     reservation = next(r for r in ledger["reservations"] if r["id"] == receipt["reservation"])
@@ -192,27 +210,21 @@ def validate_source(receipt):
             "receipt differs from source inventory/reservation")
 
 
-def validate_biscuit_sources(receipt, artifact):
-    if receipt["target"] != "biscuit":
-        return
-    with zipfile.ZipFile(artifact) as bundle:
-        kernel = json.loads(bundle.read("kernel.json"), object_pairs_hook=unique)
-        require(kernel["files"]["source.tar.gz"] == receipt["sources"]["kernel"]["sha256"], "kernel source kit mismatch")
-        with tarfile.open(fileobj=io.BytesIO(bundle.read("rootfs.tar.gz")), mode="r:gz") as rootfs:
-            music = json.load(rootfs.extractfile("etc/encore-sendspin.json"), object_pairs_hook=unique)
-        require(music["artifacts"]["source.tar.gz"] == receipt["sources"]["sendspin"]["sha256"], "Sendspin source kit mismatch")
-
-
 def prepare(spec_path, output, aapt, apksigner):
     spec = read_json(spec_path)
+    starter = spec["target"] == "biscuit"
     require(not run("git", "status", "--porcelain", "--untracked-files=normal"), "commit source before preparing a candidate")
     source = run("git", "rev-parse", "HEAD").decode().strip()
-    registry = validate(read_json(ROOT / "release/targets.json"))
-    ledger = validate_ledger(read_json(ROOT / "release/ledger.json"), registry)
-    reservation = next(r for r in ledger["reservations"] if r["id"] == spec["reservation"])
-    require("private_arm64_zip_sha256" not in reservation, "private install reservation cannot authorize a release receipt")
-    revision = reservation["revisions"][spec["target"]]
-    require(reservation["core_version"] == registry["core_version"], "reservation core differs from built source")
+    if starter:
+        require(spec.get("format") == ARM64_STARTER and "reservation" not in spec, "expected ARM64 starter without reservation")
+        core, revision = biscuit_dev_identity(source)
+    else:
+        registry = validate(read_json(ROOT / "release/targets.json"))
+        ledger = validate_ledger(read_json(ROOT / "release/ledger.json"), registry)
+        reservation = next(r for r in ledger["reservations"] if r["id"] == spec["reservation"])
+        require("private_arm64_zip_sha256" not in reservation, "private install reservation cannot authorize a release receipt")
+        core, revision = reservation["core_version"], reservation["revisions"][spec["target"]]
+        require(core == registry["core_version"], "reservation core differs from built source")
     paths = {"artifact": Path(spec["artifact"]), "evidence": Path(spec["evidence"])}
     reproduced = Path(spec["reproduced_artifact"])
     require(not paths["artifact"].samefile(reproduced)
@@ -226,19 +238,27 @@ def prepare(spec_path, output, aapt, apksigner):
         compressed.write(run("git", "archive", "--format=tar", source))
     archive = buffer.getvalue()
     receipt = {"schema": 1, "repository": REPOSITORY, "target": spec["target"],
-               "backend": reservation["backend"], "revision": revision,
-               "core_version": reservation["core_version"], "source": source,
-               "reservation": spec["reservation"], "built_channel": "dev",
+               "backend": "incubator", "revision": revision,
+               "core_version": core, "source": source, "built_channel": "dev",
                "reproduction": "byte-identical-reassembly",
                "toolchain": spec["toolchain"], "recipe": spec["recipe"], "review": spec["review"],
                "artifact": record(paths["artifact"]), "evidence": record(paths["evidence"]),
                "sources": {role: record(path) for role, path in sources.items()}}
     receipt["sources"]["encore"] = {"name": "encore-source.tar.gz", "size": len(archive),
                                           "sha256": hashlib.sha256(archive).hexdigest()}
+    if starter:
+        manifest = load_biscuit_starter(paths["artifact"], receipt["artifact"]["sha256"])
+        from kernel61.starter_build import source_hashes
+        hashes = source_hashes()
+        tracked = set(run("git", "ls-files", "-z").decode().split("\0"))
+        require(hashes.keys() <= tracked and manifest.get("sources") == hashes,
+                "ARM64 build inputs differ from the clean release source")
+        receipt["compatibility"] = {"format": ARM64_STARTER}
+    else:
+        receipt["reservation"] = spec["reservation"]
     receipt["compatibility"] = inspect_artifact(receipt, paths["artifact"], aapt, apksigner)
     validate_receipt(receipt)
     validate_source(receipt)
-    validate_biscuit_sources(receipt, paths["artifact"])
     if receipt["target"] == "android-generic":
         require(receipt["compatibility"]["certificate_sha256"] == spec["certificate_sha256"], "unexpected APK signer")
     output.mkdir(parents=True)
@@ -252,6 +272,9 @@ def prepare(spec_path, output, aapt, apksigner):
 def verify(directory, public_key, expected):
     require(digest(directory / "receipt.json") == expected, "receipt SHA256 mismatch")
     receipt = validate_receipt(read_json(directory / "receipt.json"))
+    if arm64_starter(receipt):
+        require(run("openssl", "pkey", "-pubin", "-in", str(public_key), "-pubout", "-outform", "DER") ==
+                BISCUIT_ARM64_ROOT, "wrong public key for Biscuit ARM64")
     require(verify_jws(directory / "receipt.jws", RECEIPT_TYPE, public_key) == receipt, "receipt signature payload mismatch")
     verify_assets(directory, receipt, signed=True)
     return receipt
@@ -267,12 +290,15 @@ def verify_assets(directory, receipt, *, signed):
     for item in items:
         require(record(directory / item["name"]) == item, f"asset changed: {item['name']}")
     validate_source(receipt)
-    validate_biscuit_sources(receipt, directory / receipt["artifact"]["name"])
+    if arm64_starter(receipt):
+        require(inspect_artifact(receipt, directory / receipt["artifact"]["name"]) == receipt["compatibility"],
+                "ARM64 starter compatibility mismatch")
     require(gzip.decompress((directory / receipt["sources"]["encore"]["name"]).read_bytes()) ==
             run("git", "archive", "--format=tar", receipt["source"]), "Encore archive differs from exact source")
 
 
 def metadata(receipt, channel, issued, expires):
+    require(receipt["target"] == "android-generic", "ARM64 fresh-install ZIP must not be published to an OTA feed")
     require(channel in {"dev", "stable"}, "invalid channel")
     require(channel != "stable" or "-" not in receipt["core_version"].split("+", 1)[0], "stable cannot advertise a prerelease")
     require(type(issued) is int and type(expires) is int and issued > 0 and 0 < expires - issued <= 7 * 86400, "invalid feed lifetime")
@@ -282,8 +308,7 @@ def metadata(receipt, channel, issued, expires):
               "url": asset_url(receipt, artifact["name"]), "size": artifact["size"],
               "sha256": artifact["sha256"], "issued": issued, "expires": expires,
               **receipt["compatibility"]}
-    if receipt["target"] == "android-generic":
-        result.update(source=receipt["source"], toolchain=receipt["toolchain"])
+    result.update(source=receipt["source"], toolchain=receipt["toolchain"])
     return result
 
 
@@ -298,7 +323,7 @@ def core_key(version):
 
 def stage_feed(receipt, feed, public_key, site, channel, now=None):
     now = int(time.time()) if now is None else now
-    signed = verify_jws(feed, FEED_TYPES[receipt["target"]], public_key)
+    signed = verify_jws(feed, ANDROID_FEED_TYPE, public_key)
     require(len(feed.read_bytes()) <= 32 * 1024, "feed exceeds device limit")
     require(signed == metadata(receipt, channel, signed["issued"], signed["expires"]), "feed differs from retained artifact")
     require(signed["issued"] <= now + 300 and signed["expires"] > now, "future or expired feed")
@@ -315,7 +340,7 @@ def stage_feed(receipt, feed, public_key, site, channel, now=None):
         if destination.read_bytes() == feed.read_bytes():
             require(history.is_file() and history.read_bytes() == feed.read_bytes(), "missing/changed feed history")
             return  # Retry a failed Pages deploy without changing a checkpoint.
-        previous = verify_jws(destination, FEED_TYPES[receipt["target"]], public_key)
+        previous = verify_jws(destination, ANDROID_FEED_TYPE, public_key)
         require((previous["target"], previous["backend"], previous["channel"]) ==
                 (receipt["target"], "incubator", channel), "previous feed identity mismatch")
         require(signed["revision"] >= previous["revision"] and signed["issued"] > previous["issued"], "feed revision/issue time must not roll back")
@@ -335,7 +360,12 @@ def stage_feed(receipt, feed, public_key, site, channel, now=None):
 def publish(directory, receipt, execute):
     release_tag = tag(receipt)
     changelog = f"release/changelogs/{receipt['core_version']}.md"
-    if run("git", "ls-tree", "--name-only", receipt["source"], "--", changelog).strip():
+    if arm64_starter(receipt):
+        source = receipt["source"]
+        notes = ("Biscuit ARM64 development fresh-install build. Not an OTA update or stable release.\n\n"
+                 f"[Source commit](https://github.com/{REPOSITORY}/commit/{source}) · "
+                 f"[Install guide](https://github.com/{REPOSITORY}/blob/{source}/devices/biscuit/packaging/kernel61/README.md)\n")
+    elif run("git", "ls-tree", "--name-only", receipt["source"], "--", changelog).strip():
         notes = run("git", "show", f"{receipt['source']}:{changelog}").decode()
     else:
         # Older manually reserved snapshots predate generated changelogs. Do
@@ -344,7 +374,8 @@ def publish(directory, receipt, execute):
             "git", "log", "--reverse", "--format=- %s (%H)", receipt["source"]).decode()
     commands = [
         ["gh", "release", "create", release_tag, "--repo", REPOSITORY, "--target", receipt["source"],
-         "--draft", "--prerelease", "--title", f"{release_tag} · {receipt['core_version']}", "--notes", notes],
+         "--draft", "--prerelease", "--title", (f"Biscuit ARM64 {receipt['core_version']}" if arm64_starter(receipt)
+                                               else f"{release_tag} · {receipt['core_version']}"), "--notes", notes],
         ["gh", "release", "upload", release_tag, "--repo", REPOSITORY,
          *[str(p) for p in sorted(directory.iterdir())]],
         ["gh", "release", "edit", release_tag, "--repo", REPOSITORY, "--draft=false", "--latest=false"],
@@ -388,6 +419,7 @@ def main():
     signer = commands.add_parser("sign-receipt")
     signer.add_argument("directory", type=Path)
     signer.add_argument("--key", type=Path, required=True)
+    signer.add_argument("--receipt-sha256", help="independently reviewed receipt hash; required for ARM64")
     for name in ("verify", "publish", "feed", "stage-feed"):
         sub = commands.add_parser(name)
         sub.add_argument("directory", type=Path)
@@ -409,14 +441,21 @@ def main():
     if args.command == "prepare":
         prepare(args.spec, args.output, args.aapt, args.apksigner)
     elif args.command == "sign-receipt":
-        receipt = validate_receipt(read_json(args.directory / "receipt.json"))
+        data = (args.directory / "receipt.json").read_bytes()
+        receipt = validate_receipt(json.loads(data, object_pairs_hook=unique))
+        if args.receipt_sha256 is not None or arm64_starter(receipt):
+            require(hashlib.sha256(data).hexdigest() == args.receipt_sha256, "reviewed receipt SHA256 mismatch or missing")
+        if arm64_starter(receipt):
+            verify_assets(args.directory, receipt, signed=False)
+            require(run("openssl", "pkey", "-in", str(args.key), "-pubout", "-outform", "DER") ==
+                    BISCUIT_ARM64_ROOT, "wrong signing key for Biscuit ARM64")
         sign(receipt, RECEIPT_TYPE, args.key, args.directory / "receipt.jws")
     else:
         receipt = verify(args.directory, args.public_key, args.receipt_sha256)
         if args.command == "publish":
             publish(args.directory, receipt, args.execute)
         elif args.command == "feed":
-            sign(metadata(receipt, args.channel, args.issued, args.expires), FEED_TYPES[receipt["target"]], args.key, args.output)
+            sign(metadata(receipt, args.channel, args.issued, args.expires), ANDROID_FEED_TYPE, args.key, args.output)
         elif args.command == "stage-feed":
             stage_feed(receipt, args.feed, args.public_key, args.site, args.channel)
         else:

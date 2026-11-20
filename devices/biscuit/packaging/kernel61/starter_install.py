@@ -59,9 +59,11 @@ def load_bundle(path, digest):
             raise ValueError("invalid starter bundle members or size")
         manifest = json.loads(archive.read("manifest.json"))
         rootfs, recovery, header = (archive.read(n) for n in ("rootfs.tar.gz", "recovery.img", "header.bin"))
+    recovery_rearm = manifest.get("recovery_rearm", False)
     if (manifest.get("format") != FORMAT or manifest.get("backend") != "incubator"
             or type(manifest.get("package_revision")) is not int or manifest["package_revision"] < 1
             or type(manifest.get("api_key_provisioning", False)) is not bool
+            or type(recovery_rearm) is not bool or (recovery_rearm and "core_version" not in manifest)
             or manifest.get("files") != {"rootfs.tar.gz": sha(rootfs), "recovery.img": sha(recovery),
                                          "header.bin": TEMPLATE_SHA256}):
         raise ValueError("invalid ARM64 starter manifest")
@@ -129,7 +131,8 @@ def load_bundle(path, digest):
     ramdisk_offset = 2048 + ((kernel_len + 2047) // 2048) * 2048
     ramdisk_size = struct.unpack_from("<I", recovery, 16)[0]
     ramdisk = recovery[ramdisk_offset:ramdisk_offset + ramdisk_size]
-    expected = gzip.decompress(initramfs(busybox, sha(rootfs), fpga, starter=True, signed=signed))
+    expected = gzip.decompress(initramfs(busybox, sha(rootfs), fpga, starter=True, signed=signed,
+                                         recovery_rearm=recovery_rearm))
     decoder = zlib.decompressobj(31)
     if (decoder.decompress(ramdisk, len(expected) + 1) != expected or not decoder.eof or decoder.unused_data
             or recovery != boot_image(header, image, dtb, ramdisk, compressed_image=payload[:-65536])):

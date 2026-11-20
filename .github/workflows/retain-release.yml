@@ -82,6 +82,9 @@ jobs:
           if r['target'] == 'android-generic':
               assert r['compatibility']['certificate_sha256'] == os.environ['EXPECTED_CERTIFICATE'], 'unexpected APK signer'
           subprocess.run(['git', 'merge-base', '--is-ancestor', r['source'], 'HEAD'], check=True)
+          if r['compatibility'].get('format') == 'encore-biscuit-arm64-starter-v1':
+              history = subprocess.check_output(['git', 'rev-list', '--first-parent', 'HEAD'], text=True).splitlines()
+              assert r['source'] in history, 'Biscuit ARM64 source must be a first-parent main commit'
           PY
           python3 release/check.py --base origin/main --head HEAD
           python3 release/pipeline.py verify "$CANDIDATE" --public-key "$RUNNER_TEMP/root.pem" --receipt-sha256 "$RECEIPT_SHA256"

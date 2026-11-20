@@ -39,7 +39,6 @@ biscuit-check:
 	GOOS=linux GOARCH=arm64 go list -deps ./devices/biscuit/cmd/encore-satellite | python3 -c 'import sys; deps=set(sys.stdin.read().splitlines()); root="github.com/farooqu/encore-satellite/backends/"; assert root+"incubator" in deps and root+"assist" not in deps, "Biscuit package must contain Incubator only"; print("Incubator-only Biscuit dependency closure passed")'
 	@for f in base.sh slotctl init boot.sh dhcp.sh run health console recovery bluetooth ssh network firewall sendspin.sh; do sh -n devices/biscuit/packaging/$$f || exit; done
 	@for f in init boot.sh arm64-probe-init usb-rescue runtime-service stock-firmware; do sh -n devices/biscuit/packaging/kernel61/$$f || exit; done
-	bash -n devices/biscuit/packaging/kernel.sh
 
 biscuit-kernel:
 	@test -n "$(BISCUIT_KERNEL_SOURCE)" || { echo 'Set BISCUIT_KERNEL_SOURCE to the pinned LibreEcho source archive'; exit 1; }
@@ -50,5 +49,5 @@ biscuit-base:
 	sh devices/biscuit/packaging/base.sh build/biscuit/base.tar.gz
 
 biscuit-package:
-	@test -n "$(BISCUIT_REVISION)" && test -n "$(BISCUIT_SEALED_BASE)" || { echo 'Set BISCUIT_REVISION and BISCUIT_SEALED_BASE (the pinned 6.1/AArch64 inputs)'; exit 1; }
-	python3 devices/biscuit/packaging/kernel61/starter_build.py --sealed-base "$(BISCUIT_SEALED_BASE)" --revision "$(BISCUIT_REVISION)" --output "build/biscuit/encore-biscuit-$(BISCUIT_REVISION)"
+	@test -n "$(BISCUIT_REVISION)" && test -n "$(BISCUIT_SEALED_BASE)" && test -n "$(BISCUIT_CORE_VERSION)" && test -n "$(BISCUIT_CA_BUNDLE)" || { echo 'Set BISCUIT_REVISION, BISCUIT_SEALED_BASE, BISCUIT_CORE_VERSION and BISCUIT_CA_BUNDLE'; exit 1; }
+	python3 devices/biscuit/packaging/kernel61/starter_build.py --sealed-base "$(BISCUIT_SEALED_BASE)" --revision "$(BISCUIT_REVISION)" --core-version "$(BISCUIT_CORE_VERSION)" --ca-bundle "$(BISCUIT_CA_BUNDLE)" --output "build/biscuit/encore-biscuit-$(BISCUIT_REVISION)"

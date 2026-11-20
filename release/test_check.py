@@ -9,8 +9,19 @@ import sys
 import tempfile
 import unittest
 
+import biscuit_dev
 import check
 from test_fixtures import inventory
+
+
+class BiscuitDevIdentityTests(unittest.TestCase):
+    def test_first_parent_number_does_not_reuse_the_private_anchor(self):
+        with self.assertRaisesRegex(ValueError, "first-parent version anchor"):
+            biscuit_dev.identity(biscuit_dev.ANCHOR)
+        self.assertEqual(biscuit_dev.identity("8f908eebf824ada2a029d1aaae89ea49fb3058cf"),
+                         ("0.1.2", 1_000_000_001))
+        self.assertEqual(biscuit_dev.identity("a8e1cfde9d04eab438862c5dfbffc2c53a2e2f28"),
+                         ("0.1.6", 1_000_000_005))
 
 
 class InventoryTests(unittest.TestCase):

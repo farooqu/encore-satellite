@@ -2,8 +2,8 @@
 
 **Dot illuminance remains deferred.** This is a source-level, transaction-safe
 measurement ABI candidate, not hardware qualification. The patch is intentionally
-not applied by `kernel.sh`, included in its input identity, wired to an adapter,
-advertised as a capability, or required for first Dot bring-up. No running device
+not part of the current AArch64 kernel, wired to an adapter, advertised as a
+capability, or required for Dot bring-up. It targets the retired 3.18 tree. No running device
 was accessed. This does not audit the vendor driver's entire debug/control ABI.
 
 ## Pinned source

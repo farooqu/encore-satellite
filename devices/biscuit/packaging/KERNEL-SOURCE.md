@@ -1,6 +1,9 @@
-# Echo Dot 2 kernel source kit
+# Historical Echo Dot 2 Linux 3.18 kernel source kit
 
-`source.tar.gz` accompanies every project kernel artifact. It contains the
+The Linux 3.18 release path is retired. This file documents the old source kit
+and the firmware exception, not the [current AArch64 build](kernel61/README.md).
+
+`source.tar.gz` accompanied each legacy kernel artifact. It contains the
 patched kernel source (`src/`, including its COPYING and component notices),
 the upstream build recipe/configuration/security patches, Encore's build inputs,
 the effective `.config`, and Amazon's generated Trapz header and build certificate.
@@ -52,13 +55,9 @@ Extract the kit into a new working directory. Obtain the AOSP arm-eabi 4.8
 cross-toolchain at the exact repository/commit in
 `devices/biscuit/packaging/kernel-inputs.json`. It is a
 separate build tool under its own licenses, not part of the shipped kernel.
-Use the Linux x86-64 environment/dependency installation in
-`.github/workflows/biscuit-kernel.yml`; the recorded environment describes the actual
-build.
-
-Use `make biscuit-kernel` in the current tree. Source-directory and target-name
-changes alter build-input identity; rebuild old development artifacts rather
-than editing their provenance or weakening validation to reuse a stale build.
+Use the environment recorded in the retained provenance and refer to the
+workflow at the original build commit. `make biscuit-kernel` in the current
+tree targets AArch64 and cannot reproduce the legacy kernel.
 
 To rebuild without downloading Amazon's archive again:
 

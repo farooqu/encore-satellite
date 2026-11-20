@@ -152,6 +152,94 @@ exec "$BUSYBOX" "$@"
                 self.assertEqual(tuple((store / "slots" / f"{slot}.state").read_text().strip()
                                        for slot in ("a", "b")), states)
 
+    def test_rearm_preserves_adjacent_bytes_and_precedes_trial_activation(self):
+        archive = self.root / "rootfs.tar.gz"
+        with tarfile.open(archive, "w:gz") as tar:
+            for name, contents in (("etc/encore-base", (arm64_assemble.STARTER_FORMAT + "\n").encode()),
+                                   ("sbin/init", b"#!/bin/sh\n")):
+                member = tarfile.TarInfo(name)
+                member.mode, member.size = 0o755, len(contents)
+                tar.addfile(member, io.BytesIO(contents))
+        ramdisk = arm64_assemble.initramfs(b"", hashlib.sha256(archive.read_bytes()).hexdigest(), b"",
+                                          starter=True, signed=("0.1.1-dev.5", 22, b""), recovery_rearm=True)
+        subprocess.run([self.busybox, "cpio", "-i", "init"], input=gzip.decompress(ramdisk),
+                       cwd=self.root, capture_output=True, check=True)
+        verify = self.script("verify", '[ "$MODE" != unverified ]\n')
+        bb = self.script("bb", '''
+case "$1" in
+mount|umount|mdev|sync) exit 0;;
+switch_root) echo SWITCH_ROOT; exit 0;;
+dd)
+  case "$*" in
+    *"of=$ROOT/dev/mmcblk0p8"*)
+      echo WRITE >> "$ROOT/events"
+      [ "$MODE" != write-error ] || exit 1
+      [ "$MODE" != readback-error ] || exit 0
+      # Bytes can be visible to readers even if the flush fails.
+      if [ "$MODE" = flush-error ] && [ "${6-}" = conv=notrunc,fsync ]; then
+        "$BUSYBOX" "$@" || exit 1
+        exit 1
+      fi;;
+  esac;;
+esac
+exec "$BUSYBOX" "$@"
+''')
+        source = (self.root / "init").read_text().replace("/bin/busybox.static", str(bb))
+        source = source.replace("/bin/arm64-verify", str(verify))
+        a, b = source.index("rescue() {"), source.index("$BB mount -t proc")
+        source = source[:a] + 'rescue() { echo "RESCUE $*"; exit 1; }\n' + source[b:]
+        source = source.replace('[ ! -b /dev/', '[ ! -f /dev/').replace('[ -b "$misc" ]', '[ -f "$misc" ]')
+        source = self.remap_paths(source, "dev", "proc", "sys", "run", "newroot", "store")
+        # Leave /dev/zero backed by the host's zero device, not test storage.
+        source = source.replace(str(self.root / "dev/zero"), "/dev/zero")
+        check = self.script("routing-check", source)
+        store = self.root / "store/encore"
+        (store / "format").write_text(arm64_assemble.STARTER_FORMAT + "\n")
+        for slot in ("a", "b"):
+            directory = store / "slots" / slot
+            directory.mkdir(parents=True)
+            shutil.copyfile(archive, directory / "rootfs.tar.gz")
+        partition = self.root / "sys/class/block/mmcblk0p8/partition"
+        partition.parent.mkdir(parents=True)
+        misc = self.root / "dev/mmcblk0p8"
+        trailing = bytes(range(256)) * 8
+        empty, recovery = bytes(32), b"boot-recovery".ljust(32, b"\0")
+        for mode, before, after, failure, writes in (
+            ("cold", empty + trailing, recovery + trailing, "", 1),
+            ("trial", empty + trailing, recovery + trailing, "", 1),
+            ("fallback", empty + trailing, recovery + trailing, "", 1),
+            ("armed", recovery + trailing, recovery + trailing, "", 0),
+            ("foreign", b"boot-fastboot".ljust(32, b"\0") + trailing, None, "misc-command", 0),
+            ("short", bytes(31), None, "misc-command", 0),
+            ("wrong-partition", empty + trailing, None, "misc-device", 0),
+            ("unverified", empty + trailing, None, "no-verified-slot", 0),
+            ("write-error", empty + trailing, None, "misc-write", 1),
+            ("flush-error", empty + trailing, recovery + trailing, "misc-write", 1),
+            ("readback-error", empty + trailing, None, "misc-write", 1),
+        ):
+            with self.subTest(mode=mode):
+                # The loader consumes the command before each recovery boot.
+                misc.write_bytes(before)
+                partition.write_text("9\n" if mode == "wrong-partition" else "8\n")
+                (store / "active").write_text("a\n" if mode in ("cold", "armed") else "b\n")
+                (store / "slots/a.state").write_text("good\n")
+                (store / "slots/b.state").write_text("update-spent\n" if mode == "fallback" else "update\n")
+                marker = self.root / "run/encore/arm64-update-trial"
+                marker.unlink(missing_ok=True)
+                events = self.root / "events"
+                events.write_text("")
+                result = subprocess.run(["sh", str(check)], capture_output=True, text=True, timeout=10,
+                                        env={**os.environ, "ROOT": str(self.root), "BUSYBOX": self.busybox, "MODE": mode})
+                self.assertEqual(result.returncode, int(bool(failure)), result.stdout + result.stderr)
+                self.assertEqual(result.stdout.strip(), "RESCUE " + failure if failure else "SWITCH_ROOT")
+                self.assertEqual(misc.read_bytes(), before if after is None else after)
+                self.assertEqual(events.read_text().splitlines(), ["WRITE"] * writes)
+                self.assertEqual(marker.exists(), mode == "trial")
+                self.assertEqual((store / "slots/b.state").read_text(),
+                                 "update-spent\n" if mode in ("trial", "fallback") else "update\n")
+                if not failure:
+                    self.assertEqual((self.root / "run/encore/slot").read_text(), "b\n" if mode == "trial" else "a\n")
+
     def test_usb_rescue_restarts_only_its_own_gadget_with_one_console_owner(self):
         bb = self.script("usb-bb", '''
 case "$1" in

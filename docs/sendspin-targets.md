@@ -65,8 +65,10 @@ See the lab README and [dependency notices](../lab/sendspin/NOTICES.md).
   Test MA-managed announcements separately; Sendspin does not supply Encore's
   voice/timer lifecycle or implement "play music here" intents/room targeting.
 
-## Echo Dot 2 package integration
+## Echo Dot 2 historical companion integration
 
+This ARMv7 package is retired. The current Biscuit ARM64 starter does not ship
+the experimental companion; this section records its design and pending tests.
 The [Echo packaging thread](https://ampcode.com/threads/T-01a1e5ab-b7b7-72ae-b3ec-ff58e6f691a2)
 owns `devices/biscuit/`, `platforms/linux/` and its package/base. At handoff it
 reports a locally built, unflashed Alpine 3.22 ARMv7 package with ALSA, controls

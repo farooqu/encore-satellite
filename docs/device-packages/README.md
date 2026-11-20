@@ -152,7 +152,8 @@ AudioTrack write automatically satisfy those contracts. No new shared interface
 or runtime adapter is introduced here.
 
 `release/targets.json` is centrally owned and remains authoritative for target
-inventory, core SemVer, per-target package revision and release inclusion. These
+inventory and release policy. Android retains the reservation-based versioning;
+the Biscuit ARM64 starter derives its public version from main history. These
 profiles intentionally duplicate none of the version/channel/build fields.
 Package revision zero means never released, not a downloadable revision. Future
 artifacts must record their target, backend variant, core SemVer, package revision
@@ -175,11 +176,10 @@ or hardware-qualified release, and no production trust root is provisioned here.
 
 ## Evidence, attribution and licensing
 
-The target notes cite pinned **Techo5** and **Techo5 Panel** implementation evidence.
-Their work and upstream EchoLocal, echo-dot-assist, TensorFlow Lite Micro, KISS FFT,
-microwakeword, ESPHome, Home Assistant and Voice Incubator deserve acknowledgement;
-see [ACKNOWLEDGEMENTS.md](../../ACKNOWLEDGEMENTS.md) for exact provenance and
-included third-party notices. No runtime code, model, calibration, firmware or
+Encore's target notes cite community implementations as references, not as a
+claim that Encore is built on their applications. See
+[ACKNOWLEDGEMENTS.md](../../ACKNOWLEDGEMENTS.md) for design credit and the
+separate provenance and notices for included material. No runtime code, model, calibration, firmware or
 asset is declared by the planning profiles. Android's included frontend/executor
 and downloaded Sendspin libraries are identified in the acknowledgements. Echo
 low-level code and Dot's wmtup retain their MIT notices. Source inspection is not fresh
