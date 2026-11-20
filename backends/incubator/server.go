@@ -326,6 +326,7 @@ func (s *Server) serveConn(ctx context.Context, conn net.Conn) error {
 				Type string `json:"type"`
 				Data struct {
 					Text    string          `json:"text"`
+					Heard   string          `json:"heard"`
 					Active  bool            `json:"active"`
 					Speaker json.RawMessage `json:"speaker"`
 					Score   json.RawMessage `json:"score"`
@@ -339,7 +340,10 @@ func (s *Server) serveConn(ctx context.Context, conn net.Conn) error {
 				return fmt.Errorf("incubator: invalid event: %w", err)
 			}
 			incoming := session.Event{Kind: event.Type, Text: event.Data.Text, Active: event.Data.Active}
-			if event.Type == "processing" {
+			if event.Type == "not_recognized" {
+				// Incubator sends the final transcript under a different key on this path.
+				incoming.Text = event.Data.Heard
+			} else if event.Type == "processing" {
 				var name string
 				if json.Unmarshal(event.Data.Speaker, &name) == nil && name != "" && name != "unknown" {
 					incoming.Speaker.Name = name

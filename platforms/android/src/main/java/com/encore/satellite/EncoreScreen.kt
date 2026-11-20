@@ -34,6 +34,7 @@ import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.*
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -119,10 +120,11 @@ fun EncoreScreen(state: EncoreState, onStart: () -> Unit, onTalk: () -> Unit, on
                     })
                 Row(Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(16.dp),
                     horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                    val startMicrophone = state.running && !state.microphoneReady && !state.muted
                     FilledIconButton(onClick = {
-                        if (state.interactionVisible) onStop() else if (!state.running || (!state.microphoneReady && !state.muted)) onStart() else onTalk()
-                    }, enabled = state.interactionVisible || !state.running || (!state.microphoneReady && !state.muted) ||
-                        (state.voiceKnown && state.connected && state.microphoneReady && state.captureReady &&
+                        if (state.interactionVisible) onStop() else if (startMicrophone) onStart() else onTalk()
+                    }, enabled = state.interactionVisible || startMicrophone ||
+                        (state.running && state.voiceKnown && state.connected && state.microphoneReady && state.captureReady &&
                             !state.muted && !state.inhibited && state.talkAllowed && state.talkReady),
                         colors = IconButtonDefaults.filledIconButtonColors(containerColor = Ink, contentColor = Mint,
                             disabledContainerColor = Color(0xff38434d), disabledContentColor = Color(0xff9ca8b1)),
@@ -130,9 +132,8 @@ fun EncoreScreen(state: EncoreState, onStart: () -> Unit, onTalk: () -> Unit, on
                             .testTag(if (state.interactionVisible) "stop" else "talk").semantics {
                                 contentDescription = when {
                                     state.interactionVisible -> "Stop voice turn"
-                                    !state.running -> "Start satellite"
-                                    !state.microphoneReady && !state.muted -> "Start microphone"
-                                    else -> "Talk"
+                                    startMicrophone -> "Start microphone"
+                                    else -> "Trigger assistant"
                                 }
                                 stateDescription = state.status
                                 customActions = if (monitorId != 0L) emptyList() else listOf(CustomAccessibilityAction("Open satellite controls") {
@@ -142,7 +143,7 @@ fun EncoreScreen(state: EncoreState, onStart: () -> Unit, onTalk: () -> Unit, on
                         val color = LocalContentColor.current
                         if (state.interactionVisible) Canvas(Modifier.size(18.dp)) {
                             drawRoundRect(color, cornerRadius = CornerRadius(3.dp.toPx(), 3.dp.toPx()))
-                        } else MicrophoneGlyph(color, false)
+                        } else Icon(painterResource(R.drawable.ic_trigger_assistant), contentDescription = null)
                     }
                     FilledIconToggleButton(checked = state.muted, onCheckedChange = onMuted, enabled = state.microphoneReady || state.muted,
                         colors = IconButtonDefaults.filledIconToggleButtonColors(containerColor = Ink, contentColor = Mint,
@@ -150,12 +151,17 @@ fun EncoreScreen(state: EncoreState, onStart: () -> Unit, onTalk: () -> Unit, on
                         modifier = Modifier.size(56.dp).clip(CircleShape).testTag("privacy").semantics {
                             contentDescription = if (state.muted) "Unmute mic" else "Mute mic"
                             stateDescription = if (state.muted) "Microphone muted" else "Microphone unmuted"
-                            // Alternate drawer access without a visible menu button.
                             customActions = if (monitorId != 0L) emptyList() else listOf(CustomAccessibilityAction("Open satellite controls") {
                                 scope.launch { drawer.open() }; true
                             })
                         }) {
-                        MicrophoneGlyph(LocalContentColor.current, true)
+                        MicrophoneGlyph(LocalContentColor.current)
+                    }
+                    FilledIconButton(onClick = { scope.launch { drawer.open() } }, enabled = monitorId == 0L,
+                        colors = IconButtonDefaults.filledIconButtonColors(containerColor = Ink, contentColor = Mint,
+                            disabledContainerColor = Color(0xff38434d), disabledContentColor = Color(0xff9ca8b1)),
+                        modifier = Modifier.size(56.dp).clip(CircleShape).testTag("open-settings")) {
+                        Icon(painterResource(R.drawable.ic_satellite_settings), contentDescription = "Settings")
                     }
                 }
             }
@@ -164,7 +170,7 @@ fun EncoreScreen(state: EncoreState, onStart: () -> Unit, onTalk: () -> Unit, on
     }
 }
 
-@Composable private fun MicrophoneGlyph(color: Color, crossedOut: Boolean) {
+@Composable private fun MicrophoneGlyph(color: Color) {
     Canvas(Modifier.size(26.dp)) {
         val unit = size.width / 24
         val stroke = 1.8f * unit
@@ -174,7 +180,7 @@ fun EncoreScreen(state: EncoreState, onStart: () -> Unit, onTalk: () -> Unit, on
             style = Stroke(stroke, cap = StrokeCap.Round))
         drawLine(color, Offset(12 * unit, 18 * unit), Offset(12 * unit, 21 * unit), stroke, StrokeCap.Round)
         drawLine(color, Offset(9 * unit, 21 * unit), Offset(15 * unit, 21 * unit), stroke, StrokeCap.Round)
-        if (crossedOut) drawLine(color, Offset(3 * unit, 3 * unit), Offset(21 * unit, 21 * unit), stroke, StrokeCap.Round)
+        drawLine(color, Offset(3 * unit, 3 * unit), Offset(21 * unit, 21 * unit), stroke, StrokeCap.Round)
     }
 }
 
