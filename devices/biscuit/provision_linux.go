@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -115,6 +116,38 @@ func joinWiFi(ctx context.Context, w improv.WiFi) (string, error) {
 	}
 }
 
+func waitForImprovLinkDrain(ctx context.Context, adapterPath string) error {
+	// Linux registers link devices as children of the controller, named
+	// hci0:<handle>. Observe only their presence, never log an identity.
+	prefix := filepath.Base(adapterPath) + ":"
+	tick := time.NewTicker(100 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		children, err := os.ReadDir(adapterPath)
+		if err != nil {
+			return err
+		}
+		linked := false
+		for _, child := range children {
+			if child.IsDir() && strings.HasPrefix(child.Name(), prefix) {
+				linked = true
+				break
+			}
+		}
+		if !linked {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-tick.C:
+		}
+	}
+}
+
 // PrepareNetwork offers physically authorized Improv only when no Encore Wi-Fi
 // file exists. An ordinary network outage never opens a provisioning window.
 // It runs before either encrypted controls or voice owns the controller/buttons.
@@ -123,7 +156,9 @@ func PrepareNetwork(ctx context.Context, c Config) error {
 	_ = os.Remove(provisioningReady)
 	defer os.Remove(provisioningReady)
 	if _, err := os.Stat(wifiPath); errors.Is(err, os.ErrNotExist) {
-		ctx, cancel := context.WithCancel(ctx)
+		// Keep input-loss cancellation active through the link and address waits.
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithCancel(ctx)
 		defer cancel()
 		generation, err := os.ReadFile("/run/encore/bluetooth-ready")
 		if err != nil {
@@ -172,6 +207,18 @@ func PrepareNetwork(ctx context.Context, c Config) error {
 			},
 		}); err != nil {
 			return err
+		}
+		// The result dwell and GATT teardown are complete, but the client can
+		// still be connected. This controller can reject the voice app's
+		// connectable advertising probe until the link drops.
+		drainCtx, stop := context.WithTimeout(ctx, 10*time.Second)
+		err = waitForImprovLinkDrain(drainCtx, "/sys/class/bluetooth/hci0")
+		stop()
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if err != nil {
+			log.Printf("dot: Improv BLE link drain: %v; voice startup will still validate Bluetooth", err)
 		}
 	} else if err != nil {
 		return err
