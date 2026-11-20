@@ -330,7 +330,7 @@ func (d *biscuitControls) Handle(ctx context.Context, c *esphome.Conn, msg proto
 		if d.management != nil {
 			// The Proxy's standalone handler ends the listing itself. Compose
 			// its one fixed entity here so all Linux-only actions precede Done.
-			if err := c.Send(&api.ListEntitiesSwitchResponse{ObjectId: "bluetooth_proxy", Key: (&esphome.Base{ObjectID: "bluetooth_proxy"}).Key(), Name: "Bluetooth proxy", Icon: "mdi:bluetooth", EntityCategory: esphome.CategoryConfig}); err != nil {
+			if err := d.Proxy.ListControls(c); err != nil {
 				return err
 			}
 			// Management actions terminate the combined entity list exactly once.

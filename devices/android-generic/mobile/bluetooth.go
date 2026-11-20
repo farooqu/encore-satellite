@@ -15,9 +15,9 @@ type Bluetooth interface {
 	StopScan(generation int64) error
 }
 
-// ConfigureBluetooth runs once, before opening listeners. API/hardware support
-// is distinct from temporary grants/radio state, which PauseBluetooth gates.
-func (r *Runtime) ConfigureBluetooth(host Bluetooth, sdk int, hasBLE bool) error {
+// ConfigureBluetooth runs once, before opening listeners. A nil host leaves
+// only the saved switch. PauseBluetooth gates temporary scan availability.
+func (r *Runtime) ConfigureBluetooth(host Bluetooth) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.cancel != nil || r.bluetoothConfigured {
@@ -25,7 +25,7 @@ func (r *Runtime) ConfigureBluetooth(host Bluetooth, sdk int, hasBLE bool) error
 	}
 	r.bluetoothConfigured = true
 	var scanner ble.Scanner
-	if host != nil && sdk >= 26 && hasBLE {
+	if host != nil {
 		r.radio = androidhost.NewBluetoothScanner(host)
 		scanner = r.radio
 	}

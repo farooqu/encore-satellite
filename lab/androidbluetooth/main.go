@@ -65,7 +65,11 @@ func main() {
 		log.Fatal(err)
 	}
 	n := &native{}
-	if err := r.ConfigureBluetooth(n, *sdk, *hardware); err != nil {
+	var scanner mobile.Bluetooth
+	if *sdk >= 26 && *hardware {
+		scanner = n
+	}
+	if err := r.ConfigureBluetooth(scanner); err != nil {
 		log.Fatal(err)
 	}
 	if err := r.Start(); err != nil {

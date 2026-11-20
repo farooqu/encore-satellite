@@ -45,7 +45,7 @@ func TestLinuxManagementEncryptedAPI(t *testing.T) {
 	s := &settings{config: c, path: filepath.Join(t.TempDir(), "config.json")}
 	p := newSpeaker(&speakerPCM{})
 	defer p.Close()
-	d := &biscuitControls{Proxy: bluetooth.New(managementRadio{}, bluetooth.Options{}), player: p, music: newMusic(c, s, p), management: m}
+	d := &biscuitControls{Proxy: bluetooth.New(managementRadio{}, bluetooth.Options{SaveEnabled: func(bool) error { return nil }}), player: p, music: newMusic(c, s, p), management: m}
 	key, err := esphome.GeneratePSK()
 	if err != nil {
 		t.Fatal(err)
@@ -203,19 +203,21 @@ listing:
 			break listing
 		}
 	}
-	for _, want := range []string{"wifi_status", "wifi_stage", "wifi_ssid", "speaker_volume", "speaker_mute", "bluetooth_proxy"} {
+	for _, want := range []string{"wifi_status", "wifi_stage", "wifi_ssid", "speaker_volume", "speaker_mute"} {
 		if !listed[want] {
 			t.Errorf("missing starter control %s", want)
 		}
 	}
 	for name := range listed {
-		if strings.HasPrefix(name, "sendspin") || strings.HasPrefix(name, "ssh_") {
+		if strings.HasPrefix(name, "sendspin") || strings.HasPrefix(name, "ssh_") || name == "bluetooth_proxy" {
 			t.Errorf("listed unsupported control %s", name)
 		}
 	}
 	// Cached commands for removed controls must not reach a missing worker.
 	sshEnabledKey := (&esphome.Base{ObjectID: "ssh_enabled"}).Key()
+	bluetoothKey := (&esphome.Base{ObjectID: "bluetooth_proxy"}).Key()
 	peer.send(&api.SwitchCommandRequest{Key: sshEnabledKey, State: true})
+	peer.send(&api.SwitchCommandRequest{Key: bluetoothKey, State: true})
 	peer.send(&api.SwitchCommandRequest{Key: musicKey, State: true})
 	peer.send(&api.SwitchCommandRequest{Key: speakerMuteKey, State: true})
 	peer.send(&api.SubscribeStatesRequest{})
@@ -227,7 +229,7 @@ listing:
 			if v.Key == speakerMuteKey && v.State {
 				seenMute = true
 			}
-			if v.Key == musicKey || v.Key == sshEnabledKey {
+			if v.Key == musicKey || v.Key == sshEnabledKey || v.Key == bluetoothKey {
 				t.Fatal("published unsupported switch state")
 			}
 		case *api.TextStateResponse:

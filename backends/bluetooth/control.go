@@ -37,14 +37,25 @@ func (b *Proxy) enabledNow() bool {
 	return b.enabled && !b.paused
 }
 
+// ListControls composes the Bluetooth switch without terminating discovery.
+func (b *Proxy) ListControls(c *esphome.Conn) error {
+	if b.save == nil {
+		return nil
+	}
+	return c.Send(&api.ListEntitiesSwitchResponse{ObjectId: "bluetooth_proxy", Key: b.switchKey, Name: "Bluetooth proxy", Icon: "mdi:bluetooth", EntityCategory: esphome.CategoryConfig})
+}
+
 func (b *Proxy) control(c *esphome.Conn, msg proto.Message) (bool, error) {
 	switch m := msg.(type) {
 	case *api.ListEntitiesRequest:
-		if err := c.Send(&api.ListEntitiesSwitchResponse{ObjectId: "bluetooth_proxy", Key: b.switchKey, Name: "Bluetooth proxy", Icon: "mdi:bluetooth", EntityCategory: esphome.CategoryConfig}); err != nil {
+		if err := b.ListControls(c); err != nil {
 			return true, err
 		}
 		return true, c.Send(&api.ListEntitiesDoneResponse{})
 	case *api.SubscribeStatesRequest:
+		if b.save == nil {
+			return true, nil
+		}
 		b.mu.Lock()
 		if b.states[c] == nil {
 			b.states[c] = &stateSubscription{wake: make(chan struct{}, 1)}
@@ -54,7 +65,7 @@ func (b *Proxy) control(c *esphome.Conn, msg proto.Message) (bool, error) {
 		b.mu.Unlock()
 		return true, nil
 	case *api.SwitchCommandRequest:
-		if m.Key != b.switchKey {
+		if b.save == nil || m.Key != b.switchKey {
 			return false, nil
 		}
 		return true, b.setEnabled(m.State, c)

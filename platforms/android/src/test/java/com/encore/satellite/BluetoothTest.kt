@@ -65,6 +65,16 @@ class BluetoothTest {
         assertFalse(noHardware.supported)
     }
 
+    @Test fun hostWithoutBLEReportsUnsupportedAndRequestsNoPermissions() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        shadowOf(context.packageManager).setSystemFeature(PackageManager.FEATURE_BLUETOOTH_LE, false)
+        val host = BluetoothHost(context)
+        host.refresh()
+        assertFalse(host.state.value.supported)
+        assertEquals("Unavailable on this device", host.state.value.status)
+        assertTrue(host.permissions().isEmpty())
+    }
+
     @OptIn(ExperimentalRoborazziApi::class)
     @Test fun renderCapabilitiesAndKeepUnsupportedEnableDisabled() {
         val sample = mutableStateOf(state(sdk = 34))

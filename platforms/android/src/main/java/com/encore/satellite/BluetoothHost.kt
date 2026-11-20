@@ -23,13 +23,12 @@ data class BluetoothState(
     val received: Long = 0,
 ) {
     companion object {
-        fun evaluate(sdk: Int, hardware: Boolean, enabled: Boolean, permitted: Boolean,
+        fun evaluate(sdk: Int, supported: Boolean, enabled: Boolean, permitted: Boolean,
             radio: Boolean, location: Boolean, visible: Boolean, running: Boolean,
             scanning: Boolean, received: Long, failure: String): BluetoothState {
-            val supported = hardware && sdk >= 26
             val status = when {
-                !hardware -> "Unavailable on this device"
-                !supported -> "Advertisement proxy unavailable on API $sdk"
+                !supported && sdk < 26 -> "Advertisement proxy unavailable on API $sdk"
+                !supported -> "Unavailable on this device"
                 !enabled -> "Disabled"
                 !permitted -> "Permission needed"
                 !radio -> "Bluetooth is off"
@@ -53,8 +52,9 @@ data class BluetoothState(
  * encrypted radio lease. No reflection, private parcel decoding or radio toggles. */
 class BluetoothHost(private val context: Context) : Bluetooth {
     private val adapter get() = context.getSystemService(BluetoothManager::class.java)?.adapter
-    val hasBLE = context.packageManager.hasSystemFeature(PackageManager.FEATURE_BLUETOOTH_LE) &&
-        runCatching { adapter != null }.getOrDefault(false)
+    private val scanHost: Bluetooth? = if (Build.VERSION.SDK_INT >= 26 &&
+        context.packageManager.hasSystemFeature(PackageManager.FEATURE_BLUETOOTH_LE) &&
+        runCatching { adapter != null }.getOrDefault(false)) this else null
     private var engine: Runtime? = null
     private val viewers = mutableSetOf<Any>()
     private var running = false
@@ -69,13 +69,13 @@ class BluetoothHost(private val context: Context) : Bluetooth {
     val state = mutable.asStateFlow()
 
     fun attach(runtime: Runtime) {
+        runtime.configureBluetooth(scanHost)
         engine = runtime
-        runtime.configureBluetooth(this, Build.VERSION.SDK_INT.toLong(), hasBLE)
         refresh()
     }
 
     fun permissions(): Array<String> = when {
-        !hasBLE -> emptyArray()
+        scanHost == null -> emptyArray()
         Build.VERSION.SDK_INT >= 31 -> arrayOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT,
             Manifest.permission.ACCESS_COARSE_LOCATION, Manifest.permission.ACCESS_FINE_LOCATION)
         else -> arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
@@ -109,7 +109,7 @@ class BluetoothHost(private val context: Context) : Bluetooth {
         synchronized(this) {
             if (permission && retired != null) runCatching { stopScan(generation) }
             val visible = viewers.isNotEmpty() && context.getSystemService(PowerManager::class.java).isInteractive
-            val next = BluetoothState.evaluate(Build.VERSION.SDK_INT, hasBLE, enabled, permission,
+            val next = BluetoothState.evaluate(Build.VERSION.SDK_INT, scanHost != null, enabled, permission,
                 radio, location, visible, running, callback != null, received, failure)
             pause = !next.supported || !enabled || !permission || !radio || !location || !visible || !running || failure.isNotEmpty()
             if (!radio || !permission || !enabled) failure = ""
