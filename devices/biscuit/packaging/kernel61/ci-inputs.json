@@ -1,5 +1,5 @@
 {
-  "external_bundle_tag": null,
+  "external_bundle_tag": "biscuit-arm64-inputs-v1",
   "sha256": {
     "alpine-apks.tar.gz": "f2934f6b940cc5269f8f7b1e9fa5ecefb23b83efdd9cef0b785142f04aa9a34b",
     "alpine-source.tar.gz": "57af988138a9d1d109d6c77d5acb12f4f3ce7f4a97be06b8930c3b3e288fed82",
