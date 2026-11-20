@@ -114,13 +114,16 @@ func AveragePCM(b []byte) ([]int16, error) {
 	for i := range out {
 		var sum int32 // Seven full-scale signed 24-bit values fit in int32.
 		for mic := range 7 {
-			p := b[i*27+mic*3:]
-			v := int32(uint32(p[0]) | uint32(p[1])<<8 | uint32(p[2])<<16)
-			sum += v << 8 >> 8
+			sum += packed24(b[i*27+mic*3:])
 		}
 		out[i] = int16(sum / (7 * 256))
 	}
 	return out, nil
+}
+
+func packed24(p []byte) int32 {
+	v := int32(uint32(p[0]) | uint32(p[1])<<8 | uint32(p[2])<<16)
+	return v << 8 >> 8
 }
 
 func configureMixer(m interface {
@@ -274,12 +277,24 @@ func captureLossMonitor(m captureControls) (func() (bool, error), error) {
 	}, nil
 }
 
-func capture(ctx context.Context, pcm capturePCM, loss func() (bool, error), gate *linux.Privacy, voice *incubator.Server, meter *captureMeter, ready func(), privacy ...func(bool)) error {
+func capture(ctx context.Context, pcm capturePCM, loss func() (bool, error), gate *linux.Privacy, voice *incubator.Server, meter *captureMeter, probe *referenceProbe, ready func(), privacy ...func(bool)) error {
 	engine := voice.Engine
 	defer meter.clear()
+	if probe != nil {
+		defer probe.reset()
+	}
+	var arm *referenceArm // capture owner's per-block view; no pre-arm samples
+	stopObservation := func(err error) {
+		if arm != nil {
+			arm.stop(err)
+			probe.reset()
+			arm, probe = nil, nil
+		}
+	}
 	reportedUnavailable := false
 	setPrivacy := func(muted bool, err error) {
 		if muted {
+			stopObservation(errReferencePrivacy)
 			engine.SetMuted(true)
 			meter.clear()
 		}
@@ -297,6 +312,12 @@ func capture(ctx context.Context, pcm capturePCM, loss func() (bool, error), gat
 	var sequence uint64
 	opened := time.Now()
 	for ctx.Err() == nil {
+		if probe != nil {
+			arm = probe.arm.Load()
+			if arm != nil && arm.ctx.Err() != nil {
+				stopObservation(context.Cause(arm.ctx))
+			}
+		}
 		var n int
 		var readErr error
 		// Control reads do not acquire microphone audio. Require them even
@@ -331,11 +352,13 @@ func capture(ctx context.Context, pcm capturePCM, loss func() (bool, error), gat
 		}
 		if lossErr != nil {
 			clear(b)
+			stopObservation(lossErr)
 			engine.SetMuted(true)
 			return lossErr
 		}
 		if readErr != nil && !errors.Is(readErr, syscall.EAGAIN) && !errors.Is(readErr, syscall.EINTR) {
 			if !errors.Is(readErr, alsa.ErrOverrun) {
+				stopObservation(readErr)
 				return readErr
 			}
 			lost = true
@@ -343,6 +366,7 @@ func capture(ctx context.Context, pcm capturePCM, loss func() (bool, error), gat
 		if lost {
 			clear(b)
 			meter.clear()
+			stopObservation(errReferenceLoss)
 			engine.SetMuted(true) // invalidate active speech immediately
 			if err := pcm.Rewind(); err != nil {
 				return err
@@ -354,18 +378,36 @@ func capture(ctx context.Context, pcm capturePCM, loss func() (bool, error), gat
 		if n > 0 && readErr == nil {
 			samples, err := AveragePCM(b[:n])
 			if err != nil {
+				stopObservation(err)
 				return err
 			}
 			var captureErr error
+			var report referenceReport
+			var reportReady bool
+			var capturedAt time.Duration
+			if arm != nil && arm.ctx.Err() == nil && !discontinuity {
+				capturedAt = time.Since(opened)
+				report, reportReady = probe.observe(b[:n], samples, time.Since(arm.started))
+			}
 			muted, privacyErr = gate.Check(func() {
 				engine.SetMuted(false)
-				captureErr = voice.Capture(audio.Frame{Samples: samples, Sequence: sequence, CapturedAt: time.Since(opened), Discontinuity: discontinuity})
+				frameAt := time.Since(opened)
+				if capturedAt != 0 {
+					frameAt = capturedAt // do not include the diagnostic's scan time
+				}
+				captureErr = voice.Capture(audio.Frame{Samples: samples, Sequence: sequence, CapturedAt: frameAt, Discontinuity: discontinuity})
 				if captureErr == nil && !discontinuity && ctx.Err() == nil {
 					meter.observe(samples, time.Now())
+					if reportReady && arm.ctx.Err() == nil {
+						probe.publish(arm, report)
+					}
 				} else {
 					meter.clear()
 				}
 			})
+			if captureErr != nil {
+				stopObservation(captureErr)
+			}
 			setPrivacy(muted, privacyErr)
 			clear(samples)
 			clear(b)

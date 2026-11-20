@@ -93,7 +93,7 @@ listing:
 	captureDone := make(chan error, 1)
 	go func() {
 		voice := &incubator.Server{Engine: session.New(p)}
-		captureDone <- capture(ctx, &captureStub{}, func() (bool, error) { return false, nil }, gate, voice, &captureMeter{origin: time.Now()}, func() {}, d.microphone.SetMuted)
+		captureDone <- capture(ctx, &captureStub{}, func() (bool, error) { return false, nil }, gate, voice, &captureMeter{origin: time.Now()}, nil, func() {}, d.microphone.SetMuted)
 	}()
 	t.Cleanup(func() {
 		cancel()

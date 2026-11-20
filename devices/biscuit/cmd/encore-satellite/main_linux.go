@@ -33,7 +33,8 @@ func main() {
 	if len(os.Args) == 2 && os.Args[1] == "--provision-only" {
 		return
 	}
-	if err = biscuit.Run(ctx, c); err != nil {
+	probeReference := len(os.Args) == 2 && os.Args[1] == "--probe-aec-reference"
+	if err = biscuit.Run(ctx, c, probeReference); err != nil {
 		log.Fatal(err)
 	}
 }

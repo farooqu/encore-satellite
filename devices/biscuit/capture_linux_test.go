@@ -69,8 +69,9 @@ func (s *captureStub) Read(b []byte) (int, error) {
 }
 
 func TestCapturePrivacyAtOSBoundaryAndAfterRead(t *testing.T) {
-	for _, scenario := range []string{"open", "initially_muted", "mute_during_read", "driver_error", "driver_error_during_read"} {
+	for _, scenario := range []string{"open", "unarmed", "initially_muted", "mute_during_read", "driver_error", "driver_error_during_read"} {
 		t.Run(scenario, func(t *testing.T) {
+			wantCapture := scenario == "open" || scenario == "unarmed"
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			e := session.New(silentPlayer{})
@@ -98,9 +99,15 @@ func TestCapturePrivacyAtOSBoundaryAndAfterRead(t *testing.T) {
 			}
 			ready := false
 			meter := &captureMeter{origin: time.Now()}
-			err := capture(ctx, pcm, func() (bool, error) { return false, nil }, gate, &incubator.Server{Engine: e}, meter, func() {
+			probe := &referenceProbe{reports: make(chan referenceReport, 1), count: probeWindow - 2}
+			observation, stop := context.WithCancelCause(ctx)
+			defer stop(nil)
+			if scenario != "unarmed" {
+				probe.arm.Store(&referenceArm{time.Now(), observation, stop})
+			}
+			err := capture(ctx, pcm, func() (bool, error) { return false, nil }, gate, &incubator.Server{Engine: e}, meter, probe, func() {
 				reading := meter.snapshot(time.Now())
-				if reading.ready != (scenario == "open") || (reading.ready && reading.level <= 0) {
+				if reading.ready != wantCapture || (reading.ready && reading.level <= 0) {
 					t.Fatal("visual observation escaped capture/privacy boundary", reading)
 				}
 				ready = true
@@ -112,13 +119,23 @@ func TestCapturePrivacyAtOSBoundaryAndAfterRead(t *testing.T) {
 			if err != nil || !ready {
 				t.Fatalf("capture: %v app ready=%v", err, ready)
 			}
+			wantReports := 0
+			if scenario == "open" {
+				wantReports = 1
+			}
+			if got := len(probe.reports); got != wantReports || probe.count != 0 {
+				t.Fatalf("unexpected probe reports=%d or retained samples=%d", got, probe.count)
+			}
+			if !wantCapture && !errors.Is(context.Cause(observation), errReferencePrivacy) {
+				t.Fatal("privacy did not stop observation", context.Cause(observation))
+			}
 			var audioCommands []session.Command
 			for _, c := range l.commands {
 				if c.Kind == "audio" {
 					audioCommands = append(audioCommands, c)
 				}
 			}
-			if scenario == "open" {
+			if wantCapture {
 				if len(audioCommands) != 1 {
 					t.Fatalf("audio commands: %d", len(audioCommands))
 				}
@@ -164,7 +181,7 @@ func TestCaptureRecoversFromUnreadablePrivacyWithoutRestart(t *testing.T) {
 		return state == "muted", nil
 	})
 	resumed := false
-	err := capture(ctx, pcm, func() (bool, error) { return false, nil }, gate, &incubator.Server{Engine: engine}, meter, func() {
+	err := capture(ctx, pcm, func() (bool, error) { return false, nil }, gate, &incubator.Server{Engine: engine}, meter, nil, func() {
 		if state != "unreadable" || !engine.Snapshot().Muted || pcm.starts != 0 || pcm.reads != 0 {
 			t.Fatal("app must start with no PCM activity while privacy is unreadable")
 		}
@@ -277,10 +294,17 @@ func TestCaptureLossDiscardsRewindsAndMarksRecovery(t *testing.T) {
 				wantReads = 2
 			}
 			meter := &captureMeter{origin: time.Now()}
+			probe := &referenceProbe{reports: make(chan referenceReport, 1)}
+			observation, stop := context.WithCancelCause(ctx)
+			defer stop(nil)
+			probe.arm.Store(&referenceArm{time.Now(), observation, stop})
 			pcm := &captureStub{}
 			pcm.duringRead = func() {
 				pcm.readErr = nil
 				if pcm.reads == wantReads {
+					if !errors.Is(context.Cause(observation), errReferenceLoss) || probe.count != 0 || len(probe.reports) != 0 {
+						t.Fatal("loss did not stop and clear reference capture", context.Cause(observation), probe.count)
+					}
 					if meter.snapshot(time.Now()).ready {
 						t.Fatal("capture loss retained a healthy microphone observation")
 					}
@@ -315,7 +339,7 @@ func TestCaptureLossDiscardsRewindsAndMarksRecovery(t *testing.T) {
 				}
 			}
 			ready := false
-			err = capture(ctx, pcm, loss, linux.NewPrivacy(func() (bool, error) { return false, nil }), &incubator.Server{Engine: e}, meter, func() {
+			err = capture(ctx, pcm, loss, linux.NewPrivacy(func() (bool, error) { return false, nil }), &incubator.Server{Engine: e}, meter, probe, func() {
 				ready = true
 				if !meter.snapshot(time.Now()).ready {
 					t.Fatal("successful capture did not publish a microphone observation")
@@ -385,7 +409,7 @@ func TestCaptureLossControlReadErrorsFailClosed(t *testing.T) {
 				t.Fatal(err)
 			}
 			ready := false
-			err = capture(ctx, pcm, loss, linux.NewPrivacy(func() (bool, error) { return scenario == "muted_before", nil }), &incubator.Server{Engine: e}, &captureMeter{origin: time.Now()}, func() { ready = true; cancel() })
+			err = capture(ctx, pcm, loss, linux.NewPrivacy(func() (bool, error) { return scenario == "muted_before", nil }), &incubator.Server{Engine: e}, &captureMeter{origin: time.Now()}, nil, func() { ready = true; cancel() })
 			if err == nil || ready || !link.closed || !e.Snapshot().Muted || pcm.reads != wantReads {
 				t.Fatalf("did not fail closed: err=%v ready=%v closed=%v muted=%v reads=%d", err, ready, link.closed, e.Snapshot().Muted, pcm.reads)
 			}
@@ -458,7 +482,7 @@ func TestUnmutedCaptureContinuesDuringPlaybackRecovery(t *testing.T) {
 		// Exercise a real privacy transition, not only the no-op fast path.
 		player.SetMusicPrivacy(true)
 		voice.Engine.SetMuted(true)
-		done <- capture(ctx, mic, func() (bool, error) { return false, nil }, gate, voice, &captureMeter{origin: time.Now()}, func() {}, player.SetMusicPrivacy)
+		done <- capture(ctx, mic, func() (bool, error) { return false, nil }, gate, voice, &captureMeter{origin: time.Now()}, nil, func() {}, player.SetMusicPrivacy)
 	}()
 	select {
 	case err := <-done:

@@ -35,7 +35,7 @@ func packagedExecutable(path string) bool {
 // Run opens the real host before exposing this package's sole Incubator backend. It does
 // not provision the base, start Wi-Fi, execute shell commands or run HTTP control.
 // ReadyPath is ephemeral startup readiness, NOT a hardware qualification result.
-func Run(parent context.Context, c Config) error {
+func Run(parent context.Context, c Config, probeReference bool) error {
 	_ = os.Remove(ReadyPath)
 	defer os.Remove(ReadyPath)
 	if err := syscall.Sethostname([]byte(c.Name)); err != nil {
@@ -251,8 +251,12 @@ func Run(parent context.Context, c Config) error {
 		}
 	})
 	ready := make(chan struct{}, 1)
+	var probe *referenceProbe
+	if probeReference {
+		probe = &referenceProbe{reports: make(chan referenceReport, 1)}
+	}
 	start(func() error {
-		return capture(ctx, mic, loss, gate, voice, meter, func() { ready <- struct{}{} }, player.SetMusicPrivacy, controls.microphone.SetMuted)
+		return capture(ctx, mic, loss, gate, voice, meter, probe, func() { ready <- struct{}{} }, player.SetMusicPrivacy, controls.microphone.SetMuted)
 	})
 	for {
 		select {
@@ -261,6 +265,13 @@ func Run(parent context.Context, c Config) error {
 				return err
 			}
 			log.Printf("Encore %s ready (Incubator package); Action or app-pushed MixedNet wake models; no AEC/beamformer", c.Name)
+			if probe != nil {
+				workers.Go(func() {
+					marker := fmt.Sprintf("/run/encore/aec-probe/arm.%d", os.Getpid())
+					err := probe.run(ctx, marker, gate, 2*time.Minute)
+					log.Printf("dot: reference probe stopped reason=%q; observation only", err.Error())
+				})
+			}
 		case err = <-failed:
 			engine.SetMuted(true)
 			if err == nil && ctx.Err() == nil {
