@@ -139,7 +139,7 @@ func newARM64Updates(selectionPath, manifestPath string) (*linuxUpdates, error) 
 		channel: "stable", jobs: make(chan updateRequest, 1),
 		state: api.UpdateStateResponse{Key: linuxUpdateKey, Title: "Encore Biscuit", CurrentVersion: version, LatestVersion: version},
 		client: linuxupdate.Client{Installed: m, Key: linuxupdate.BiscuitARM64Root(), Directory: "/data/encore/updates",
-			BaseURL: "https://farooqu.github.io/encore-satellite"},
+			BaseURL: "https://umer.thefarooqs.net/encore-satellite"},
 		arm64:  store,
 		reboot: func() error { return exec.Command("/bin/busybox.static", "reboot").Run() },
 		beforeInstall: func() error {
