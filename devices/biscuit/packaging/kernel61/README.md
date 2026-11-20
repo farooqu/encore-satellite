@@ -354,6 +354,13 @@ probe, before the store mounts. Pass the pinned source archive's retained
 it in both initramfs and RAM root `/lib/firmware`. Its redistribution/source
 grant remains unresolved; this is a private hardware trial, not a release.
 
+The source-built trial zero-fills the 1,804 bytes after that bitstream, keeping
+the 32,768-byte SPI transfer. It does not use or retain the recovered Linux
+3.18 tail in the patched source tree. For a corresponding source kit, package
+that patched tree, not the original upstream archive containing the tail.
+This does not change the sealed kernel currently pinned by the starter builder;
+review and qualify the new kernel and pin its matching inputs separately.
+
 ```sh
 python3 devices/biscuit/packaging/kernel61/arm64_probe.py \
   --source-archive /path/to/retained/linux-source.tar.gz \

@@ -77,7 +77,7 @@ def main():
     if compiler != "14.2.0":
         parser.error("probe requires AArch64 GCC 14.2.0")
     patches = ("capture.patch", "arm64-probe.patch", "arm64-connectivity.patch",
-               "playback-sram.patch", "stp-read.patch")
+               "playback-sram.patch", "stp-read.patch", "fpga-zero-padding.patch")
     inputs = {name: sha(HERE / name) for name in
               ("arm64_probe.py", "arm64-probe.fragment", "arm64-probe.dts",
                "biscuit.dts", "encore.fragment", *patches)}
@@ -103,6 +103,9 @@ def main():
         with (HERE / name).open("rb") as patch:
             subprocess.run(["patch", "--batch", "--fuzz=0", "-p1"], cwd=cwd,
                            stdin=patch, check=True)
+    # The pinned upstream archive is a build input, not the corresponding
+    # source to redistribute for the zero-padded kernel.
+    (source / "sound/soc/mediatek/mt8163-amzn-spi/amzn-fpga-oracle-tail.h").unlink()
     out.mkdir()
     shutil.copyfile(source / "arch/arm/configs/mt8163_arm32_defconfig", out / ".config")
     subprocess.run(["bash", str(source / "scripts/kconfig/merge_config.sh"), "-m",

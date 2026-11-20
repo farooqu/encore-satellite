@@ -1,0 +1,37 @@
+--- a/sound/soc/mediatek/mt8163-amzn-spi/amzn-mt-spi-pcm.c
++++ b/sound/soc/mediatek/mt8163-amzn-spi/amzn-mt-spi-pcm.c
+@@ -31,7 +31,6 @@
+ #include <sound/soc.h>
+ 
+ #include "amzn-mt-spi-pcm.h"
+-#include "amzn-fpga-oracle-tail.h"
+ 
+ /* Diagnostic-only register snapshot of the SPI controller and the pin-53-56
+  * MODE registers, to compare against the known-good Linux 3.18 oracle values
+@@ -71,7 +70,6 @@
+ static_assert(sizeof(struct dough_status_frame) == 27);
+ static_assert(offsetof(struct dough_status_frame, fpga_rev) == 26);
+ static_assert(sizeof(struct dough_frame) == 6912);
+-static_assert(sizeof(amzn_fpga_oracle_tail) == 1804);
+ 
+ struct amzn_spi_priv {
+ 	struct spi_device *spi;
+@@ -790,16 +788,8 @@
+ 	}
+ 
+ 	memcpy(firmware_buf, firmware->data, firmware->size);
+-	if (transfer_bytes - firmware->size == sizeof(amzn_fpga_oracle_tail)) {
+-		/* Experimental compatibility test against the exact 3.18 oracle
+-		 * transfer.  The legacy driver over-read adjacent .rodata here;
+-		 * use the recovered bytes explicitly rather than reproducing UB. */
+-		memcpy(firmware_buf + firmware->size, amzn_fpga_oracle_tail,
+-		       sizeof(amzn_fpga_oracle_tail));
+-		dev_info(&priv->spi->dev,
+-			 "FPGA probe diag using recovered oracle tail bytes=%zu\n",
+-			 sizeof(amzn_fpga_oracle_tail));
+-	} else if (transfer_bytes > firmware->size) {
++	/* Keep the transfer length without sending unrelated kernel data. */
++	if (transfer_bytes > firmware->size) {
+ 		memset(firmware_buf + firmware->size, 0,
+ 		       transfer_bytes - firmware->size);
+ 	}
