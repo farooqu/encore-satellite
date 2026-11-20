@@ -109,15 +109,15 @@ second physical lane is required by the protocol.
 The existing model-upload path accepts compatible mixednet models; collecting
 training samples is a separate capability. Off-call Live Monitor, Enroll Voice,
 Teach Wake Word, and two-way intercom remain unadvertised pending qualification.
-Android connects the existing foreground voice overlay to the shared monitor gate.
-With microphone permission granted and Encore's mic unmuted, a fresh request from
-the authorized, current Incubator connection brings up the overlay without a local
-tap or additional opt-in. Android confirms the exact request **after** drawing the
-microphone waveform and **before** the gate sends PCM. The gate sends no pre-roll
-and does not resume a previous stream automatically. Stop cancels the request;
-Mute cancels it and latches mic privacy. Permission/capture loss, overlay loss and
-disconnect also end the stream. The foreground-service notification and OS mic dot
-do not replace the overlay. Keep this unauthenticated protocol on an isolated trusted LAN.
+The Android UI connects its foreground mic indicator to the shared monitor gate.
+For an admitted request, the screen shows the visible mic edge band without
+requiring a local tap. Android confirms the exact request only after
+fresh mic samples arrive and the indicator draws in a shown, focused window.
+The gate sends no pre-roll and does not resume a previous stream automatically.
+Stop cancels the request; Mute cancels it and latches mic privacy. Permission or
+capture loss, leaving the focused screen, and disconnect also end the stream.
+The service notification and OS mic dot do not replace the app indicator. Keep
+this unauthenticated protocol on an isolated trusted LAN.
 
 For full intercom and explicit monitor admission, the required companion is
 the unpublished `encore-loopback-intercom` revision
@@ -214,72 +214,25 @@ pairing records persist. The screen stays awake while the Activity is visible.
 
 ## Display and privacy behavior
 
-- One dashboard fills the display edge-to-edge, with no header, permanent toolbar,
-  margins or dashboard card. Android system bars are hidden but can be revealed by
-  a system swipe. Swipe inward from the leftmost 20 dp to open satellite controls:
-  Talk/start, privacy, settings and independent music controls. Other dashboard
-  swipes are not drawer gestures. No visible menu button is drawn. Screen readers
-  can use either voice button's “Open satellite controls” accessibility action.
-  Two circular 56 dp buttons float at the bottom center: microphone/Talk (or
-  explicit satellite start before startup) and mic mute. After BLE-only startup,
-  the primary button explicitly starts the microphone without changing saved mute
-  intent. Talk remains unavailable until fresh capture and shared permission are
-  ready; mute is disabled without a recorder unless it is already saved-muted,
-  when explicit permission-aware unmute remains available. During voice, Talk becomes
-  Stop in the same circular button. Mute has a crossed-mic symbol, a checked toggle
-  state and a red background when muted; unmuting remains an explicit action.
-  During the entire voice turn the dashboard is frosted,
-  touch-shielded and hidden from accessibility interaction; stop and privacy remain
-  usable, including host playback drain after HANGUP. Healthy idle has no trace.
-  Voice takes over the dashboard edge-to-edge without a visible card. On Android
-  12+ the background is softly blurred with a light neutral frost; older Android keeps the tint
-  and input shield without blur. This is visual treatment, not security redaction.
-  The waveform uses the compact 48 dp row on every display, anchored independently
-  of transcript length. Text fills the space below only as needed, then scrolls
-  under a true alpha fade, above the reserved bottom controls. No large
-  empty panel is drawn for short exchanges. Heard text uses a subdued version of
-  the input braid color (including reported speaker RGB); replies use response
-  lilac, darkened for contrast on the light frost, with no added prefixes. Privacy
-  and Stop remain directly reachable during voice; both are also available in the
-  drawer. Notices stay visible without reserving dashboard space. The dashboard keeps
-  its existing viewport size while hidden; entering voice does not reflow it.
-- Native Canvas draws two independent Horizon braids: mint input from fresh
-  microphone PCM and lilac response audio from accepted PCM at the AudioTrack
-  playback head. They can move simultaneously; silence in either settles only
-  that layer flat. Queued/missing audio never invents output energy. A valid
-  current-turn Incubator speaker RGB replaces the input base color after it is
-  reported, including during response playback; it never recolors output. The
-  microphone can hear device echo: these layers do not establish user/device
-  acoustic separation, authentication or sound direction. Audio focus, capture,
-  routing and ducking keep their existing policies.
-- Each braid is a level-reactive visualization, not a raw PCM oscilloscope.
-  RMS drives three smooth ribbons, with display-frame attack/release easing
-  (22/95 ms initial tuning), bounded quiet-level lift, broad taper and
-  tangent-continuous curves. Silent input/output settles flat; missing samples
-  clear immediately. Reduced motion and night mode freeze ribbon drift while
-  retaining smaller bounded live-level response. Smoothing resets at
-  turn/connection/lifecycle boundaries. Kiosk Satellite's
-  frame-ticked level response informed this approach; no code, assets, strand
-  tables, glow layers or idle animation were copied from its CC BY-NC-ND source.
-- Processing/waiting uses three small neutral dots above the trace, only for
-  actual processing or queued state, never merely because audio is silent.
-  Amber alert rails remain distinct. No visible listening/processing/speaking
-  captions or speaker metadata are displayed; accessibility retains state and
-  server-attributed input-speaker descriptions. The drawer shows availability and
-  privacy status; notices, actual transcripts and Stop/privacy controls remain
-  visible when applicable. Announcements retain the shared active/owner facts,
-  including during drain, even when capture is unavailable. A focus interruption
-  still requires explicit Resume audio for an unchanged playing music stream.
-- Stop/privacy/disconnect/unknown state removes the braids without a tail.
-  Capture history cannot cross input turns/connections, and readings older than
-  250 ms fail unavailable. These are initial visual timings, not on-device latency
-  promises. Android's disabled-animations setting freezes decoration; backend
-  night on/unknown additionally dims the trace and limits displacement.
-  Decorative clocks stop below the visible lifecycle and resume from current facts.
-- Actual upstream recognition/reply text is shown by default, with no synthetic
-  transcript. Muting clears the shared session/pre-roll, cancels active voice and
-  releases the microphone; idle connections can stay attached while muted.
-  Transcript text is not persisted. Android screenshots
+- The dashboard stays visible and usable during voice. The voice controls sit on
+  the right in landscape and along the bottom in portrait. Trigger assistant
+  becomes Stop in the same spot until the turn and any playback drain finish.
+  The primary action is disabled while stopped; on a running Bluetooth-first
+  install it can still explicitly start the microphone. Mute remains a separate
+  privacy latch. The gear opens full-screen Settings, where music controls live.
+- A continuous mint band shows when Encore is taking mic input, including during
+  silence. A brighter highlight flows around the band with fresh mic RMS, and a
+  lilac highlight travels the opposite direction with
+  measured response playback. Quiet input gets a visual lift without changing
+  recording gain. Queued audio and missing samples do not create motion. This
+  visualizes levels; it does not distinguish speech from other sound or echo.
+- Processing and alerts have distinct edge colors. Healthy idle has no band;
+  mute, disconnect and unknown mic state remove any live mic indication without
+  a fade. Android's disabled-animations setting keeps the level changes but
+  removes the traveling highlight. Night mode dims the display-edge treatment.
+  Voice status is available on the Stop control to screen readers without visible
+  text over the dashboard. Transcript text is not persisted. Muting clears session
+  pre-roll, cancels active voice, and releases the microphone. Android screenshots
   are disabled for the running Activity, including locally revealed pairing keys.
 - Only server-requested Incubator follow-ups exist. No Assist, runtime route
   switching, Assist-only follow-up toggle, enrollment stream, advertised wire

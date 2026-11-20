@@ -4,40 +4,32 @@ import android.database.ContentObserver
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
-import androidx.compose.foundation.Canvas
+import androidx.compose.animation.core.*
 import androidx.compose.foundation.layout.Box
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
-import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.draw.drawWithCache
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.RoundRect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathMeasure
 import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.semantics.LiveRegionMode
-import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.liveRegion
-import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
-import kotlinx.coroutines.isActive
-import kotlin.math.PI
-import kotlin.math.cos
-import kotlin.math.exp
-import kotlin.math.sin
 import kotlin.math.sqrt
 
-private val InputMint = Color(0xff97e6d4)
-internal val OutputLilac = Color(0xffd5b6e8)
+private val MicMint = Color(0xff97e6d4)
+private val ReplyLilac = Color(0xffd5b6e8)
+private val WorkingBlue = Color(0xffa1c8ff)
 private val AlertAmber = Color(0xffffc88b)
-
-internal val EncoreState.inputBraidColor: Color get() = if (speakerRGB.size == 3)
-    Color(speakerRGB[0], speakerRGB[1], speakerRGB[2]) else InputMint
 
 @Composable internal fun systemReducedMotion(): Boolean {
     val resolver = LocalContext.current.contentResolver
@@ -52,128 +44,104 @@ internal val EncoreState.inputBraidColor: Color get() = if (speakerRGB.size == 3
     return reduced
 }
 
-/** Independent audio envelopes never drive capture, playback or speaker policy. */
-@Composable internal fun VoiceVisualization(state: EncoreState, reducedMotion: Boolean, modifier: Modifier = Modifier,
-    lightSurface: Boolean = false) {
+@Composable internal fun VoiceEdgeGlow(state: EncoreState, reducedMotion: Boolean, modifier: Modifier,
+    onMonitorOverlay: (Long, Boolean) -> Unit) {
+    val mic = state.microphoneVisible
+    val monitor = state.monitorId.takeIf { mic } ?: 0L
+    val freshMic = mic && state.waveform.isNotEmpty()
+    val band = when {
+        mic -> MicMint
+        state.visual == "alert" -> AlertAmber
+        state.visual in setOf("queued", "output") -> ReplyLilac
+        state.visual == "processing" -> WorkingBlue
+        else -> null
+    }
+    // Use the full-block RMS and the playback head's level, never queued audio or a synthesized waveform.
+    val input = if (freshMic) sqrt(state.level.coerceIn(0f, 1f)) else 0f
+    val playing = band != null && state.playbackLevel != null && state.outputState in setOf("playing", "draining")
+    val output = if (playing)
+        sqrt(state.playbackLevel?.coerceIn(0f, 1f) ?: 0f) else 0f
     val lifecycle by LocalLifecycleOwner.current.lifecycle.currentStateFlow.collectAsState()
-    val observing = lifecycle.isAtLeast(Lifecycle.State.STARTED)
-    // Safety and unknown facts remove both streams without an outgoing tail.
-    val mode = state.visual
-    val ink = Color(0xff0c141d)
-    val inputColor = if (lightSurface) lerp(state.inputBraidColor, ink, .64f) else state.inputBraidColor
-    val outputColor = if (lightSurface) lerp(OutputLilac, ink, .58f) else OutputLilac
-    val description = when (mode) {
-        "input" -> if (state.waveform.isEmpty()) "Microphone waveform awaiting samples" else "Live microphone waveform"
-        "processing" -> "Processing indicator"
-        "output" -> "Playback status indicator"
-        "queued" -> "Waiting for playback indicator"
-        "alert" -> "Alert status indicator"
-        else -> "Microphone waveform inactive"
-    }
-    val traceModifier = modifier.alpha(if (state.night == "off") 1f else .7f).semantics {
-        contentDescription = description
-        stateDescription = state.status + if (state.speakerName.isNotBlank())
-            " · input speaker reported by server: ${state.speakerName}" else ""
-        liveRegion = LiveRegionMode.Polite
-    }
-    Box(traceModifier) {
-        if (mode == "none") return@Box
-        val still = reducedMotion || state.night != "off"
-        key(state.generation, state.turn, observing) {
-            val inputLevel = remember(state.waveform) {
-                if (state.waveform.isEmpty()) 0f else
-                    sqrt(state.waveform.sumOf { (it * it).toDouble() } / state.waveform.size).toFloat().coerceIn(0f, 1f)
-            }
-            // Output goes behind input, with its own envelope and opposite flow.
-            LevelBraid(state.playbackLevel ?: 0f, state.outputState in setOf("playing", "draining") && state.playbackLevel != null,
-                outputColor, -1f, still, observing, Modifier.matchParentSize().semantics { contentDescription = "Response audio" })
-            LevelBraid(inputLevel, state.microphoneVisible && state.waveform.isNotEmpty(),
-                inputColor, 1f, still, observing, Modifier.matchParentSize().semantics { contentDescription = "Microphone audio" })
+    val still = reducedMotion || !lifecycle.isAtLeast(Lifecycle.State.STARTED)
 
-            var cycle by remember { mutableFloatStateOf(0f) }
-            LaunchedEffect(mode, still, observing) {
-                cycle = 0f
-                if (observing && !still && mode in setOf("processing", "queued", "alert")) {
-                    val start = withFrameNanos { it }
-                    while (isActive) withFrameNanos { cycle = ((it - start) % 3_200_000_000L).toFloat() / 3_200_000_000L }
-                }
+    val indicator = if (monitor != 0L) key(monitor) {
+        val view = LocalView.current
+        val notify by rememberUpdatedState(onMonitorOverlay)
+        val ready by rememberUpdatedState(freshMic)
+        val reported = remember(view) { booleanArrayOf(false) }
+        val drawn = remember(view) { Runnable {
+            if (ready && view.isShown && view.hasWindowFocus()) notify(monitor, true)
+            else reported[0] = false
+        } }
+        DisposableEffect(view, drawn) {
+            onDispose {
+                view.removeCallbacks(drawn)
+                notify(monitor, false)
             }
-            Canvas(Modifier.matchParentSize()) {
-                val center = size.height / 2
-                if (!state.microphoneVisible && state.outputState !in setOf("playing", "draining"))
-                    drawLine(if (mode == "queued") outputColor else inputColor,
-                        Offset(0f, center), Offset(size.width, center), 1.5.dp.toPx(), cap = StrokeCap.Round)
-                // Processing is an explicit fact, not inferred from quiet microphone PCM.
-                if (mode == "processing" || mode == "queued") {
-                    for (i in -1..1) {
-                        val opacity = if (still) .65f else .4f + .4f * (1 + cos(cycle * 2 * PI - i * .8).toFloat()) / 2
-                        drawCircle((if (lightSurface) ink else Color(0xffb7c4d2)).copy(alpha = opacity), 1.8.dp.toPx(),
-                            Offset(size.width / 2 + i * 9.dp.toPx(), size.height * .14f))
+        }
+        // Admit the exact request only after the visible mic band has been drawn.
+        Modifier.drawWithContent {
+            drawContent()
+            if (!reported[0] && freshMic && size.width > 0f && size.height > 0f && view.isShown && view.hasWindowFocus()) {
+                reported[0] = true
+                view.postOnAnimation(drawn)
+            }
+        }
+    } else Modifier
+
+    Box(modifier.then(indicator)) {
+        if (band != null) key(state.generation, state.turn, monitor) {
+            val micStrength by animateFloatAsState(input, if (still || !freshMic) snap() else tween(if (input > 0f) 45 else 110), label = "Mic glow")
+            val replyStrength by animateFloatAsState(output, if (still || !playing) snap() else tween(if (output > 0f) 55 else 125), label = "Reply glow")
+            val phase = if (!still && (input > 0f || output > 0f || (freshMic && micStrength > 0f) || (playing && replyStrength > 0f))) {
+                rememberInfiniteTransition(label = "Edge flow").animateFloat(0f, 1f,
+                    infiniteRepeatable(tween(2400, easing = LinearEasing)), label = "Perimeter position")
+            } else null
+            val dim = if (state.night == "on") .72f else 1f
+            Box(Modifier.matchParentSize().testTag("voice-edge-glow").drawWithCache {
+                val inset = 2.dp.toPx()
+                val outline = Path().apply {
+                    addRoundRect(RoundRect(Rect(inset, inset, size.width - inset, size.height - inset), CornerRadius(11.dp.toPx())))
+                }
+                val measure = PathMeasure().apply { setPath(outline, false) }
+                val segment = Path()
+                val bandStroke = Stroke(3.dp.toPx())
+                val softStroke = Stroke(12.dp.toPx(), cap = StrokeCap.Round)
+                val highlightStroke = Stroke(7.dp.toPx(), cap = StrokeCap.Round)
+                // The wider layers fade into the dashboard rather than creating a second hard edge.
+                val bloom = (36 downTo 12 step 4).map { width ->
+                    Stroke(width.dp.toPx(), cap = StrokeCap.Round) to (.025f + .055f * (36 - width) / 24f)
+                }
+                onDrawBehind {
+                    drawPath(outline, band.copy(alpha = .11f * dim), style = softStroke)
+                    drawPath(outline, band.copy(alpha = .71f * dim), style = bandStroke)
+                    fun light(color: Color, strength: Float, position: Float, direction: Int) {
+                        if (strength <= 0f || measure.length <= 0f) return
+                        if (still) {
+                            drawPath(outline, color.copy(alpha = .38f * strength * dim), style = softStroke)
+                            return
+                        }
+                        // Overlapping lengths make a soft tail that wraps cleanly around every corner.
+                        for (trail in 3 downTo 1) {
+                            val width = .045f * trail
+                            val start = ((position - if (direction > 0) width else 0f) % 1f + 1f) % 1f
+                            val end = start + width
+                            segment.reset()
+                            measure.getSegment(start * measure.length, end.coerceAtMost(1f) * measure.length, segment, true)
+                            if (end > 1f) measure.getSegment(0f, (end - 1f) * measure.length, segment, true)
+                            val opacity = (strength * 1.65f).coerceAtMost(1f) * dim
+                            val bloomOpacity = opacity / sqrt(trail.toFloat())
+                            for ((stroke, falloff) in bloom) {
+                                drawPath(segment, color.copy(alpha = falloff * bloomOpacity), style = stroke)
+                            }
+                            drawPath(segment, color.copy(alpha = (.48f / trail) * opacity), style = highlightStroke)
+                        }
                     }
+                    val flow = phase?.value ?: 0f
+                    light(MicMint, if (freshMic) micStrength else 0f, flow, 1)
+                    light(ReplyLilac, if (playing) replyStrength else 0f, .5f - flow, -1)
                 }
-                if (mode == "alert") {
-                    val pulse = if (still) .5f else (1 - cos(cycle * 2 * PI).toFloat()) / 2
-                    val separation = (5 + 7 * pulse).dp.toPx()
-                    for (side in listOf(-1, 1)) drawLine(if (lightSurface) Color(0xff986019) else AlertAmber,
-                        Offset(size.width * .06f, center + side * separation),
-                        Offset(size.width * .94f, center + side * separation), 2.dp.toPx(), cap = StrokeCap.Round)
-                }
-            }
+            })
         }
-    }
-}
-
-/** A level-reactive braid, not an oscilloscope or a speech/speaker detector. */
-@Composable private fun LevelBraid(raw: Float, available: Boolean, base: Color, direction: Float,
-    reducedMotion: Boolean, observing: Boolean, modifier: Modifier) {
-    // Compress the mic's visual range before smoothing, so quiet speech rises
-    // above a flat line without stretching the release or changing output gain.
-    val target = if (direction > 0f) sqrt(raw * (2f - raw)) else raw
-    val latestLevel by rememberUpdatedState(target)
-    var level by remember { mutableFloatStateOf(0f) }
-    var phase by remember { mutableFloatStateOf(0f) }
-    LaunchedEffect(reducedMotion, observing, available) {
-        level = 0f
-        phase = 0f
-        if (observing && !reducedMotion && available) {
-            var previous = withFrameNanos { it }
-            while (isActive) withFrameNanos { now ->
-                val seconds = ((now - previous) / 1_000_000_000f).coerceIn(0f, .05f)
-                previous = now
-                val tau = if (latestLevel > level) .022f else .095f
-                level += (latestLevel - level) * (1f - exp(-seconds / tau))
-                if (level > .0001f) phase = (phase + direction * seconds * 1.6f) % (2 * PI).toFloat()
-            }
-        }
-    }
-    Canvas(modifier) {
-        if (!available) return@Canvas
-        val energy = if (reducedMotion || !observing) target else level
-        val strength = if (direction > 0f || reducedMotion) energy else energy * 1.6f / (1f + .6f * energy)
-        val time = (if (reducedMotion || !observing) 0f else phase) + if (direction < 0) (PI / 2).toFloat() else 0f
-        drawBraid(strength, time, reducedMotion,
-            listOf(base, lerp(base, Color.White, .32f), lerp(base, Color.Black, .22f)))
-    }
-}
-
-private fun DrawScope.drawBraid(strength: Float, time: Float, reducedMotion: Boolean, colors: List<Color>) {
-    for (line in 0..2) {
-        val path = Path()
-        var previous = Offset(0f, size.height / 2)
-        path.moveTo(previous.x, previous.y)
-        for (i in 1..64) {
-            val x = i / 64f
-            val envelope = sin(x * PI).toFloat()
-            val wave = .78f * sin(x * PI * 4 - time + line * 2 * PI / 3).toFloat() +
-                .22f * sin(x * PI * 7 + time * 2 + line).toFloat()
-            val taper = if (reducedMotion) envelope * envelope else envelope
-            val y = size.height / 2 + strength * taper * wave * size.height *
-                (if (reducedMotion) .18f else .46f) * (1 - line * .12f)
-            val point = Offset(x * size.width, y)
-            path.quadraticBezierTo(previous.x, previous.y, (previous.x + point.x) / 2, (previous.y + point.y) / 2)
-            previous = point
-        }
-        path.quadraticBezierTo(previous.x, previous.y, size.width, size.height / 2)
-        drawPath(path, colors[line].copy(alpha = .85f), style = Stroke((2.2f - line * .35f).dp.toPx(), cap = StrokeCap.Round))
     }
 }
