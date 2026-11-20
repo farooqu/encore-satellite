@@ -26,6 +26,7 @@ func Provision(ctx context.Context, localName string, options improv.Options) (e
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	capabilities := options.Capabilities()
 	writes := make(chan []byte, 8)
 	chars := []CharSpec{
 		{UUID: improv.StateUUID, Flags: []string{"read", "notify"}, Value: []byte{byte(improv.AuthorizationRequired)}},
@@ -42,11 +43,11 @@ func Provision(ctx context.Context, localName string, options improv.Options) (e
 			}
 		}},
 		{UUID: improv.RPCResultUUID, Flags: []string{"read", "notify"}},
-		{UUID: improv.CapabilitiesUUID, Flags: []string{"read"}, Value: []byte{byte(improv.CanDeviceInfo)}},
+		{UUID: improv.CapabilitiesUUID, Flags: []string{"read"}, Value: []byte{byte(capabilities)}},
 	}
 	p, err := OpenPeripheral("/org/encore/improv", improv.ServiceUUID, chars, AdvertSpec{
 		ServiceUUIDs: []string{improv.ServiceUUID}, LocalName: localName,
-		ServiceData: map[string][]byte{improv.ServiceDataUUID: improv.ServiceData(improv.AuthorizationRequired, improv.CanDeviceInfo)},
+		ServiceData: map[string][]byte{improv.ServiceDataUUID: improv.ServiceData(improv.AuthorizationRequired, capabilities)},
 	})
 	if err != nil {
 		return err
@@ -80,13 +81,13 @@ func Provision(ctx context.Context, localName string, options improv.Options) (e
 		}
 		state = improv.State(value[0])
 		if p.Advertising() {
-			updateErr = p.SetServiceData(map[string][]byte{improv.ServiceDataUUID: improv.ServiceData(state, improv.CanDeviceInfo)})
+			updateErr = p.SetServiceData(map[string][]byte{improv.ServiceDataUUID: improv.ServiceData(state, capabilities)})
 			if updateErr != nil {
 				cancel()
 			}
 		} else {
 			select {
-			case updates <- improv.Advertisement(state, improv.CanDeviceInfo):
+			case updates <- improv.Advertisement(state, capabilities):
 			case <-ctx.Done():
 			}
 		}
@@ -103,7 +104,7 @@ func Provision(ctx context.Context, localName string, options improv.Options) (e
 	started := make(chan struct{})
 	advertDone := make(chan error, 1)
 	go func() {
-		advertDone <- linuxble.OfferKernel(ctx, uint16(i), improv.Advertisement(improv.AuthorizationRequired, improv.CanDeviceInfo), improv.ScanResponse(localName), updates, func() error { close(started); return nil })
+		advertDone <- linuxble.OfferKernel(ctx, uint16(i), improv.Advertisement(improv.AuthorizationRequired, capabilities), improv.ScanResponse(localName), updates, func() error { close(started); return nil })
 	}()
 	select {
 	case err := <-advertDone:

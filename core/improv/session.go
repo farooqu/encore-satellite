@@ -21,6 +21,15 @@ type Options struct {
 	Health func() error
 }
 
+// Capabilities describes the optional RPCs backed by this configuration.
+// The per-device name enables device information; Wi-Fi joining is required.
+func (o Options) Capabilities() Capabilities {
+	if o.Name != "" {
+		return CanDeviceInfo
+	}
+	return 0
+}
+
 // Run handles bounded Improv RPCs, including fragmented ATT writes. update is
 // called serially with characteristic values. Transport must bound writes and
 // stop accepting them when ctx ends. No credentials are sent back to clients.
@@ -98,6 +107,10 @@ func Run(ctx context.Context, options Options, writes <-chan []byte, update func
 			setError(ErrNone)
 			switch frame.Command {
 			case CmdDeviceInfo:
+				if options.Capabilities()&CanDeviceInfo == 0 {
+					setError(ErrUnknownCommand)
+					continue
+				}
 				if len(frame.Data) != 0 {
 					setError(ErrInvalidRPC)
 					continue

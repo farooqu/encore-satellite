@@ -12,6 +12,38 @@ import (
 	"github.com/farooqu/encore-satellite/core/improv"
 )
 
+func TestDeviceInfoCapabilityMatchesRPC(t *testing.T) {
+	for _, name := range []string{"", "kitchen-dot"} {
+		options := improv.Options{Name: name, Authorize: make(chan struct{}), Join: func(context.Context, improv.WiFi) (string, error) {
+			t.Fatal("device-info request attempted to join Wi-Fi")
+			return "", nil
+		}}
+		writes := make(chan []byte, 1)
+		writes <- (improv.Frame{Command: improv.CmdDeviceInfo}).Bytes()
+		close(writes)
+		var result []byte
+		var lastError improv.Error
+		err := improv.Run(t.Context(), options, writes, func(uuid string, value []byte) {
+			switch uuid {
+			case improv.RPCResultUUID:
+				result = value
+			case improv.ErrorUUID:
+				lastError = improv.Error(value[0])
+			}
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if name == "" {
+			if options.Capabilities() != 0 || result != nil || lastError != improv.ErrUnknownCommand {
+				t.Fatalf("device info exposed without identity: %v, %x, %v", options.Capabilities(), result, lastError)
+			}
+		} else if options.Capabilities() != improv.CanDeviceInfo || !bytes.Contains(result, []byte(name)) || lastError != improv.ErrNone {
+			t.Fatalf("device info not exposed with identity: %v, %x, %v", options.Capabilities(), result, lastError)
+		}
+	}
+}
+
 func TestPhysicalAuthorizationFragmentedWiFiAndRetry(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
