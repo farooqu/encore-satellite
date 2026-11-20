@@ -187,15 +187,37 @@ is signed. For stable, change `--channel stable` and the output filename; it
 rejects prerelease cores, including **0.1.1-dev.1**. Stable promotion signs a new
 entry selecting the same already-reviewed bytes/revision, without rebuilding,
 rewriting the receipt, changing APK identity or relabelling bundle provenance.
-Stable safety/support qualification must be approved separately.
+Stable can be verified with `activate=false`, but this workflow refuses to
+activate it even if publication is enabled. Retaining release assets does not
+select a channel. Enabling Stable requires a separate policy change and
+safety/support qualification.
+
+Before the first feed dry run, confirm `refs/heads/release-feeds` does not
+exist. With separate approval, bootstrap it with a parentless empty commit,
+not a branch cut from `main`:
+
+```sh
+tree=$(git mktree </dev/null) &&
+  checkpoint=$(git commit-tree "$tree" -m 'Initialize empty feed checkpoints') &&
+  git push origin "$checkpoint:refs/heads/release-feeds"
+```
+
+The push must not be forced. If the branch already exists, inspect and preserve
+its checkpoints. Leave Pages off during bootstrap; when approved, select
+**GitHub Actions** as the Pages source, not branch deployment. The activation
+workflow archives the checkpoint tree for Pages, so it must never contain the
+repository checkout. Bootstrap does not create or serve a feed.
 
 After permission to upload the signed entry, put `dev.jws` or `stable.jws` in a
 new draft feed-staging Release. Dispatch `activate-feed.yml` on main with the
-Android revision, channel, staging tag and receipt hash, initially `activate=false`.
+Android revision or Biscuit core version, channel, staging tag and receipt hash,
+initially `activate=false`.
 It requires a published immutable matching artifact, re-downloads/verifies all
 its sources/assets, validates the signed entry against the receipt and root,
-and checks freshness and existing per-channel checkpoints. Only an explicitly
-approved `activate=true` dispatch commits history and deploys Pages.
+and checks freshness and existing per-channel checkpoints. Actual Dev activation
+also requires `publishing_enabled=true`, `RELEASE_SETUP_APPROVED=true` in
+`release-feeds`, and the environment approval. Only an explicitly approved
+`activate=true` dispatch commits history and deploys Pages.
 
 Entries live at `<base>/<target>/incubator/{dev,stable}.jws`. Other channels and
 targets remain untouched. Revisions and core precedence cannot decrease on a

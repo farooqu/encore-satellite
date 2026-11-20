@@ -13,7 +13,7 @@ on:
         type: string
         required: true
       channel:
-        description: Explicit channel (stable rejects prerelease cores)
+        description: Dev can be activated; Stable is verification-only
         type: choice
         options: [dev, stable]
         required: true
@@ -59,9 +59,13 @@ jobs:
       EXPECTED_CERTIFICATE: ${{ vars.ANDROID_CERTIFICATE_SHA256 }}
       SETUP_APPROVED: ${{ vars.RELEASE_SETUP_APPROVED }}
     steps:
-      - name: Refuse feed activation before owner-approved setup
+      - name: Require Dev and owner-approved setup for activation
         if: inputs.activate
         run: |
+          if test "$CHANNEL" != dev; then
+            echo '::error::Only the Dev feed can be activated. Stable is verification-only.'
+            exit 1
+          fi
           if test "$SETUP_APPROVED" != true; then
             echo '::error::Activation is disabled until RELEASE_SETUP_APPROVED is explicitly configured.'
             exit 1
