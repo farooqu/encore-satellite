@@ -166,7 +166,11 @@ jobs:
 
   retain-dev:
     needs: sign
-    if: github.event_name == 'workflow_run' || inputs.operation == 'deliver-dev'
+    # The automatic preflight is skipped for a dispatch. Check the direct
+    # dependency explicitly rather than relying on transitive success().
+    if: >-
+      !cancelled() && needs.sign.result == 'success' &&
+      (github.event_name == 'workflow_run' || inputs.operation == 'deliver-dev')
     permissions:
       contents: write
     uses: ./.github/workflows/retain-release.yml
@@ -177,6 +181,7 @@ jobs:
 
   advance-dev:
     needs: [sign, retain-dev]
+    if: ${{ !cancelled() && needs.sign.result == 'success' && needs.retain-dev.result == 'success' }}
     permissions:
       contents: write
       pages: write
