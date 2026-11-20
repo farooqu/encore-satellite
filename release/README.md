@@ -9,10 +9,11 @@ releases or entries in the ledger. No target is declared release-supported.
 The [Biscuit build and installation guide](../devices/biscuit/packaging/kernel61/README.md)
 covers the current Linux 6.1/AArch64 starter: recovery, kernel, Alpine userspace
 and the native runtime. The dedicated kernel workflow checks the pinned source.
-The separate ARM64 candidate workflow can build an unsigned starter after
-successful main checks if its immutable input release and archive hashes are
-pinned. It cannot sign, publish or activate a feed. See the
-[publishing runbook](publishing.md) for the offline gates and exact-asset handoff.
+The keyless ARM64 build produces a native A/B seed, full OTA and source kits
+from one exact main commit once its external-only lock can be resolved. The
+separate, manual Biscuit workflow signs the reviewed receipt and optional feed
+on GitHub. Neither workflow publishes or activates a feed. See the
+[publishing runbook](publishing.md) for the exact-artifact handoff.
 
 [Android signing and updates](android-updates.md) remains independent. Manual
 publication and Android feed workflows default to dry-run and require separate

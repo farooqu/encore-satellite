@@ -202,17 +202,25 @@ class ADB:
             raise RuntimeError("USB write read-back checksum mismatch")
 
 
-def preflight(adb):
+def preflight(adb, *, native=False):
     if adb.shell("id -u").strip() != b"0":
         raise ValueError("root adb in TWRP is required")
     adb.shell("test -x /sbin/recovery")
     if adb.shell("cat /proc/idme/device_type_id").strip(b"\0\r\n ") != b"A3S5BH2HU6VAYF":
         raise ValueError("this installer is only for Echo Dot 2 / biscuit")
-    for name, number in (("misc", 8), ("recovery", 12), ("cache", 15), ("userdata", 16)):
+    partitions = [("misc", 8), ("recovery", 12), ("cache", 15), ("userdata", 16)]
+    if native:
+        partitions += [("boot_a", 10), ("boot_b", 11)]
+    for name, number in partitions:
         # TWRP can expose several aliases, and its readlink accepts one path.
         values = adb.shell(f'for path in /dev/block/platform/*/by-name/{name}; do readlink -f "$path"; done').decode().splitlines()
         if not values or any(value != f"/dev/block/mmcblk0p{number}" for value in values):
             raise ValueError(f"unexpected {name} partition layout; refusing writes")
+    if native:
+        for number, start in ((10, 163840), (11, 196608)):
+            sysfs = f"/sys/class/block/mmcblk0p{number}"
+            if adb.shell(f"cat {sysfs}/start {sysfs}/size").split() != [str(start).encode(), b"32768"]:
+                raise ValueError("unexpected native boot store geometry; refusing writes")
 
 
 def update_eligibility(adb, manifest, store):
@@ -441,9 +449,44 @@ def apply_locked(args, adb, manifest, files, store, name, recovery, image):
     # No automatic reboot: the USB recovery connection is the user's escape path.
 
 
+def install_native(args):
+    # The same full receipt check used before GitHub release retention. No
+    # locally hashed or unsigned seed can reach the native installer.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "release"))
+    from pipeline import native_starter, verify
+    from kernel61 import starter_install
+
+    receipt = verify(args.candidate, args.public_key, args.receipt_sha256)
+    if receipt["target"] != "biscuit" or not native_starter(receipt):
+        raise ValueError("signed native Biscuit candidate required")
+    artifact = receipt["artifact"]
+    manifest, files = starter_install.load_native_bundle(args.candidate / artifact["name"], artifact["sha256"])
+    name = device_name(args.serial, args.name)
+    adb = ADB(args.serial)
+    preflight(adb, native=True)
+    starter_install.check_stock_firmware(adb)
+    recovery = adb.shell("sha256sum /dev/block/mmcblk0p12").decode().split()[0]
+    if recovery != args.twrp_sha256:
+        raise ValueError("current full recovery partition does not match the independently reviewed TWRP hash")
+    if not args.apply:
+        print(f"Read-only signed native preflight passed for {name}. Apply checks empty state and retains full backup before writes.")
+        return
+    for mount, number in (("/cache", 15), ("/data", 16)):
+        adb.shell(f"mountpoint -q {mount} || mount {mount}; "
+                  f"source=$(awk '$2 == \"{mount}\" && $3 == \"ext4\" && $4 ~ /^rw(,|$)/ {{print $1}}' /proc/mounts); "
+                  f"test \"$(readlink -f \"$source\")\" = /dev/block/mmcblk0p{number}")
+    lock = "/cache/.encore-install-lock"
+    adb.shell(f"umask 077; mkdir {lock}")
+    try:
+        starter_install.install_native_locked(adb, args, manifest, files, name)
+    finally:
+        adb.shell(f"rmdir {lock}")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    p = parser.add_subparsers(required=True).add_parser("install", help="fresh Linux 6.1/AArch64 installation")
+    commands = parser.add_subparsers(required=True)
+    p = commands.add_parser("install", help="fresh recovery-based Linux 6.1/AArch64 installation")
     p.set_defaults(command="install-arm64")
     p.add_argument("--serial", required=True, help="exact adb device serial (no implicit device selection)")
     p.add_argument("--bundle", type=Path, required=True)
@@ -453,10 +496,20 @@ def main():
     p.add_argument("--name", help="new DNS device name; no old configuration is imported")
     p.add_argument("--twrp-sha256", required=True, help="SHA256 of the independently verified full original recovery partition")
     p.add_argument("--backup-dir", type=Path, required=True, help="new private local directory for recovery backups")
+    p = commands.add_parser("install-native", help="fresh signed native A/B installation through TWRP USB")
+    p.set_defaults(command="install-native")
+    p.add_argument("--serial", required=True)
+    p.add_argument("--candidate", type=Path, required=True, help="verified GitHub signed candidate directory")
+    p.add_argument("--receipt-sha256", required=True, help="independently reviewed receipt JSON SHA256")
+    p.add_argument("--public-key", type=Path, required=True, help="pinned Ed25519 public root PEM")
+    p.add_argument("--twrp-sha256", required=True, help="independently verified full original recovery SHA256")
+    p.add_argument("--backup-dir", type=Path, required=True, help="new private rollback backup directory")
+    p.add_argument("--name", help="new DNS device name")
+    p.add_argument("--apply", action="store_true", help="perform device writes; otherwise read-only preflight")
     args = parser.parse_args()
     try:
-        install(args)
-    except (ValueError, OSError, RuntimeError, subprocess.SubprocessError, zipfile.BadZipFile, tarfile.TarError) as error:
+        (install_native if args.command == "install-native" else install)(args)
+    except (ValueError, KeyError, OSError, RuntimeError, subprocess.SubprocessError, zipfile.BadZipFile, tarfile.TarError) as error:
         parser.exit(1, f"Encore provisioning failed: {error}\n")
 
 

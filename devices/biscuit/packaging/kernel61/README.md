@@ -4,6 +4,37 @@ New Biscuit builds use Linux 6.1 and native AArch64 Alpine and Go binaries.
 The development starter below is the supported local package format; neither
 historical ARMv7 packages nor RAM-root trial artifacts are install inputs.
 
+## Signed native A/B pilot
+
+Use the `biscuit-native-signed` candidate directory from the
+[GitHub signing workflow](../../../../release/publishing.md#biscuit-native-ab-github-signing),
+not the unsigned seed or the OTA ZIP by itself. From the candidate's exact
+source checkout, with the unit in reviewed Biscuit TWRP via fastboot, run
+`python3 devices/biscuit/packaging/install.py install-native` with `--serial`,
+`--candidate`, `--receipt-sha256`, `--public-key`, `--twrp-sha256`, and a new
+private `--backup-dir`. The default checks the signed bytes and device layout
+without writing. An explicitly approved `--apply` requires the Encore store
+and data paths to be absent; it neither imports nor erases old enrollment.
+Keep the previously enrolled test unit's backups and separately review its
+clean-state transition before running apply.
+
+Direct provisioning or clean reinstallation replaces both Encore slots with
+the selected version, so the device cannot fall back to stale software against
+the newly provisioned state. An OTA writes only the inactive slot and keeps
+the previous confirmed generation available as a fallback if the new slot
+fails its boot or health trial.
+
+Apply stages both seed boot images and runtimes, verifies the two boot-store
+readbacks, and selects A. It backs up boot A, boot B, recovery and MISC before
+writes; it leaves recovery and stock system partitions unchanged and does not
+reboot. If apply is interrupted, stay in recovery and inspect the backups
+instead of retrying over the partial install. The hardware owner controls
+fastboot entry and the first normal boot. Enroll with Improv Wi-Fi, then Voice
+Incubator and Home Assistant ESPHome. After Home Assistant installs the next
+signed update, verify the confirmed slot and version before any fastboot
+round trip. For read-only verification, never use `set_active`, `flash`, or
+`erase`; a normal reboot into a *pending* slot can consume a boot attempt.
+
 ## Private persistent ARM64 starter
 
 ```sh

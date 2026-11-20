@@ -1,0 +1,110 @@
+name: Sign a reviewed Biscuit native candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Test the protected approval gate without a key, or sign an exact candidate
+        type: choice
+        options: [check-gate, sign]
+        default: check-gate
+      build_run:
+        description: For signing, successful Biscuit ARM64 build run ID
+        type: string
+      source:
+        description: For signing, exact first-parent main SHA in the reviewed receipt
+        type: string
+      receipt_sha256:
+        description: For signing, reviewed unsigned receipt.json SHA256
+        type: string
+      channel:
+        description: Also sign a feed entry (never deploys it)
+        type: choice
+        options: [none, stable, dev]
+        default: none
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  sign:
+    if: github.repository == 'farooqu/encore-satellite' && github.ref == 'refs/heads/main' && github.ref_protected
+    environment: biscuit-signing
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      BUILD_RUN: ${{ inputs.build_run }}
+      SOURCE: ${{ inputs.source }}
+      RECEIPT_SHA256: ${{ inputs.receipt_sha256 }}
+      CHANNEL: ${{ inputs.channel }}
+    steps:
+      - name: Confirm environment approval without accessing secrets
+        if: inputs.operation == 'check-gate'
+        run: echo 'The biscuit-signing environment released this job. No credentials or candidate accessed.' >> "$GITHUB_STEP_SUMMARY"
+      # Run only the separately approved signing workflow's code, never check
+      # out the input candidate SHA or run code from the candidate artifact.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        if: inputs.operation == 'sign'
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Download the exact reviewed candidate from this repository
+        if: inputs.operation == 'sign'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$BUILD_RUN" =~ ^[1-9][0-9]*$ && "$SOURCE" =~ ^[0-9a-f]{40}$ && "$RECEIPT_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          git rev-list --first-parent HEAD | grep -Fx "$SOURCE" > /dev/null
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BUILD_RUN" | jq -e --arg repo "$GITHUB_REPOSITORY" '
+            .path == ".github/workflows/biscuit-arm64-dev.yml" and .head_repository.full_name == $repo and
+            .head_branch == "main" and .conclusion == "success" and
+            (.event == "workflow_run" or .event == "workflow_dispatch")' > /dev/null
+          gh run download "$BUILD_RUN" --repo "$GITHUB_REPOSITORY" --name biscuit-native-unsigned --dir "$RUNNER_TEMP/candidate"
+          receipt="$RUNNER_TEMP/candidate/receipt.json"
+          printf '%s  %s\n' "$RECEIPT_SHA256" "$receipt" | sha256sum -c -
+          jq -e --arg source "$SOURCE" '.target == "biscuit" and .source == $source and
+            .compatibility.format == "encore-biscuit-native-ab-v1"' "$receipt" > /dev/null
+      - name: Sign the receipt and optional feed with the pinned Ed25519 root
+        if: inputs.operation == 'sign'
+        env:
+          PRIVATE_KEY: ${{ secrets.BISCUIT_METADATA_PRIVATE_KEY_PEM }}
+          PUBLIC_KEY: ${{ vars.BISCUIT_METADATA_PUBLIC_KEY_PEM }}
+        run: |
+          set -euo pipefail
+          umask 077
+          test -n "$PRIVATE_KEY" && test -n "$PUBLIC_KEY"
+          key=$(mktemp "$RUNNER_TEMP/biscuit-key.XXXXXX")
+          trap 'rm -f "$key"' EXIT
+          printf '%s\n' "$PRIVATE_KEY" > "$key"
+          unset PRIVATE_KEY
+          printf '%s\n' "$PUBLIC_KEY" > "$RUNNER_TEMP/biscuit-root.pem"
+          candidate="$RUNNER_TEMP/candidate"
+          python3 release/pipeline.py sign-receipt "$candidate" --key "$key" --receipt-sha256 "$RECEIPT_SHA256"
+          python3 release/pipeline.py verify "$candidate" --public-key "$RUNNER_TEMP/biscuit-root.pem" --receipt-sha256 "$RECEIPT_SHA256"
+          case "$CHANNEL" in
+            stable|dev)
+              issued=$(date +%s)
+              mkdir "$RUNNER_TEMP/signed-feed"
+              python3 release/pipeline.py feed "$candidate" --key "$key" --public-key "$RUNNER_TEMP/biscuit-root.pem" \
+                --receipt-sha256 "$RECEIPT_SHA256" --channel "$CHANNEL" --issued "$issued" \
+                --expires "$((issued + 604800))" --output "$RUNNER_TEMP/signed-feed/$CHANNEL.jws"
+              ;;
+            none) ;;
+            *) exit 1 ;;
+          esac
+          printf 'Signed Biscuit native candidate `%s` from `%s`. Receipt SHA256: `%s`. Nothing published or activated.\n' \
+            "$BUILD_RUN" "$SOURCE" "$RECEIPT_SHA256" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: inputs.operation == 'sign'
+        with:
+          name: biscuit-native-signed
+          path: ${{ runner.temp }}/candidate
+          if-no-files-found: error
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: inputs.operation == 'sign' && inputs.channel != 'none'
+        with:
+          name: biscuit-native-signed-feed
+          path: ${{ runner.temp }}/signed-feed
+          if-no-files-found: error

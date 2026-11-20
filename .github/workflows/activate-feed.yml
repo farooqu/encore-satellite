@@ -18,7 +18,7 @@ on:
         options: [dev, stable]
         required: true
       staging_tag:
-        description: Draft release holding the offline-signed dev.jws or stable.jws
+        description: Draft release holding the reviewed signed dev.jws or stable.jws
         type: string
         required: true
       receipt_sha256:
@@ -73,7 +73,7 @@ jobs:
       - name: Confirm checked-in publication approval
         if: inputs.activate
         run: python3 -c "import json; assert json.load(open('release/dev-automation.json'))['publishing_enabled'] is True, 'Publishing is disabled in checked-in policy'"
-      - name: Verify immutable release and offline-signed channel selection
+      - name: Verify immutable release and signed channel selection
         run: |
           set -euo pipefail
           case "$TARGET" in

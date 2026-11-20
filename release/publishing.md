@@ -9,6 +9,49 @@ are separate steps. Biscuit's main-push workflow prepares unsigned candidates
 only, once approved inputs are pinned. Android has its own APK checks and
 protected signing workflow. Neither workflow activates a feed.
 
+## Biscuit native A/B GitHub signing
+
+The keyless Biscuit build uploads `biscuit-native-unsigned` after an exact main
+build with the external inputs below. Its receipt binds the seed ZIP, the OTA
+ZIP, the build evidence and matching sources. Both ZIPs must have the same
+two boot images and the same runtime; repeat builds must match both ZIPs.
+The seed is for a fresh install. The OTA is for existing native installs only.
+
+Use the manual **Sign a reviewed Biscuit native candidate** workflow on
+protected `main`, with the build run ID, exact source SHA and the separately
+reviewed receipt SHA256. Provide `BISCUIT_METADATA_PRIVATE_KEY_PEM` as an
+environment secret and `BISCUIT_METADATA_PUBLIC_KEY_PEM` as a variable in
+`biscuit-signing`. The key must match the Ed25519 root compiled into Biscuit.
+Restrict the environment to exact `main`, require approval and disable
+administrator deployment bypass. Before adding the key, dispatch
+`operation=check-gate` and verify it waits for environment approval; after
+approval that run performs no checkout, download or secret access.
+Then use `operation=sign` on reviewed workflow code.
+
+The pilot uses an owner-approved solo trust model: append-only `main`, owner
+review in Amp before direct pushes, and an owner-approved environment gate
+that permits self-review. This is not independent review or protection from
+compromise of that account; anyone allowed to push to main can change signing
+code. Before adding other writers, require reviewed changes and independent
+approval or move signing to a separately controlled repository or service.
+
+The signing job never runs candidate code. It uploads `biscuit-native-signed`
+with the seed, OTA and signed receipt. Select `stable` or `dev` to also produce
+a separate signed feed artifact for that channel; select `none` for the base
+if it does not need a feed. GitHub signing does not publish the release or
+activate the feed. The existing retain and activate workflows accept the new
+receipt format with target `biscuit` and core version; native feeds are stored
+under `biscuit-native-ab/incubator/` so they cannot affect recovery installs.
+
+For the pilot, install the first exact signed seed with the
+[native installer](../devices/biscuit/packaging/kernel61/README.md#signed-native-ab-pilot).
+After fresh enrollment, retain a newer ordinary release and activate its
+signed **native** feed on the selected channel. Install through Home Assistant.
+USB verification checks that the new version is running and confirmed, that
+the former slot still holds its previous version, and that enrollment survives
+a further reboot. A later ordinary update writes the opposite slot. Do not
+mirror the new version onto both slots; that discards the rollback version.
+
 ## Biscuit ARM64 public dev starter
 
 The ARM64 starter is a signed fresh-install download, not an OTA feed entry.
@@ -27,43 +70,39 @@ rebuilding or retagging. For runtime OTA, such a promotion would sign new
 channel metadata for the same rootfs bytes, not put the starter ZIP on a feed.
 Release promotion is not implemented by the automatic dev workflow.
 
-1. Once the pinned inputs and their distribution are approved, retain them in
-   an immutable public input release and commit its tag in
-   `devices/biscuit/packaging/kernel61/ci-inputs.json` with the `source_sha256`
-   map and any changes to the builder's existing digest pins. It must contain `Image`,
-   `biscuit-arm64-probe.dtb`, `audited-header.bin`,
-   `rootfs.tar.gz`, and `ca-certificates.crt`. Following successful Foundation
-   checks for a same-repository main push, `biscuit-arm64-dev.yml` builds and
-   compares both the starter ZIP and standalone runtime archive across two
-   assemblies of that exact source. Each version's starter is a complete first
-   install on a supported Dot; it does not require an earlier Encore version.
-   Installs predating this release path use a one-time fresh install through
-   recovery/fastboot. They are not an OTA compatibility target.
-   The standalone archive is byte-for-byte the ZIP's `rootfs.tar.gz`, not a
-   delta from the previous build. It is an unsigned runtime OTA payload, not an
-   update offer, and does not update the recovery kernel. Both fields set to
-   `null` skip assembly. To change inputs, publish a new immutable tag and update the pin in
-   a reviewed commit. Do not move the old tag or change a GitHub variable.
-   Manual dispatch only produces an unsigned candidate, even after setup.
-2. Include `kernel-source.tar.gz` (matching Linux 6.1 source/config/patches)
-   and `alpine-go-source.tar.gz` (matching Alpine/Go corresponding source and
-   notices) in that reviewed immutable input release. Use those exact filenames
-   as `source_sha256` keys, with lowercase SHA-256 of each approved archive.
-   The build checks both archives before assembly; a missing or mismatched
-   archive prevents a CI candidate. Preparation, signing and publication also
-   check both archive names and hashes against the exact receipt commit. Matching
-   hashes establish byte identity, not source completeness. Do not distribute
-   stock radio firmware.
+1. `devices/biscuit/packaging/kernel61/ci-inputs.json` locks only external
+   bytes. CI fetches the pinned upstream Linux source and Go archives from
+   their upstream URLs. Once approved for this use, retain the exact other
+   four files (`alpine-apks.tar.gz`, `alpine-source.tar.gz`, `apk-tools-static.apk`,
+   `audited-header.bin`) at an immutable tag and set `external_bundle_tag` in a
+   reviewed commit. Null leaves GitHub artifact assembly disabled. Do not
+   republish the upstream kernel input archive or include stock radio firmware.
+   For a private, local build, supply all seven locked files directly to
+   `locked_build.py --inputs`; no release tag or upload is required.
+2. After Foundation checks, `biscuit-arm64-dev.yml` checks out the exact main
+   commit, builds Linux and the DTB from that tree's recipe, and constructs
+   Alpine from the locked APKs, not from an earlier Encore image. It emits one
+   version's complete starter ZIP and matching unsigned runtime payload, with
+   byte-identical repeat assemblies, the two corresponding source kits and
+   evidence. Dispatch with a full first-parent main SHA to replay that commit
+   and its lock. This checks repeat packaging; it does not claim identical
+   rebuilds across arbitrary build hosts. Retention and approval of matching
+   source and notices still require review before any distribution.
+   Each starter works for a first Encore install on supported hardware without
+   an earlier Encore version. Legacy installs can do a one-time fresh install
+   via recovery/fastboot. The runtime archive is the ZIP's exact `rootfs.tar.gz`,
+   not a delta or a signed update offer. Runtime OTA only accepts matching
+   recovery compatibility (kernel, DTB and recovery protocol). Treat incompatible
+   releases as a maintenance/recovery install, not a runtime feed update for
+   the installed cohort. Never rewrite the sole recovery partition via OTA.
 3. Qualify the **exact** ZIP before publication: fresh enrollment and HA
    reconnect, explicit first recovery entry, normal restart, unplug/replug
    after re-arm, and recovery/rollback. Keep both stock system slots intact.
    Document the power-cut window before re-arm. This ZIP is distinct from the
    p12-only repair for an enrolled R22.
-4. Keep the Echo Dot private key outside this GitHub repository, including its
-   Actions environments. Direct pushes to `main` can change workflow and
-   signing code, so even a main-only environment is not a trust boundary.
-   CI builds unsigned candidates only. Automatic signed publication needs an
-   independently controlled signer and publisher; don't enable it here.
+4. The keyless build workflow must never receive the Echo Dot private key.
+   The manual signing job above is restricted to native candidates. The
+   recovery-based workflow below uses an independently controlled signer.
 
 Without the key present, run `pipeline.py prepare` from a clean checkout of the
 built SHA with `target: biscuit`, `format: encore-biscuit-arm64-starter-v1`, no
