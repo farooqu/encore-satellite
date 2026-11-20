@@ -42,7 +42,7 @@ run() {
     base) exec /etc/encore/boot.sh;;
     health)
       # On an update trial the clock runs even if base or app startup stalls.
-      if test -f /run/encore/arm64-update-trial; then
+      if test -f /run/encore/arm64-update-trial || test -f /run/encore/native-watchdog-armed; then
         exec /usr/local/sbin/encore-health supervised
       fi;;
   esac
@@ -85,7 +85,7 @@ run() {
         wait_for_marker enrollment-ready
         test -s /run/encore/bluetooth-ready
         wait_for test -s /run/udhcpc.pid
-        /usr/local/sbin/slotctl arm
+        if ! test -f /run/encore/native-ab; then /usr/local/sbin/slotctl arm; fi
         touch /run/encore/app-started
         exec /usr/local/sbin/encore-run
       fi

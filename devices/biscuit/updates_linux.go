@@ -3,6 +3,7 @@ package biscuit
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"github.com/farooqu/encore-satellite/backends/esphome/controls"
+	"github.com/farooqu/encore-satellite/devices/biscuit/internal/nativeab"
 	"github.com/farooqu/encore-satellite/platforms/linuxupdate"
 	"github.com/ygelfand/go-esphome-device/api"
 	"google.golang.org/protobuf/proto"
@@ -43,6 +45,11 @@ type updateSelection struct {
 	Generation uint64 `json:"generation"`
 }
 
+type arm64UpdateStore interface {
+	InstalledHighWater(linuxupdate.Manifest) (int64, error)
+	Install(linuxupdate.Manifest, ed25519.PublicKey, string, string, string) error
+}
+
 type linuxUpdates struct {
 	mu              sync.Mutex
 	selectionPath   string
@@ -54,7 +61,7 @@ type linuxUpdates struct {
 	busy, activated bool
 	client          linuxupdate.Client
 	store           linuxupdate.Store
-	arm64           *linuxupdate.ARM64Store
+	arm64           arm64UpdateStore
 	offer           *linuxupdate.Release
 	beforeInstall   func() error
 	trustPath       string
@@ -120,18 +127,30 @@ func newARM64Updates(selectionPath, manifestPath string) (*linuxUpdates, error) 
 		return nil, err
 	}
 	m := boot.Manifest
+	var store arm64UpdateStore = &linuxupdate.ARM64Store{Directory: "/store/encore", Booted: "/run/encore/slot"}
+	if m.Target == nativeab.Target {
+		if m.Format != nativeab.Format || m.BaseSHA256 != nativeab.LayoutID {
+			return nil, errors.New("invalid native A/B boot identity")
+		}
+		store = nativeab.Device()
+	}
 	version := updateVersion(m.CoreVersion, m.Revision)
 	u := &linuxUpdates{
 		channel: "stable", jobs: make(chan updateRequest, 1),
 		state: api.UpdateStateResponse{Key: linuxUpdateKey, Title: "Encore Biscuit", CurrentVersion: version, LatestVersion: version},
 		client: linuxupdate.Client{Installed: m, Key: linuxupdate.BiscuitARM64Root(), Directory: "/data/encore/updates",
 			BaseURL: "https://farooqu.github.io/encore-satellite"},
-		arm64:  &linuxupdate.ARM64Store{Directory: "/store/encore", Booted: "/run/encore/slot"},
+		arm64:  store,
 		reboot: func() error { return exec.Command("/bin/busybox.static", "reboot").Run() },
 		beforeInstall: func() error {
 			b, err := os.ReadFile("/sys/devices/platform/amz_privacy/privacy_state")
 			if err != nil || strings.TrimSpace(string(b)) != "1" {
 				return errors.New("Mute the physical microphone before installing the update")
+			}
+			if m.Target == nativeab.Target {
+				// The native store checks normal boot and confirms the running slot
+				// against hardware boot control before staging anything.
+				return nil
 			}
 			f, err := os.Open("/dev/mmcblk0p8")
 			if err != nil {
@@ -294,8 +313,12 @@ func (u *linuxUpdates) executeARM64(ctx context.Context, job updateRequest, chan
 		status(nil, "No verified newer release")
 		return
 	}
-	if r.Size > linuxupdate.ARM64MaxArchive {
-		fail(errors.New("Public release exceeds ARM64 rootfs limit"))
+	limit, payload := int64(linuxupdate.ARM64MaxArchive), "ARM64 rootfs"
+	if m.Target == nativeab.Target {
+		limit, payload = nativeab.MaxBundle, "native A/B bundle"
+	}
+	if r.Size > limit {
+		fail(fmt.Errorf("Release exceeds %s size limit", payload))
 		return
 	}
 	if !job.install || job.offer == nil || job.offer.Revision != r.Revision || job.offer.SHA256 != r.SHA256 {
@@ -306,7 +329,7 @@ func (u *linuxUpdates) executeARM64(ctx context.Context, job updateRequest, chan
 		status(r, err.Error()) // user can correct privacy and confirm again
 		return
 	}
-	status(nil, "Downloading verified ARM64 rootfs")
+	status(nil, "Downloading verified "+payload)
 	_ = changed()
 	file, err := u.client.Download(ctx, *r)
 	if err != nil {

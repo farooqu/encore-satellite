@@ -12,20 +12,22 @@ provisioning_live() {
   now=$(date +%s)
   [ "$stamp" -le "$now" ] && [ "$((now-stamp))" -le 10 ] && kill -0 "$pid" 2>/dev/null
 }
+native=false
+[ ! -f /run/encore/native-ab ] || native=true
 i=0
 while [ "$i" -lt 180 ]; do
   # A supervised candidate can wait for explicit activation indefinitely.
   # Neither a stale ready marker nor enrollment may commit a held slot.
   slot=$(cat /run/encore/slot)
   case "$slot" in a|b) ;; *) exit 1;; esac
-  if [ "$(cat /store/encore/slots/$slot.state)" = held ]; then
+  if ! $native && [ "$(cat /store/encore/slots/$slot.state)" = held ]; then
     sleep 1
     continue
   fi
   # First-boot Wi-Fi entry is not a failed update. No slot is committed while
   # waiting. Only a fresh heartbeat from registered, functioning Improv and
   # Action input pauses the budget, never the Bluetooth supervisor marker.
-  if [ ! -f /run/encore/arm64-update-trial ] && provisioning_live; then
+  if [ ! -f /run/encore/arm64-update-trial ] && [ ! -f /run/encore/native-watchdog-armed ] && provisioning_live; then
     sleep 1
     continue
   fi
@@ -33,12 +35,16 @@ while [ "$i" -lt 180 ]; do
     pid=$(cat /run/encore/ready)
     sleep 30
     if [ "$(cat /run/encore/ready 2>/dev/null)" = "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      if $native; then exec /usr/local/bin/arm64-verify native-confirm; fi
       exec /usr/local/sbin/slotctl commit
     fi
   fi
   sleep 1
   i=$((i+1))
 done
+# The native watchdog owns the failed-trial reset; never change the recovery
+# selector or issue a second reset from the runtime health service.
+if $native; then exit 1; fi
 # A confirmed upgrade bought one boot attempt, spent in recovery before
 # switch_root. Leave the high-water mark in place and boot the other good slot.
 if [ -f /run/encore/arm64-update-trial ] && [ "$(cat /store/encore/slots/$slot.state)" = update-spent ]; then
