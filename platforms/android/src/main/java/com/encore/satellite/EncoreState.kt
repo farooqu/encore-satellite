@@ -52,7 +52,9 @@ data class EncoreState(
     val speakerName: String = "",
     val speakerRGB: List<Int> = emptyList(),
     val reason: String = "",
+    val esphome: String = "",
 ) {
+    val needsHomeAssistantSetup: Boolean get() = esphome == "unpaired" || esphome == "waiting" || esphome == "expired"
     val origin: String get() = if (dashboard.isEmpty()) "" else Uri.parse(dashboard).let { "${it.scheme}://${it.encodedAuthority}" }
     // Unknown snapshots suppress drawing, but keep Stop/shield for last-known
     // ownership until an actual stop or fresh snapshot releases it.
@@ -125,6 +127,7 @@ data class EncoreState(
                 night = voice.optString("night").takeIf { it in setOf("on", "off") } ?: "unknown",
                 speakerName = if (attributedTurn) name else "", speakerRGB = if (attributedTurn) colors else emptyList(),
                 dashboard = data.getString("dashboard"),
+                esphome = data.optString("esphome"),
                 reload = data.getInt("reload"), problem = data.getString("problem").ifEmpty { previous.problem })
         }
     }

@@ -18,15 +18,15 @@ func (output) WriteVoice([]byte, int64) bool { return true }
 func (output) DrainVoice(int64) bool         { return true }
 func (output) FlushVoice(int64)              {}
 
-func TestLocalIdentityAndPrivacySurviveReopen(t *testing.T) {
+func TestUnpairedIdentityAndPrivacySurviveReopen(t *testing.T) {
 	directory := t.TempDir()
 	r, err := mobile.Open(directory, output{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	name, key := r.Name(), r.NoiseKey()
-	if name == "" || key == "" {
-		t.Fatal("missing stable pairing identity")
+	if name == "" || key != "" {
+		t.Fatal("fresh runtime must have a stable identity but no key")
 	}
 	if err := r.SetMuted(true); err != nil {
 		t.Fatal(err)

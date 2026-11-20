@@ -55,7 +55,8 @@ fun EncoreScreen(state: EncoreState, onStart: () -> Unit, onTalk: () -> Unit, on
     onBluetooth: () -> Unit = {},
     reducedMotion: Boolean = systemReducedMotion(),
     onMonitorOverlay: (Long, Boolean) -> Unit = { _, _ -> },
-    dashboardContent: @Composable () -> Unit = { Dashboard(state) }) {
+    onPairHomeAssistant: () -> Unit = {},
+    dashboardContent: @Composable () -> Unit = { Dashboard(state, onPairHomeAssistant) }) {
     var settings by remember { mutableStateOf(false) }
     val drawer = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
@@ -246,8 +247,24 @@ internal fun trustedNavigation(origin: String, value: String): Boolean {
 }
 
 @SuppressLint("SetJavaScriptEnabled")
-@Composable private fun Dashboard(state: EncoreState) {
-    if (state.dashboard.isEmpty()) {
+@Composable private fun Dashboard(state: EncoreState, onPairHomeAssistant: () -> Unit) {
+    if (state.needsHomeAssistantSetup) {
+        Box(Modifier.fillMaxSize().background(Color(0xff101d28)).padding(bottom = 88.dp), contentAlignment = Alignment.Center) {
+            Column(Modifier.widthIn(max = 560.dp).verticalScroll(rememberScrollState()).padding(24.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                Text("Home Assistant setup", style = MaterialTheme.typography.headlineMedium, color = Color.White)
+                Text(when {
+                    !state.running -> "Start the satellite to set up its ESPHome controls."
+                    state.esphome == "waiting" -> "In Home Assistant, go to Settings → Devices & services and add ${state.name} under Discovered. You won't need to enter a key. The pairing window closes after two minutes."
+                    state.esphome == "expired" -> "The pairing window expired. Start pairing again, then add the satellite in Home Assistant."
+                    else -> "Pair on a trusted local network to add this satellite in Home Assistant without entering an encryption key."
+                }, Modifier.semantics { liveRegion = LiveRegionMode.Polite }, color = Muted)
+                if (state.running && state.esphome != "waiting") {
+                    Button(onClick = onPairHomeAssistant) { Text("Pair with Home Assistant") }
+                }
+            }
+        }
+    } else if (state.dashboard.isEmpty()) {
         Column(Modifier.fillMaxSize().background(Color(0xff101d28)).padding(32.dp), verticalArrangement = Arrangement.Center) {
             Text("Your home, at a glance.", color = Color.White, fontSize = 30.sp)
             Spacer(Modifier.height(16.dp))
@@ -293,7 +310,9 @@ internal fun trustedNavigation(origin: String, value: String): Boolean {
                 Text("Incubator voice uses trusted-LAN TCP 6055. ESPHome controls use encrypted TCP 6053. Bluetooth capabilities depend on the running Android APIs; no Assist backend.", fontSize = 12.sp)
                 TextButton(onClick = onBluetooth) { Text("Bluetooth proxy setup") }
                 Text("Set one full Dashboard URL through ESPHome, such as https://home.example/lovelace/home. It supplies both the HA address and dashboard path; no local origin setup is needed. Sign in to HA in the dashboard itself. Navigation stays within the configured origin.", fontSize = 12.sp)
-                TextButton(onClick = { secret = noiseKey() }) { Text("Reveal ESPHome encryption key") }
+                if (!state.needsHomeAssistantSetup) {
+                    TextButton(onClick = { secret = noiseKey() }) { Text("Reveal ESPHome encryption key") }
+                }
                 Text("Choose stable/dev, check, and request updates through ESPHome. Installing a downloaded APK needs approval on this device.", fontSize = 12.sp)
                 TextButton(onClick = onUpdate) { Text("Review downloaded update") }
                 HorizontalDivider()

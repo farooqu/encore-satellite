@@ -155,8 +155,16 @@ these devices, acoustic timings or model-backed enrollment/training.
    Readiness combines usable ordinary wake models with current native capture
    health; a stop-only model does not mean hands-free wake is ready. **Talk** is a
    manual fallback, not a replacement for local wake detection.
-3. Add the device's separate ESPHome integration on TCP 6053 using the encryption
-   key revealed in local **Settings**. Set its single **Dashboard URL** text entity
+3. On a fresh install, tap **Pair with Home Assistant** on the Android setup screen.
+   On a trusted LAN, open Home Assistant **Settings → Devices & services** and
+   add the discovered satellite (or add ESPHome by tablet IP, TCP 6053) within two
+   minutes. Use a Home Assistant version that supports zero-PSK provisioning.
+   HA generates the permanent encryption key; no key entry is required. If the
+   window expires, tap **Pair with Home Assistant** again. If HA adds the device
+   but controls do not appear, reload its ESPHome integration. Existing installs
+   keep their key and settings and skip pairing; **Reveal ESPHome encryption key**
+   in local Settings remains available for manual recovery after pairing.
+   Set the single **Dashboard URL** text entity
    to a full URL, for example `https://home.example/lovelace/home`. This supplies
    both the HA origin and dashboard path; no separate tablet origin setup exists.
    Prefer HTTPS; explicitly choosing `http://` permits trusted-LAN HTTP, including

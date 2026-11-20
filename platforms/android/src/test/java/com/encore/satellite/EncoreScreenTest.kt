@@ -39,6 +39,38 @@ import kotlin.math.sin
 class EncoreScreenTest {
     @get:Rule val compose = createComposeRule()
 
+    @Test fun homeAssistantPairingAppearsOnlyInInitialSetupAndCanRetry() {
+        val state = mutableStateOf(EncoreState(name = "encore-abc", esphome = "unpaired"))
+        var taps = 0
+        compose.setContent {
+            EncoreScreen(state.value, { state.value = state.value.copy(running = true) }, {}, {}, {}, { "" }, { "" }, {}, {}, {}, {},
+                onPairHomeAssistant = { taps++; state.value = state.value.copy(esphome = "waiting") })
+        }
+        val pair = compose.onNodeWithText("Pair with Home Assistant")
+        compose.onNodeWithText("Home Assistant setup").assertIsDisplayed()
+        pair.assertDoesNotExist()
+        compose.onNodeWithContentDescription("Start satellite").performClick()
+        pair.assertIsDisplayed()
+        capture("android-ha-setup-ready")
+        pair.performClick()
+        pair.assertDoesNotExist()
+        compose.onNodeWithText("add encore-abc under Discovered", substring = true).assertIsDisplayed()
+        capture("android-ha-setup-waiting")
+        compose.runOnIdle { state.value = state.value.copy(esphome = "expired") }
+        compose.onNodeWithText("pairing window expired", substring = true).assertIsDisplayed()
+        capture("android-ha-setup-expired")
+        pair.assertIsDisplayed().performClick()
+        compose.runOnIdle { assertEquals(2, taps); state.value = state.value.copy(esphome = "paired") }
+        pair.assertDoesNotExist()
+        compose.onNodeWithText("Your home, at a glance.").assertIsDisplayed()
+        openControls()
+        compose.onNodeWithText("Settings").performClick()
+        advance(400)
+        pair.assertDoesNotExist()
+        compose.onNodeWithText("Reveal ESPHome encryption key").performScrollTo().assertIsDisplayed()
+        capture("android-ha-existing-settings")
+    }
+
     @Test fun remoteRequestShowsOverlayWithoutATapAndStopAndMuteDismissIt() {
         val state = mutableStateOf(ready())
         val visibility = mutableListOf<Pair<Long, Boolean>>()

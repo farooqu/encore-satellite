@@ -24,6 +24,7 @@ import (
 	"github.com/farooqu/encore-satellite/core/audio"
 	"github.com/farooqu/encore-satellite/core/illuminance"
 	"github.com/farooqu/encore-satellite/core/session"
+	"github.com/farooqu/encore-satellite/internal/esphomepairing"
 	androidhost "github.com/farooqu/encore-satellite/platforms/android"
 	esphome "github.com/ygelfand/go-esphome-device"
 	"github.com/ygelfand/go-esphome-device/api"
@@ -50,11 +51,14 @@ type settings struct {
 type Runtime struct {
 	mu                  sync.Mutex
 	path                string
+	mac                 string
 	config              settings
 	engine              *session.Engine
 	voice               *incubator.Server
 	control             *esphome.Server
+	running             context.Context
 	cancel              context.CancelFunc
+	pairing             string // empty, waiting, or expired
 	done                sync.WaitGroup
 	sequence            uint64
 	samples             int64
@@ -84,16 +88,11 @@ func Open(directory string, output Audio) (*Runtime, error) {
 			return nil, err
 		}
 	} else if errors.Is(err, os.ErrNotExist) {
-		key, err := esphome.GeneratePSK()
-		if err != nil {
-			return nil, err
-		}
 		var id [6]byte
 		if _, err = rand.Read(id[:]); err != nil {
 			return nil, err
 		}
 		id[0] = (id[0] | 2) & 0xfe
-		r.config.Key = key.String()
 		r.config.MAC = net.HardwareAddr(id[:]).String()
 		if err = r.save(r.config); err != nil {
 			return nil, err
@@ -107,6 +106,7 @@ func Open(directory string, output Audio) (*Runtime, error) {
 	if r.config.Channel != "dev" && r.config.Channel != "stable" {
 		return nil, errors.New("invalid saved update channel")
 	}
+	r.mac = r.config.MAC
 	r.engine = session.New(androidhost.NewPlayback(output))
 	r.engine.SetMuted(r.config.Muted)
 	r.microphone = sensors.NewMicrophone(r.config.Muted)
@@ -127,11 +127,15 @@ func (r *Runtime) save(c settings) error {
 	return os.Rename(r.path+".tmp", r.path)
 }
 
-func (r *Runtime) Name() string { return "encore-" + strings.ReplaceAll(r.config.MAC[9:], ":", "") }
-func (r *Runtime) MAC() string  { return r.config.MAC }
+func (r *Runtime) Name() string { return "encore-" + strings.ReplaceAll(r.mac[9:], ":", "") }
+func (r *Runtime) MAC() string  { return r.mac }
 
 // NoiseKey is for local pairing UI only; never include it in snapshots/logs.
-func (r *Runtime) NoiseKey() string { return r.config.Key }
+func (r *Runtime) NoiseKey() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.config.Key
+}
 
 func (r *Runtime) Start() error {
 	r.mu.Lock()
@@ -139,36 +143,136 @@ func (r *Runtime) Start() error {
 	if r.cancel != nil {
 		return nil
 	}
-	key, err := esphome.ParsePSK(r.config.Key)
-	if err != nil {
-		return err
-	}
 	vl, err := net.Listen("tcp", ":6055")
 	if err != nil {
 		return err
 	}
-	cl, err := net.Listen("tcp", ":6053")
-	if err != nil {
-		vl.Close()
-		return err
+	var cl net.Listener
+	var key esphome.PSK
+	if r.config.Key != "" {
+		key, err = esphome.ParsePSK(r.config.Key)
+		if err != nil || key.IsZero() {
+			vl.Close()
+			return errors.New("invalid saved ESPHome key")
+		}
+		cl, err = net.Listen("tcp", ":6053")
+		if err != nil {
+			vl.Close()
+			return err
+		}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	r.cancel = cancel
-	r.control = &esphome.Server{Info: esphome.Info{Name: r.Name(), FriendlyName: "Encore Incubator", MACAddress: r.config.MAC, Manufacturer: "Encore", Model: "Generic Android", Version: "0.1.0", ProjectName: "encore.incubator"}, PSK: &key, Handler: r, WriteTimeout: 2 * time.Second}
-	r.control.Info.BluetoothFeatures = r.proxy.Features()
+	r.running, r.cancel = ctx, cancel
 	r.done.Go(func() { r.proxy.Run(ctx) })
 	if r.light.Supported() {
-		sources, control := r.sensors(), r.control
-		r.done.Go(func() { sources.Illuminance.Run(ctx, func() { _ = control.Broadcast(sources.IlluminanceState()) }) })
+		sources := r.sensors()
+		r.done.Go(func() { sources.Illuminance.Run(ctx, func() { _ = r.broadcastControl(sources.IlluminanceState()) }) })
 	}
+	r.serveListener(ctx, vl, r.voice.Serve)
+	if cl != nil {
+		r.startControl(ctx, cl, key)
+	}
+	return nil
+}
+
+func (r *Runtime) controlInfo() esphome.Info {
+	return esphome.Info{Name: r.Name(), FriendlyName: "Encore Incubator", MACAddress: r.MAC(),
+		Manufacturer: "Encore", Model: "Generic Android", Version: "0.1.0", ProjectName: "encore.incubator"}
+}
+
+// startControl is called under mu after the encrypted listener is bound.
+func (r *Runtime) startControl(ctx context.Context, l net.Listener, key esphome.PSK) {
+	info := r.controlInfo()
+	info.BluetoothFeatures = r.proxy.Features()
+	control := &esphome.Server{Info: info, PSK: &key, Handler: r, WriteTimeout: 2 * time.Second,
+		OnSetEncryptionKey: esphomepairing.RefuseKey}
+	r.control = control
+	r.serveListener(ctx, l, control.Serve)
+}
+
+type runtimeListener struct {
+	net.Listener
+	close func() error
+}
+
+func (l runtimeListener) Close() error { return l.close() }
+
+func (r *Runtime) serveListener(ctx context.Context, l net.Listener, serve func(context.Context, net.Listener) error) {
+	// Cancellation can wake Accept before the server's concurrent Close releases
+	// the port. Join that Close before reporting that the runtime has stopped.
+	listener := runtimeListener{l, sync.OnceValue(l.Close)}
 	r.done.Go(func() {
-		if err := r.voice.Serve(ctx, vl); err != nil {
+		defer listener.Close()
+		if err := serve(ctx, listener); err != nil {
 			r.fail(err)
 		}
 	})
+}
+
+func (r *Runtime) broadcastControl(msg proto.Message) error {
+	r.mu.Lock()
+	control := r.control
+	r.mu.Unlock()
+	if control == nil {
+		return nil
+	}
+	return control.Broadcast(msg)
+}
+
+// PairHomeAssistant is called only by the local first-run UI. The voice server
+// stays up while the restricted listener takes and persists the first key.
+func (r *Runtime) PairHomeAssistant() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.pairHomeAssistant(r.running)
+}
+
+// pairHomeAssistant requires mu. The bootstrap also caps ctx at two minutes.
+func (r *Runtime) pairHomeAssistant(ctx context.Context) error {
+	if r.cancel == nil || r.config.Key != "" || r.pairing == "waiting" {
+		return errors.New("ESPHome pairing unavailable")
+	}
+	l, err := net.Listen("tcp", ":6053")
+	if err != nil {
+		return err
+	}
+	r.pairing = "waiting"
 	r.done.Go(func() {
-		if err := r.control.Serve(ctx, cl); err != nil {
-			r.fail(err)
+		var key esphome.PSK
+		err := esphomepairing.Serve(ctx, l, r.controlInfo(), func(supplied esphome.PSK) error {
+			r.mu.Lock()
+			defer r.mu.Unlock()
+			if ctx.Err() != nil || r.config.Key != "" {
+				return errors.New("ESPHome pairing unavailable")
+			}
+			next := r.config
+			next.Key = supplied.String()
+			if err := r.save(next); err != nil {
+				r.problem = "Could not save ESPHome key"
+				return errors.New(r.problem)
+			}
+			r.config, key = next, supplied
+			return nil
+		})
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		r.pairing = ""
+		if r.running.Err() != nil {
+			return
+		}
+		if err == nil && key.IsZero() {
+			r.pairing = "expired"
+			return
+		}
+		if err == nil {
+			var encrypted net.Listener
+			encrypted, err = net.Listen("tcp", ":6053")
+			if err == nil {
+				r.startControl(r.running, encrypted, key)
+			}
+		}
+		if err != nil {
+			r.problem = "ESPHome could not start. Restart the satellite and try again."
 		}
 	})
 	return nil
@@ -182,6 +286,8 @@ func (r *Runtime) Close() {
 	r.cancel = nil
 	if cancel != nil {
 		cancel()
+		r.control = nil
+		r.pairing = ""
 		r.engine.SetMuted(true)
 		// Shutdown gates this runtime without changing the saved preference.
 		r.microphone.SetMuted(true)
@@ -261,8 +367,14 @@ func (r *Runtime) Snapshot(captureReady bool) string {
 		url, rev = r.config.Dashboard, r.dashboard.reload
 	}
 	problem := r.problem
+	esphomeState := r.pairing
+	if r.control != nil {
+		esphomeState = "paired"
+	} else if esphomeState == "" && r.config.Key == "" {
+		esphomeState = "unpaired"
+	}
 	r.mu.Unlock()
-	b, _ := json.Marshal(map[string]any{"voice": r.voice.Snapshot(captureReady), "models": r.voice.ModelCount(), "dashboard": url, "reload": rev, "problem": problem})
+	b, _ := json.Marshal(map[string]any{"voice": r.voice.Snapshot(captureReady), "models": r.voice.ModelCount(), "dashboard": url, "reload": rev, "problem": problem, "esphome": esphomeState})
 	return string(b)
 }
 
@@ -391,7 +503,7 @@ func (r *Runtime) setDashboard(_ *esphome.Conn, m *api.TextCommandRequest) error
 	}
 	v = r.config.Dashboard
 	r.mu.Unlock()
-	return r.control.Broadcast(&api.TextStateResponse{Key: dashboardKey, State: v})
+	return r.broadcastControl(&api.TextStateResponse{Key: dashboardKey, State: v})
 }
 
 func (r *Runtime) setUpdateChannel(_ *esphome.Conn, m *api.SelectCommandRequest) error {
@@ -416,7 +528,7 @@ func (r *Runtime) setUpdateChannel(_ *esphome.Conn, m *api.SelectCommandRequest)
 	}
 	host := r.updater
 	r.mu.Unlock()
-	if err := r.control.Broadcast(&api.SelectStateResponse{Key: channelKey, State: m.State}); err != nil {
+	if err := r.broadcastControl(&api.SelectStateResponse{Key: channelKey, State: m.State}); err != nil {
 		return err
 	}
 	r.UpdateStatus(m.State, next.ChannelGeneration, "", "Checking selected channel", false, false)

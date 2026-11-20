@@ -12,9 +12,11 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sync"
 
 	"github.com/farooqu/encore-satellite/devices/android-generic/mobile"
+	esphome "github.com/ygelfand/go-esphome-device"
 )
 
 type audio struct{}
@@ -56,6 +58,18 @@ func main() {
 		log.Fatal(err)
 	}
 	defer os.RemoveAll(directory)
+	// Bluetooth tests an existing encrypted installation, independent of setup.
+	key, err := esphome.GeneratePSK()
+	if err != nil {
+		log.Fatal(err)
+	}
+	stored, err := json.Marshal(map[string]string{"mac": "02:00:00:ec:bb:01", "key": key.String()})
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "encore.json"), stored, 0600); err != nil {
+		log.Fatal(err)
+	}
 	r, err := mobile.Open(directory, audio{})
 	if err != nil {
 		log.Fatal(err)

@@ -55,6 +55,7 @@ class MainActivity : ComponentActivity() {
                 onDismiss = { permissionProblem = ""; service?.dismissProblem() },
                 onUpdate = { startActivity(Intent(this, UpdateActivity::class.java)) },
                 onBluetooth = { startActivity(Intent(this, BluetoothActivity::class.java)) },
+                onPairHomeAssistant = { service?.pairHomeAssistant() },
                 onMonitorOverlay = { id, visible -> connectedService?.setMonitorOverlay(id, visible) })
         }
     }
