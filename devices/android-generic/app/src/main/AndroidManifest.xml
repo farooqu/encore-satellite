@@ -27,10 +27,16 @@
         <meta-data android:name="com.encore.update_base_url" android:value="${updateBaseUrl}" />
         <meta-data android:name="com.encore.update_public_key" android:value="${updatePublicKey}" />
         <!-- The paired ESPHome controller may explicitly choose an HTTP Dashboard URL. TLS failures are never bypassed. -->
-        <activity android:name="com.encore.satellite.MainActivity" android:exported="true">
+        <activity android:name="com.encore.satellite.MainActivity" android:exported="true"
+            android:launchMode="singleTask">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.HOME" />
+                <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </activity>
         <service android:name="com.encore.satellite.EncoreService" android:exported="false"

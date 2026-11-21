@@ -48,7 +48,8 @@ internal fun EncoreScreen(state: EncoreState, onStart: () -> Unit, onTalk: () ->
     onPairHomeAssistant: () -> Unit = {},
     microphonePermissionGranted: Boolean = true,
     dashboardAuth: DashboardAuth? = null,
-    dashboardContent: (@Composable () -> Unit)? = null) {
+    dashboardContent: (@Composable () -> Unit)? = null,
+    onChooseHome: () -> Unit = {}, onAndroidSettings: () -> Unit = {}) {
     val voiceVisible = state.interactionVisible || state.microphoneVisible
     var settingsVisible by remember(voiceVisible) { mutableStateOf(false) }
     fun closeSettings() { settingsVisible = false }
@@ -111,7 +112,7 @@ internal fun EncoreScreen(state: EncoreState, onStart: () -> Unit, onTalk: () ->
                 BackHandler(onBack = ::closeSettings)
                 Surface(Modifier.fillMaxSize().testTag("settings-screen").semantics { paneTitle = "Satellite settings" }) {
                     SettingsContent(state, noiseKey, musicToken, onMusicConnect, onMusicDisconnect, onMusicCommand, onUpdate, onBluetooth,
-                        dashboardAuth, ::closeSettings)
+                        dashboardAuth, onChooseHome, onAndroidSettings, ::closeSettings)
                 }
             }
             if (!settingsVisible && state.problem.isNotEmpty()) {
@@ -260,9 +261,11 @@ internal fun DashboardSignInNeeded(onPhone: (() -> Unit)?, onTablet: () -> Unit)
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable private fun SettingsContent(state: EncoreState, noiseKey: () -> String,
     musicToken: () -> String, onMusicConnect: (String) -> Unit, onMusicDisconnect: () -> Unit,
-    onMusicCommand: (String) -> Unit, onUpdate: () -> Unit, onBluetooth: () -> Unit, auth: DashboardAuth?, close: () -> Unit) {
+    onMusicCommand: (String) -> Unit, onUpdate: () -> Unit, onBluetooth: () -> Unit, auth: DashboardAuth?,
+    onChooseHome: () -> Unit, onAndroidSettings: () -> Unit, close: () -> Unit) {
     var sendspin by remember { mutableStateOf("") }
     var secret by remember { mutableStateOf("") }
     Column(Modifier.fillMaxSize().systemBarsPadding().imePadding(), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -274,6 +277,13 @@ internal fun DashboardSignInNeeded(onPhone: (() -> Unit)?, onTablet: () -> Unit)
             verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("${state.name} · Incubator only", color = Mint)
             Text(state.status, Modifier.semantics { liveRegion = LiveRegionMode.Polite }, color = Muted)
+            Text("Android Home", Modifier.semantics { heading() }, style = MaterialTheme.typography.titleMedium)
+            Text("Choose Encore Incubator in Android to open this dashboard when you press Home. To switch back, choose your previous launcher in the same screen.")
+            FlowRow {
+                TextButton(onClick = { close(); onChooseHome() }) { Text("Choose Home app") }
+                TextButton(onClick = { close(); onAndroidSettings() }) { Text("Open Android settings") }
+            }
+            HorizontalDivider()
             if (state.music.enabled) MusicControls(state.music, onMusicCommand, state.audioInterrupted)
             Text("Incubator voice uses trusted-LAN TCP 6055. ESPHome controls use encrypted TCP 6053. Bluetooth capabilities depend on the running Android APIs; no Assist backend.", fontSize = 12.sp)
             TextButton(onClick = onBluetooth) { Text("Bluetooth proxy setup") }

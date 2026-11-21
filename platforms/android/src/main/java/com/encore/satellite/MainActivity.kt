@@ -5,7 +5,9 @@ import android.content.*
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.os.IBinder
+import android.provider.Settings
 import android.view.WindowManager
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -64,11 +66,21 @@ class MainActivity : ComponentActivity() {
                 onDismiss = { permissionProblem = ""; service?.dismissProblem() },
                 onUpdate = { startActivity(Intent(this, UpdateActivity::class.java)) },
                 onBluetooth = { startActivity(Intent(this, BluetoothActivity::class.java)) },
+                onChooseHome = { openAndroidSettings(Settings.ACTION_HOME_SETTINGS) },
+                onAndroidSettings = { openAndroidSettings(Settings.ACTION_SETTINGS) },
                 onPairHomeAssistant = { service?.pairHomeAssistant() },
                 microphonePermissionGranted = microphonePermissionGranted,
                 dashboardAuth = dashboardAuth,
                 onMonitorOverlay = { id, visible -> connectedService?.setMonitorOverlay(id, visible) })
         }
+    }
+
+    private fun openAndroidSettings(action: String) {
+        fun open(destination: String) = runCatching {
+            startActivity(Intent(destination).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        }.isSuccess
+        if (open(action) || (action == Settings.ACTION_HOME_SETTINGS && open(Settings.ACTION_SETTINGS))) return
+        Toast.makeText(this, "Android settings are unavailable on this device", Toast.LENGTH_LONG).show()
     }
 
     private fun hasMicrophonePermission() = checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED

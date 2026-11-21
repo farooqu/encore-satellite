@@ -216,6 +216,58 @@ after reboot or process death.
 The music server address/connection is entered explicitly each time; identity and
 pairing records persist. The screen stays awake while the Activity is visible.
 
+## Use Encore as the Android Home screen
+
+Encore still opens as a regular app from the existing launcher. To make it the
+tablet's Home screen, open Encore's gear → **Choose Home app**, then select
+**Encore Incubator** in Android. Encore does not change the default itself.
+Once selected, the Home button or gesture returns to Encore instead of the old
+launcher. The dashboard is fullscreen and keeps the screen awake while visible;
+swipe in from a system-bar edge to reveal Android's controls. Encore doesn't
+replace the lock screen or provide an app drawer.
+
+To switch back, open Encore's gear → **Choose Home app** and select the previous
+launcher. If there is an active voice turn, tap **Stop** first. **Open Android
+settings** also gives you a way out; look for **Apps → Default apps → Home app**
+(wording varies by Android build). If the dedicated Home settings page is missing,
+Encore opens general Android settings instead. If you can't use Encore's gear,
+try revealing the system bars and entering Settings from Quick Settings.
+
+- **Reboot and unlock:** Android should open the selected Home app after unlock.
+  Encore doesn't launch itself at boot or before unlock. Normal microphone
+  permission, saved mute, and Android microphone privacy still apply.
+- **Updates:** Choosing Home changes neither Encore's update settings nor Android's
+  installation approval. A same-package, same-signer update keeps the Home
+  component eligible; Android owns the Home preference and decides when to show
+  it again. After install, unlock if needed and press Home if Encore isn't already
+  visible. Installing the separate debug package isn't an in-place update.
+- **Screen pinning** is an optional Android feature, where available, that keeps
+  one app on screen until someone uses the system unpin gesture. It neither
+  selects Home nor provides persistent kiosk enforcement. Encore does not turn
+  it on. Unpin before changing Home apps or installing an update.
+- **Managed kiosk** (enforced lock task, a policy-set Home, restrictions on
+  Settings or system controls) requires separate Android Enterprise provisioning
+  with an appropriate device-owner policy controller. Selecting Encore as Home
+  does not enroll the device, require root, or enforce those restrictions.
+
+### Physical Home acceptance checks
+
+On the Galaxy Tab A7 Lite / LineageOS 21 GSI (Android 14), keep the previous
+launcher installed. Confirm normal launch without opting in. Select Encore in
+Android and press Home from Android Settings and another app, using the current
+navigation mode. Verify fullscreen, transient bars, and screen-awake behavior.
+After reboot, verify the lock screen is still required and Encore does not use
+the microphone before unlock. Record what opens immediately after first unlock,
+then confirm that pressing Home opens Encore. With Encore still selected and
+the mic muted, approve a newer same-signed APK. Check that Home still opens the
+dashboard, its configuration and mute persist, and the old launcher can be
+restored via Encore's settings. Repeat the recovery check with the dashboard offline.
+
+Meta Portal is separate: first confirm sideloading, Android version/ABI,
+WebView, and whether the exact firmware exposes a replaceable Home app and usable
+system Settings. A regular app launch or successful sideload would not establish
+Home support on Portal.
+
 ## Display and privacy behavior
 
 - The dashboard stays visible and usable during voice. The voice controls sit on
