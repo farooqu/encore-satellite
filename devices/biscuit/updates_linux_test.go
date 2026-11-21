@@ -131,6 +131,9 @@ func testARM64PublicUpdate(t *testing.T, channel string) {
 	if err != nil || len(u.states()) != 2 || u.states()[0].(*api.SelectStateResponse).State != "stable" {
 		t.Fatal("new recovery did not expose Stable by default", err)
 	}
+	if s := u.states()[1].(*api.UpdateStateResponse); s.Title != "Encore Satellite" || s.CurrentVersion != "0.1.1-dev.5" || s.LatestVersion != s.CurrentVersion {
+		t.Fatal("incorrect firmware update state for the booted image", s)
+	}
 	if err := u.selectChannel(channel); err != nil {
 		t.Fatal(err)
 	}
@@ -166,7 +169,7 @@ func testARM64PublicUpdate(t *testing.T, channel string) {
 	}
 	metadata.Store(2)
 	job(false)
-	if got := u.states()[1].(*api.UpdateStateResponse).LatestVersion; got != "0.1.1 (revision 23)" {
+	if got := u.states()[1].(*api.UpdateStateResponse).LatestVersion; got != "0.1.1" {
 		t.Fatalf("missing verified offer: %q", got)
 	}
 	metadata.Store(3)
@@ -268,7 +271,14 @@ func TestLinuxUpdateAndRingControlsEncryptedAPI(t *testing.T) {
 	// which rejects unknown fields. Neither initialization nor selection may
 	// add updater fields, even before the new slot has passed health checks.
 	legacyConfig := `{"schema":1,"name":"update-test"}`
-	u := testLinuxUpdates(t, filepath.Dir(s.path))
+	manifest := filepath.Join(filepath.Dir(s.path), "installed.json")
+	if err := os.WriteFile(manifest, []byte(`{"channel":"dev","core_version":"1.3.0-dev.4","package_revision":42}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	u, err := newLinuxUpdates(filepath.Join(filepath.Dir(s.path), "update-state.json"), manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
 	u.trustPath = filepath.Join(t.TempDir(), "absent-trust.json")
 	p := newSpeaker(&speakerPCM{})
 	defer p.Close()
@@ -288,7 +298,7 @@ func TestLinuxUpdateAndRingControlsEncryptedAPI(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
 	go func() {
-		done <- d.Serve(ctx, l, esphome.Info{Name: c.Name, FriendlyName: "Office speaker", MACAddress: "02:13:24:35:46:57", Manufacturer: "Encore Satellite", Model: "Echo Dot (2nd gen)", ProjectName: "encore.satellite"}, key)
+		done <- d.Serve(ctx, l, d.controlInfo(c.Name, "02:13:24:35:46:57"), key)
 	}()
 	t.Cleanup(func() { cancel(); l.Close(); <-done })
 	peer := newManagementPeer(t, l.Addr().String(), key)
@@ -296,10 +306,12 @@ func TestLinuxUpdateAndRingControlsEncryptedAPI(t *testing.T) {
 	peer.receive()
 	peer.send(&api.DeviceInfoRequest{})
 	device, ok := peer.receive().(*api.DeviceInfoResponse)
-	if !ok || device.Name != "update-test" || device.FriendlyName != "Office speaker" || device.MacAddress != "02:13:24:35:46:57" || device.ProjectName != "encore.satellite" {
+	if !ok || device.Name != "update-test" || device.MacAddress != "02:13:24:35:46:57" {
 		t.Fatal("product metadata replaced per-unit identity", device)
 	}
-	if device.Manufacturer != "Encore Satellite" || device.Model != "Echo Dot (2nd gen)" {
+	if device.FriendlyName != "Biscuit" || device.Manufacturer != "Amazon" || device.Model != "Echo Dot (2nd gen)" ||
+		device.ProjectName != "Encore Satellite.Amazon Echo Dot (2nd gen)" || device.ProjectVersion != "1.3.0-dev.4" ||
+		device.EsphomeVersion != esphome.DefaultESPHomeVersion {
 		t.Fatal("incorrect product metadata", device)
 	}
 	peer.send(&api.ListEntitiesRequest{})
@@ -333,8 +345,8 @@ listing:
 			if v.ObjectId == "linux_update" {
 				update = v.Key
 				// Pin the pre-rename wire key, not a value derived by the implementation.
-				if v.Name != "Linux update" || v.Key != 4164145515 {
-					t.Fatal("product title changed update entity identity", v)
+				if v.Name != "Firmware update" || v.Key != 4164145515 {
+					t.Fatal("incorrect firmware entity name or changed command key", v)
 				}
 			}
 		case *api.ListEntitiesDoneResponse:
@@ -414,8 +426,8 @@ listing:
 		peer.send(&api.UpdateCommandRequest{Key: update, Command: command})
 		for {
 			if v, ok := peer.receive().(*api.UpdateStateResponse); ok && !v.InProgress && strings.Contains(v.ReleaseSummary, "Provision local") {
-				if v.Title != "Encore Echo Dot" || v.Key != update {
-					t.Fatal("incorrect product title or update association", v)
+				if v.Title != "Encore Satellite" || v.Key != update || v.CurrentVersion != "1.3.0-dev.4" {
+					t.Fatal("incorrect title, version or update association", v)
 				}
 				if !v.MissingState || v.LatestVersion != "" {
 					t.Fatal("untrusted feed reported up-to-date", v)
@@ -481,7 +493,7 @@ func TestSelectedChannelCheckAndInFlightABADownload(t *testing.T) {
 	u.store = linuxupdate.Store{Directory: filepath.Join(dir, "store"), Booted: filepath.Join(dir, "booted"), Recovery: filepath.Join(dir, "recovery"), Misc: filepath.Join(dir, "misc")}
 	u.client.Directory = filepath.Join(dir, "downloads")
 	u.client.Installed = linuxupdate.Manifest{Schema: 1, Target: "biscuit", Backend: "incubator", Format: "encore-biscuit-v1", Channel: "dev", Revision: 20, CoreVersion: "1.3.0-dev.4", BaseSHA256: strings.Repeat("a", 64)}
-	u.state.CurrentVersion = "1.3.0-dev.4 (revision 20)"
+	u.state.CurrentVersion = "1.3.0-dev.4"
 	put := func(p string, b []byte) {
 		t.Helper()
 		if e := os.MkdirAll(filepath.Dir(p), 0700); e != nil {
@@ -608,7 +620,7 @@ func TestSelectedChannelCheckAndInFlightABADownload(t *testing.T) {
 		t.Fatal(err)
 	}
 	wait(func(s *api.UpdateStateResponse) bool {
-		return !s.InProgress && !s.MissingState && s.LatestVersion == "1.4.0-dev.1 (revision 22)"
+		return !s.InProgress && !s.MissingState && s.LatestVersion == "1.4.0-dev.1"
 	})
 	if downloads.Load() != 0 {
 		t.Fatal("CHECK downloaded a package")
@@ -654,7 +666,7 @@ func TestSelectedChannelCheckAndInFlightABADownload(t *testing.T) {
 	state = wait(func(s *api.UpdateStateResponse) bool {
 		return !s.InProgress && strings.Contains(s.ReleaseSummary, "Trial slot activated")
 	})
-	if !rebooted.Load() || state.MissingState || state.CurrentVersion != "1.3.0-dev.4 (revision 20)" {
+	if !rebooted.Load() || state.MissingState || state.CurrentVersion != "1.3.0-dev.4" {
 		t.Fatal("trial confused with running/healthy version", state)
 	}
 	active, _ = os.ReadFile(filepath.Join(u.store.Directory, "active"))

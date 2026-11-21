@@ -51,6 +51,9 @@ func TestAPKUpdateCapabilityOnESPHome(t *testing.T) {
 					}
 				case *api.ListEntitiesUpdateResponse:
 					if v.ObjectId == "apk_update" {
+						if v.Name != "Firmware update" {
+							t.Fatal("incorrect firmware entity name", v)
+						}
 						update = v.Key
 					}
 				case *api.ListEntitiesTextSensorResponse:
@@ -91,7 +94,8 @@ func TestAPKUpdateCapabilityOnESPHome(t *testing.T) {
 					bluetooth = true
 				}
 			}
-			if (state != nil) != supported || (supported && (state.Key != update || state.CurrentVersion != "1.2.3" || state.LatestVersion != state.CurrentVersion || !state.MissingState)) {
+			if (state != nil) != supported || (supported && (state.Key != update || state.Title != "Encore Satellite" ||
+				state.CurrentVersion != "1.2.3" || state.LatestVersion != state.CurrentVersion || !state.MissingState)) {
 				t.Fatalf("unexpected update state: %v", state)
 			}
 			if err := r.Handle(ctx, nil, &api.TextCommandRequest{Key: dashboardKey, State: "https://dashboard.example.test"}); err != nil || r.config.Dashboard != "" {

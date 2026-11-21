@@ -9,7 +9,7 @@ the dedicated signing environment and an explicit target-policy change.
 ## What the app does
 
 In Home Assistant, pair Encore with the encrypted ESPHome integration. It exposes
-**APK update**, **Update channel** (`dev` or `stable`), **Check for updates** and
+**Firmware update**, **Update channel** (`dev` or `stable`), **Check for updates** and
 the **APK update status** diagnostic sensor. Fresh and existing installs default to `dev`; the
 explicit selection persists alongside pairing/dashboard/privacy state. There is
 no channel fallback. Checks run when the satellite starts, every six hours
@@ -30,7 +30,7 @@ builds use the shared source-derived version; local builds default to the versio
 in `release/targets.json`. The downloaded APK's actual core metadata must match
 its signed feed entry.
 
-Choose **Install** on the **APK update** entity. Encore rechecks the selected channel, downloads to private
+Choose **Install** on the **Firmware update** entity. Encore rechecks the selected channel, downloads to private
 storage, verifies size/SHA-256, and independently checks the APK package name,
 versionCode/versionName and signer against both metadata and the installed app.
 Changing channel before handing the APK to Android discards the request. A persisted

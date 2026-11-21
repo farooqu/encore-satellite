@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/farooqu/encore-satellite/backends/bluetooth"
+	esphomeadapter "github.com/farooqu/encore-satellite/backends/esphome"
 	"github.com/farooqu/encore-satellite/backends/esphome/announcements"
 	"github.com/farooqu/encore-satellite/backends/esphome/controls"
 	"github.com/farooqu/encore-satellite/backends/esphome/sensors"
@@ -53,6 +54,8 @@ type Runtime struct {
 	mu                  sync.Mutex
 	path                string
 	mac                 string
+	manufacturer        string
+	model               string
 	config              settings
 	engine              *session.Engine
 	voice               *incubator.Server
@@ -181,9 +184,27 @@ func (r *Runtime) Start() error {
 	return nil
 }
 
+// ESPHomeVersion is the compatibility version used by Android's discovery advertisement.
+const ESPHomeVersion = esphomeadapter.CompatibilityVersion
+
+// ESPHomeFriendlyName is the default Home Assistant name for this package.
+const ESPHomeFriendlyName = "Generic Android"
+
+// ConfigureHardware supplies Android's hardware labels before starting ESPHome.
+func (r *Runtime) ConfigureHardware(manufacturer, model string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.manufacturer, r.model = manufacturer, model
+}
+
+// controlInfo is called under mu, before starting either ESPHome listener.
 func (r *Runtime) controlInfo() esphome.Info {
-	return esphome.Info{Name: r.Name(), FriendlyName: "Encore Incubator", MACAddress: r.MAC(),
-		Manufacturer: "Encore", Model: "Generic Android", Version: "0.1.0", ProjectName: "encore.incubator"}
+	var version string
+	if r.updateState != nil {
+		version = r.updateState.CurrentVersion
+	}
+	return esphomeadapter.DeviceInfo(esphome.Info{Name: r.Name(), FriendlyName: ESPHomeFriendlyName, MACAddress: r.MAC(),
+		Manufacturer: r.manufacturer, Model: r.model, Version: version})
 }
 
 // startControl is called under mu after the encrypted listener is bound.
@@ -262,9 +283,10 @@ func (r *Runtime) pairHomeAssistant(ctx context.Context) error {
 		return err
 	}
 	r.pairing = "waiting"
+	info := r.controlInfo()
 	r.done.Go(func() {
 		var key esphome.PSK
-		err := esphomepairing.Serve(ctx, l, r.controlInfo(), func(supplied esphome.PSK) error {
+		err := esphomepairing.Serve(ctx, l, info, func(supplied esphome.PSK) error {
 			r.mu.Lock()
 			defer r.mu.Unlock()
 			if ctx.Err() != nil || r.config.Key != "" {

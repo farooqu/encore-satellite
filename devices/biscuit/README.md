@@ -24,12 +24,14 @@ The unpublished target/discovery board ID is `biscuit`, the package format is
 `encore-biscuit-arm64-starter-v1`, and default generated names use
 `encore-biscuit-…`. The packaged backend is `incubator`.
 
-ESPHome reports manufacturer `Encore Satellite` and model `Echo Dot (2nd gen)`. The
-firmware-update product title is `Encore Echo Dot` (formerly
-`Encore Linux`); this is not the unit's name. The configured per-unit name stays
-the hostname and discovery/friendly name, and the real wlan0 MAC, entity object
-IDs/keys and project ID remain unchanged. Existing Home Assistant user-assigned
-names are not rewritten; no registry migration or re-pairing is needed.
+ESPHome reports the friendly name `Biscuit`, manufacturer `Amazon`, model
+`Echo Dot (2nd gen)`, and the booted image's version without the package revision.
+The project name `Encore Satellite.Amazon Echo Dot (2nd gen)` makes Home Assistant
+display `Amazon Echo Dot (2nd gen)` by `Encore Satellite` in Device info.
+The `Firmware update` entity uses the title `Encore Satellite` and reports core
+versions without package revisions. The configured per-unit name stays the
+hostname, and the real wlan0 MAC and entity object IDs/keys remain unchanged.
+Existing Home Assistant user-assigned names are not rewritten; no re-pairing is needed.
 
 Kernel and Sendspin builders, source-kit paths and provenance use Biscuit.
 Rebuild old development artifacts: the renamed build inputs intentionally have

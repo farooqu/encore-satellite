@@ -23,6 +23,9 @@ func TestHomeAssistantKeyEnablesEncryptedControlsAfterReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	r.ConfigureHardware("  ACME Inc. ", " Tab\t10.1  Pro ")
+	r.ConfigureUpdates(make(updateRequests, 1), " 1.2.3-dev.4 ")
+	r.UpdateStatus("dev", r.UpdateGeneration(), "1.2.4", "Update available", true, false)
 	if err := r.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -32,6 +35,20 @@ func TestHomeAssistantKeyEnablesEncryptedControlsAfterReopen(t *testing.T) {
 	}
 	first := esphome.PSK{51, 7, 19}
 	bootstrap := pairingNoisePeer(t, esphome.PSK{})
+	checkInfo := func(peer func(proto.Message, proto.Message), version string, provisionable bool) {
+		t.Helper()
+		info := &api.DeviceInfoResponse{}
+		peer(&api.DeviceInfoRequest{}, info)
+		if info.ApiEncryptionProvisionable != provisionable || info.MacAddress != r.MAC() || info.Name != r.Name() {
+			t.Fatal("ESPHome did not preserve per-unit identity or report the correct provisioning state", info)
+		}
+		if info.FriendlyName != "Generic Android" || info.ProjectName != "Encore Satellite.ACME Inc․ Tab 10․1 Pro" ||
+			info.Manufacturer != "ACME Inc." || info.Model != "Tab 10.1 Pro" ||
+			info.ProjectVersion != version || info.EsphomeVersion != esphome.DefaultESPHomeVersion {
+			t.Fatalf("incorrect Android metadata (want installed version %q): %v", version, info)
+		}
+	}
+	checkInfo(bootstrap, "1.2.3-dev.4", true)
 	request := &api.NoiseEncryptionSetKeyRequest{Key: []byte(first.String())}
 	response := &api.NoiseEncryptionSetKeyResponse{}
 	bootstrap(request, response)
@@ -40,11 +57,7 @@ func TestHomeAssistantKeyEnablesEncryptedControlsAfterReopen(t *testing.T) {
 	}
 	waitForESPHomeState(t, r, "paired")
 	paired := pairingNoisePeer(t, first)
-	info := &api.DeviceInfoResponse{}
-	paired(&api.DeviceInfoRequest{}, info)
-	if info.ApiEncryptionProvisionable || info.MacAddress != r.MAC() {
-		t.Fatal("encrypted handoff did not preserve identity or close provisioning")
-	}
+	checkInfo(paired, "1.2.3-dev.4", false)
 	paired(&api.NoiseEncryptionSetKeyRequest{Key: []byte((esphome.PSK{6, 3}).String())}, response)
 	if response.Success {
 		t.Fatal("paired endpoint accepted a replacement key")
@@ -54,6 +67,8 @@ func TestHomeAssistantKeyEnablesEncryptedControlsAfterReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	installed.ConfigureHardware("ACME Inc.", "Tab 10.1 Pro")
+	installed.ConfigureUpdates(make(updateRequests, 1), "1.2.4")
 	if err := installed.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +76,7 @@ func TestHomeAssistantKeyEnablesEncryptedControlsAfterReopen(t *testing.T) {
 	if installed.NoiseKey() != first.String() {
 		t.Fatal("runtime did not reload the HA key")
 	}
-	pairingNoisePeer(t, first)(&api.PingRequest{}, &api.PingResponse{})
+	checkInfo(pairingNoisePeer(t, first), "1.2.4", false)
 }
 
 func TestHomeAssistantPairingExpiresAndRequiresAnotherTap(t *testing.T) {
@@ -96,8 +111,12 @@ func TestHomeAssistantPairingExpiresAndRequiresAnotherTap(t *testing.T) {
 	}
 	send, receive := loopbackPeer(t, addr)
 	send(&api.DeviceInfoRequest{})
-	if info := receive().(*api.DeviceInfoResponse); !info.ApiEncryptionProvisionable {
+	info := receive().(*api.DeviceInfoResponse)
+	if !info.ApiEncryptionProvisionable {
 		t.Fatal("fresh advertised identity did not accept provisioning")
+	}
+	if info.ProjectName != "Encore Satellite.Unknown" || info.ProjectVersion != "unknown" {
+		t.Fatal("missing hardware or version must not produce blank display fields", info)
 	}
 	if err := r.PairHomeAssistant(); err == nil {
 		t.Fatal("second tap replaced an active window")

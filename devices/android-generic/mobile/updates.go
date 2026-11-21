@@ -30,7 +30,7 @@ func (r *Runtime) ConfigureUpdates(host UpdateHost, current string) {
 	r.mu.Lock()
 	r.updater = host
 	r.updateState = &api.UpdateStateResponse{Key: updateKey, CurrentVersion: current, LatestVersion: current,
-		MissingState: true, Title: "Encore APK", ReleaseSummary: "Not checked yet"}
+		MissingState: true, Title: controls.UpdateTitle, ReleaseSummary: "Not checked yet"}
 	r.mu.Unlock()
 }
 

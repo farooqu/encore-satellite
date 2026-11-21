@@ -80,8 +80,8 @@ func newLinuxUpdates(selectionPath, manifestPath string) (*linuxUpdates, error) 
 	if err = json.Unmarshal(b, &u.client.Installed); err != nil {
 		return nil, err
 	}
-	u.state = api.UpdateStateResponse{Key: linuxUpdateKey, Title: "Encore Echo Dot", MissingState: true, ReleaseSummary: "Check for updates; signed update trust must be provisioned locally"}
-	u.state.CurrentVersion = updateVersion(u.client.Installed.CoreVersion, u.client.Installed.Revision)
+	u.state = api.UpdateStateResponse{Key: linuxUpdateKey, Title: controls.UpdateTitle, CurrentVersion: u.client.Installed.CoreVersion,
+		MissingState: true, ReleaseSummary: "Check for updates; signed update trust must be provisioned locally"}
 	if err := u.loadSelection(u.client.Installed.Channel); err != nil {
 		return nil, err
 	}
@@ -110,9 +110,6 @@ func (u *linuxUpdates) loadSelection(defaultChannel string) error {
 	u.channel, u.generation = saved.Channel, saved.Generation
 	return nil
 }
-func updateVersion(core string, revision int64) string {
-	return fmt.Sprintf("%s (revision %d)", core, revision)
-}
 
 func newARM64Updates(selectionPath, manifestPath string) (*linuxUpdates, error) {
 	b, err := os.ReadFile(manifestPath)
@@ -134,10 +131,9 @@ func newARM64Updates(selectionPath, manifestPath string) (*linuxUpdates, error) 
 		}
 		store = nativeab.Device()
 	}
-	version := updateVersion(m.CoreVersion, m.Revision)
 	u := &linuxUpdates{
 		channel: "stable", jobs: make(chan updateRequest, 1),
-		state: api.UpdateStateResponse{Key: linuxUpdateKey, Title: "Encore Biscuit", CurrentVersion: version, LatestVersion: version},
+		state: api.UpdateStateResponse{Key: linuxUpdateKey, Title: controls.UpdateTitle, CurrentVersion: m.CoreVersion, LatestVersion: m.CoreVersion},
 		client: linuxupdate.Client{Installed: m, Key: linuxupdate.BiscuitARM64Root(), Directory: "/data/encore/updates",
 			BaseURL: "https://umer.thefarooqs.net/encore-satellite"},
 		arm64:  store,
@@ -293,7 +289,7 @@ func (u *linuxUpdates) executeARM64(ctx context.Context, job updateRequest, chan
 		u.offer = offer
 		u.state.LatestVersion = u.state.CurrentVersion
 		if offer != nil {
-			u.state.LatestVersion = updateVersion(offer.CoreVersion, offer.Revision)
+			u.state.LatestVersion = offer.CoreVersion
 		}
 		u.state.ReleaseSummary = summary
 	}
@@ -424,10 +420,10 @@ func (u *linuxUpdates) execute(ctx context.Context, job updateRequest, changed f
 		return
 	}
 	if r == nil {
-		status(updateVersion(i.CoreVersion, i.Revision), "No eligible newer core on selected channel; waiting", true, false)
+		status(i.CoreVersion, "No eligible newer core on selected channel; waiting", true, false)
 		return
 	}
-	latest := updateVersion(r.CoreVersion, r.Revision)
+	latest := r.CoreVersion
 	if !job.install {
 		status(latest, "Update available; installation requires an explicit Update request", true, false)
 		return

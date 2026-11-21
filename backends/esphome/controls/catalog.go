@@ -12,8 +12,11 @@ func button(id, name, icon string, k uint32, category api.EntityCategory) Entity
 	return Entity[*api.ButtonCommandRequest]{&api.ListEntitiesButtonResponse{ObjectId: id, Key: k, Name: name, Icon: icon, EntityCategory: category}}
 }
 
-func update(id, name string, k uint32) Entity[*api.UpdateCommandRequest] {
-	return Entity[*api.UpdateCommandRequest]{&api.ListEntitiesUpdateResponse{ObjectId: id, Key: k, Name: name, DeviceClass: "firmware", EntityCategory: esphome.CategoryConfig}}
+// UpdateTitle identifies the software independently of its packaging format.
+const UpdateTitle = "Encore Satellite"
+
+func update(id string, k uint32) Entity[*api.UpdateCommandRequest] {
+	return Entity[*api.UpdateCommandRequest]{&api.ListEntitiesUpdateResponse{ObjectId: id, Key: k, Name: "Firmware update", DeviceClass: "firmware", EntityCategory: esphome.CategoryConfig}}
 }
 
 func UpdateChannel(k uint32) Entity[*api.SelectCommandRequest] {
@@ -41,10 +44,10 @@ const (
 var (
 	Dashboard       = Entity[*api.TextCommandRequest]{&api.ListEntitiesTextResponse{ObjectId: "dashboard_url", Key: DashboardKey, Name: "Dashboard URL", EntityCategory: esphome.CategoryConfig, MaxLength: 1024}}
 	ReloadDashboard = button("reload_dashboard", "Reload dashboard", "", 0x454e4302, esphome.CategoryConfig)
-	AndroidUpdate   = update("apk_update", "APK update", AndroidUpdateKey)
+	AndroidUpdate   = update("apk_update", AndroidUpdateKey)
 	AndroidChannel  = UpdateChannel(AndroidChannelKey)
 	AndroidCheck    = CheckUpdates(0x454e4305)
-	LinuxUpdate     = update("linux_update", "Linux update", key("linux_update"))
+	LinuxUpdate     = update("linux_update", key("linux_update"))
 	LinuxChannel    = UpdateChannel(key("update_channel"))
 	LinuxCheck      = CheckUpdates(key("check_updates"))
 	SpeakerMute     = Entity[*api.SwitchCommandRequest]{&api.ListEntitiesSwitchResponse{ObjectId: "speaker_mute", Key: key("speaker_mute"), Name: "Speaker mute", Icon: "mdi:volume-off"}}

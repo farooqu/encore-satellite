@@ -18,6 +18,7 @@ import (
 	"github.com/ygelfand/go-esphome-device/mdns"
 
 	"github.com/farooqu/encore-satellite/backends/bluetooth"
+	esphomeadapter "github.com/farooqu/encore-satellite/backends/esphome"
 	"github.com/farooqu/encore-satellite/backends/esphome/announcements"
 	"github.com/farooqu/encore-satellite/backends/esphome/sensors"
 	"github.com/farooqu/encore-satellite/backends/incubator"
@@ -31,6 +32,15 @@ import (
 func packagedExecutable(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0111 != 0
+}
+
+func (d *biscuitControls) controlInfo(name, mac string) esphome.Info {
+	var version string
+	if d.updates != nil {
+		version = d.updates.client.Installed.CoreVersion
+	}
+	return esphomeadapter.DeviceInfo(esphome.Info{Name: name, FriendlyName: "Biscuit", MACAddress: mac,
+		Manufacturer: "Amazon", Model: "Echo Dot (2nd gen)", Version: version})
 }
 
 // Run opens the real host before exposing this package's sole Incubator backend. It does
@@ -172,7 +182,8 @@ func Run(parent context.Context, c Config, probeReference bool) error {
 		controls.music = newMusic(c, saved, player)
 	}
 	apiAction := make(chan struct{})
-	apiAd := mdns.Config{Name: c.Name, FriendlyName: c.Name, Port: esphome.DefaultPort, MACAddress: mac.String(), Version: "2026.10.1", Platform: "encore", Board: "biscuit", IPs: ips}
+	apiInfo := controls.controlInfo(c.Name, mac.String())
+	apiAd := mdns.Config{Name: apiInfo.Name, FriendlyName: apiInfo.FriendlyName, Port: esphome.DefaultPort, MACAddress: apiInfo.MACAddress, Version: apiInfo.ESPHomeVersion, Platform: "encore", Board: "biscuit", IPs: ips}
 	voiceListener, err := net.Listen("tcp4", ":6055")
 	if err != nil {
 		return err
@@ -210,8 +221,7 @@ func Run(parent context.Context, c Config, probeReference bool) error {
 		}
 	})
 	start(func() error {
-		info := esphome.Info{Name: c.Name, FriendlyName: c.Name, MACAddress: mac.String(), Manufacturer: "Encore Satellite", Model: "Echo Dot (2nd gen)", Version: "0.1.0-dev.0", ProjectName: "encore.satellite"}
-		return controls.serveAPI(ctx, KeyPath, apiAction, info, apiAd)
+		return controls.serveAPI(ctx, KeyPath, apiAction, apiInfo, apiAd)
 	})
 	voice := &incubator.Server{Engine: engine, Name: c.Name, MAC: mac.String(), Version: "0.1.0-dev.0", EnableModels: true, CallAEC: true, MonitorAEC: true}
 	start(func() error {
