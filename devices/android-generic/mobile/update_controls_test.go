@@ -130,10 +130,29 @@ func TestAPKUpdateCapabilityOnESPHome(t *testing.T) {
 				}
 				r.UpdateStatus("dev", 0, "", "Downloading", false, true)
 				assertStatus("1.2.4", "Downloading", true, true)
+				r.UpdateStatus("dev", 0, "1.2.4", "Installing; waiting for Android", true, true)
+				assertStatus("1.2.4", "Installing; waiting for Android", true, true)
 				r.UpdateStatus("dev", 0, "1.2.4", "Approve on device", true, false)
 				assertStatus("1.2.4", "Approve on device", true, false)
+				r.UpdateStatus("dev", 0, "1.2.4", "Android installation cancelled or failed", true, false)
+				assertStatus("1.2.4", "Android installation cancelled or failed", true, false)
 				r.UpdateStatus("dev", 0, "", "Bad feed signature", false, false)
 				assertStatus("1.2.3", "Bad feed signature", false, false)
+
+				// Simulate the replacement APK configuring a new version, then
+				// have a new ESPHome connection subscribe to the resulting state.
+				r.ConfigureUpdates(requests, "1.2.4")
+				r.UpdateStatus("dev", 0, "1.2.4", "Installed Encore 1.2.4", true, false)
+				send, receive := loopbackPeer(t, l.Addr().String())
+				send(&api.SubscribeStatesRequest{})
+				for gotStatus, gotVersion := false, false; !gotStatus || !gotVersion; {
+					switch got := receive().(type) {
+					case *api.TextSensorStateResponse:
+						gotStatus = got.Key == diagnostic && got.State == "Installed Encore 1.2.4"
+					case *api.UpdateStateResponse:
+						gotVersion = got.Key == update && got.CurrentVersion == "1.2.4" && got.LatestVersion == "1.2.4" && !got.MissingState && !got.InProgress
+					}
+				}
 			}
 		})
 	}

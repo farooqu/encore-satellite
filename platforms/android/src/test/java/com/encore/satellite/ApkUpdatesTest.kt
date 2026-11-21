@@ -1,8 +1,17 @@
 package com.encore.satellite
 
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.content.Context
+import android.content.Intent
+import android.content.pm.ApplicationInfo
+import android.content.pm.PackageInfo
+import android.content.pm.PackageInstaller
+import android.content.pm.PackageManager
 import android.content.pm.Signature
+import android.content.pm.SigningInfo
+import android.net.Uri
+import android.os.Bundle
 import com.encore.engine.mobile.Mobile
 import com.encore.engine.mobile.Runtime
 import com.encore.engine.mobile.UpdateHost
@@ -19,6 +28,8 @@ import org.robolectric.annotation.Implementation
 import org.robolectric.annotation.Implements
 import org.robolectric.shadow.api.Shadow
 import org.robolectric.Shadows.shadowOf
+import org.robolectric.shadows.ShadowLooper
+import java.security.MessageDigest
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -31,6 +42,143 @@ import java.util.concurrent.atomic.AtomicInteger
 class ApkUpdatesTest {
     @Test fun stoppedWorkerRejectsLateResultsAndCanRestart() = exerciseStop(false)
     @Test fun parentCancellationClosesSynchronousFetchAndRejectsLateResults() = exerciseStop(true)
+
+    @Test @Config(sdk = [34]) fun commitsOnlyEligibleExplicitInstallsAndTracksAndroidResults() {
+        val context = RuntimeEnvironment.getApplication()
+        val pm = shadowOf(context.packageManager)
+        val sessions = context.packageManager.packageInstaller
+        val signature = Signature("abcd")
+        fun signing(signature: Signature) = SigningInfo().also { shadowOf(it).setSignatures(arrayOf(signature)) }
+        val installed = context.packageManager.getPackageInfo(context.packageName, PackageManager.GET_META_DATA).apply {
+            setLongVersionCode(19)
+            signingInfo = signing(signature)
+        }
+        pm.installPackage(installed)
+        context.filesDir.resolve("engine").mkdirs()
+        context.filesDir.resolve("engine/encore.json").writeText("""{"channel":"dev","channel_generation":4}""")
+        fun sha256(bytes: ByteArray) = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
+        val bytes = "verified fixture APK".toByteArray()
+        val digest = sha256(bytes)
+        val file = context.filesDir.resolve("updates/apks/$digest.apk").apply { parentFile!!.mkdirs(); writeBytes(bytes) }
+        val archive = PackageInfo().apply {
+            packageName = context.packageName
+            setLongVersionCode(23)
+            versionName = "1.2.4"
+            signingInfo = signing(signature)
+            applicationInfo = ApplicationInfo().apply { metaData = Bundle().apply { putString("com.encore.core_version", "1.2.4") } }
+        }
+        pm.setPackageArchiveInfo(file.absolutePath, archive)
+        val release = JSONObject().put("application_id", context.packageName).put("revision", 23).put("version", "1.2.4")
+            .put("core_version", "1.2.4").put("certificate_sha256", sha256(signature.toByteArray()))
+            .put("target", "android-generic").put("backend", "incubator").put("channel", "dev")
+            .put("size", bytes.size).put("sha256", digest).put("expires", System.currentTimeMillis() / 1000 + 3600)
+        val install = ApkInstall(context)
+        val parent = SupervisorJob()
+        val runtime = Shadow.newInstanceOf(Runtime::class.java)
+        UpdateMobileShadow.attempt = UpdateAttempt().also {
+            it.json = JSONObject().put("release", release).toString()
+            it.release.countDown()
+        }
+        UpdateRuntimeShadow.statuses.clear()
+        val updater = ApkUpdates(context, runtime, CoroutineScope(parent + Dispatchers.Unconfined))
+        fun awaitStatus(prefix: String) {
+            repeat(300) {
+                ShadowLooper.idleMainLooper()
+                if (UpdateRuntimeShadow.statuses.lastOrNull()?.startsWith(prefix) == true) return
+                Thread.sleep(10)
+            }
+            fail("Expected $prefix; got ${UpdateRuntimeShadow.statuses}")
+        }
+        fun request() {
+            UpdateRuntimeShadow.statuses.clear()
+            updater.requestUpdate("dev", 4, true)
+        }
+        fun deliver(id: Int, reportedId: Int, status: Int) {
+            val callback = PendingIntent.getBroadcast(context, id, Intent(context, ApkInstallReceiver::class.java)
+                .setData(Uri.parse("encore-install:$id")), PendingIntent.FLAG_NO_CREATE or PendingIntent.FLAG_MUTABLE)
+            assertNotNull("Session must persist an explicit callback", callback)
+            callback!!.send(context, 0, Intent().putExtra(PackageInstaller.EXTRA_SESSION_ID, reportedId)
+                .putExtra(PackageInstaller.EXTRA_STATUS, status).putExtra(PackageInstaller.EXTRA_STATUS_MESSAGE, "test installer failure"))
+            ShadowLooper.idleMainLooper()
+        }
+        try {
+            pm.setCanRequestPackageInstalls(true)
+            updater.start()
+            awaitStatus("Update available")
+            assertTrue(sessions.mySessions.isEmpty())
+            request() // Android source approval alone is not opt-in.
+            awaitStatus("Downloaded and verified")
+            assertTrue(sessions.mySessions.isEmpty())
+            install.preferences.edit().putBoolean("remote_install", true).commit()
+            pm.setCanRequestPackageInstalls(false)
+            request()
+            awaitStatus("Downloaded and verified")
+            assertTrue(sessions.mySessions.isEmpty())
+            pm.setCanRequestPackageInstalls(true)
+            UpdateRuntimeShadow.statuses.clear()
+            updater.requestUpdate("dev", 4, false)
+            awaitStatus("Downloaded and verified")
+            assertTrue("Even an eligible check must not start a session", sessions.mySessions.isEmpty())
+
+            archive.signingInfo = signing(Signature("1234"))
+            pm.setPackageArchiveInfo(file.absolutePath, archive)
+            request()
+            awaitStatus("Update unavailable: APK signer mismatch")
+            assertTrue(sessions.mySessions.isEmpty())
+            archive.signingInfo = signing(signature)
+            pm.setPackageArchiveInfo(file.absolutePath, archive)
+            request()
+            awaitStatus("Installing verified APK")
+            val first = sessions.mySessions.single().sessionId
+            assertEquals(context.packageName, sessions.getSessionInfo(first)!!.appPackageName)
+            deliver(first, first + 1, PackageInstaller.STATUS_FAILURE)
+            awaitStatus("Installing verified APK")
+            deliver(first, first, PackageInstaller.STATUS_PENDING_USER_ACTION)
+            awaitStatus("Android requires local confirmation")
+            assertTrue("The native session must close before offering local review", sessions.mySessions.isEmpty())
+            assertNull("Android callback must not launch an Activity", shadowOf(context).nextStartedActivity)
+            assertNotNull(install.preferences.getString("pending", null))
+
+            request()
+            awaitStatus("Installing verified APK")
+            updater.stop()
+            sessions.abandonSession(sessions.mySessions.single().sessionId)
+            updater.start()
+            awaitStatus("Android's install session ended without replacing Encore")
+
+            request()
+            awaitStatus("Installing verified APK")
+            val retry = sessions.mySessions.single().sessionId
+            deliver(retry, retry, PackageInstaller.STATUS_FAILURE_BLOCKED)
+            awaitStatus("Android did not install the update: test installer failure")
+            assertFalse(install.attempt!!.installBusy)
+            assertFalse(install.installed(install.attempt!!))
+            sessions.abandonSession(retry) // The shadow doesn't remove a finished session.
+
+            request()
+            awaitStatus("Installing verified APK")
+            val last = sessions.mySessions.single().sessionId
+            deliver(last, last, PackageInstaller.STATUS_SUCCESS)
+            awaitStatus("Android reports success; waiting to verify")
+            assertFalse("Installer success is not replacement evidence", install.installed(install.attempt!!))
+            val replaced = Intent(Intent.ACTION_MY_PACKAGE_REPLACED)
+            ApkInstallReceiver().onReceive(context, replaced)
+            assertNull(shadowOf(context).nextStartedService)
+            // Simulate the replacement process running the new APK/core. No OS install is performed by Robolectric.
+            val attempt = install.attempt!!.put("core_version", BuildConfig.CORE_VERSION)
+            install.preferences.edit().putString("attempt", attempt.toString()).commit()
+            pm.installPackage(installed.apply { setLongVersionCode(23) })
+            ApkInstallReceiver().onReceive(context, replaced)
+            assertEquals(UPDATE_RECONNECT, shadowOf(context).nextStartedService?.action)
+            updater.stop()
+            updater.start()
+            awaitStatus("Installed Encore ${BuildConfig.CORE_VERSION}")
+            assertFalse("The replaced APK must not remain pending", install.preferences.contains("pending"))
+        } finally {
+            updater.stop()
+            parent.cancel()
+        }
+    }
 
     @Suppress("DEPRECATION")
     private fun exerciseStop(cancelParent: Boolean) {
@@ -97,6 +245,7 @@ class UpdateAttempt {
     val release = CountDownLatch(1)
     val closed = CountDownLatch(1)
     val published = CountDownLatch(1)
+    var json = """{"release":{"core_version":"1.2.0","revision":8,"sha256":"${"a".repeat(64)}"}}"""
 }
 
 @Implements(value = Mobile::class, isInAndroidSdk = false)
@@ -133,7 +282,7 @@ class UpdateFetchShadow {
         attempt.calls.incrementAndGet()
         attempt.entered.countDown()
         check(attempt.release.await(5, TimeUnit.SECONDS)) { "Test never released Fetch" }
-        return """{"release":{"core_version":"1.2.0","revision":8,"sha256":"${"a".repeat(64)}"}}"""
+        return attempt.json
     }
     @Implementation fun close() { attempt.closed.countDown() }
 }

@@ -58,10 +58,14 @@ The separate [signing/update foundation](../../release/android-updates.md) adds
 APK CI checks, an explicitly gated signed-candidate workflow, authenticated
 stable/dev feeds, a persistent ESPHome **Update channel** dropdown, available-update
 reporting and an install request. Changing channel only changes subsequent checks;
-it never installs or downgrades. Feeds/keys are not provisioned by default. Android
-installation still requires local approval; use **Settings → Review downloaded
-update** or the update notification after requesting it through ESPHome. Existing
-debug installs cannot accept a different production signing key in-place.
+it never installs or downgrades. Feeds/keys are not provisioned by default. On
+Android 12+, opt in under **Settings → Review downloaded update → Remote installs**
+and allow APKs from Encore in Android Settings. After setup, only an explicit
+Home Assistant **Install** request can start a native self-update. If Android
+requires confirmation or native updates are off or unavailable, use the Settings
+review action or update notification. See [Android updates](../../release/android-updates.md)
+for checks and restart behavior. Debug and production identities and signing keys
+are not interchangeable.
 
 Use a build machine with sufficient RAM: the initial 2 GB orb exhausted memory;
 the complete APK/test/lint build passed in an `a1.large` orb. Default settings use

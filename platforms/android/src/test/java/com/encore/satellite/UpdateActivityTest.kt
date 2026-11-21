@@ -1,6 +1,7 @@
 package com.encore.satellite
 
 import android.app.AlertDialog
+import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ApplicationInfo
@@ -31,6 +32,45 @@ import java.security.MessageDigest
 @Config(sdk = [35], qualifiers = "w1280dp-h800dp-mdpi")
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 class UpdateActivityTest {
+    @Test fun remoteEnrollmentRequiresLocalConsentAndAllowedInstallSource() {
+        val context = RuntimeEnvironment.getApplication()
+        val pm = shadowOf(context.packageManager)
+        val install = ApkInstall(context)
+        install.preferences.edit().clear().commit()
+        pm.setCanRequestPackageInstalls(false)
+        val controller = Robolectric.buildActivity(UpdateActivity::class.java).setup()
+        val activity = shadowOf(controller.get())
+        ShadowAlertDialog.getLatestAlertDialog().getButton(AlertDialog.BUTTON_NEUTRAL).performClick()
+        ShadowLooper.idleMainLooper()
+        capture("android-update-remote-opt-in")
+        assertFalse(install.optedIn)
+        assertNull(activity.nextStartedActivity)
+        ShadowAlertDialog.getLatestAlertDialog().getButton(AlertDialog.BUTTON_POSITIVE).performClick()
+        ShadowLooper.idleMainLooper()
+        val settings = activity.nextStartedActivityForResult.intent
+        assertEquals(settings, activity.nextStartedActivity) // The shadow also records this launch in the general queue.
+        assertEquals(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, settings.action)
+        assertEquals("package:${context.packageName}", settings.data.toString())
+        assertFalse("Opt-in is not saved before Android source approval", install.optedIn)
+        pm.setCanRequestPackageInstalls(true)
+        activity.receiveResult(settings, Activity.RESULT_CANCELED, null) // Settings' result code is not authoritative.
+        ShadowLooper.idleMainLooper()
+        assertTrue(install.canInstall)
+        capture("android-update-remote-enabled")
+        assertEquals("Enrollment must not replay a pending install", 0, context.packageManager.packageInstaller.mySessions.size)
+        assertNull(activity.nextStartedActivity)
+        controller.pause().stop().destroy()
+
+        val reopen = Robolectric.buildActivity(UpdateActivity::class.java).setup()
+        ShadowAlertDialog.getLatestAlertDialog().getButton(AlertDialog.BUTTON_NEUTRAL).performClick()
+        ShadowLooper.idleMainLooper()
+        capture("android-update-remote-disable")
+        ShadowAlertDialog.getLatestAlertDialog().getButton(AlertDialog.BUTTON_POSITIVE).performClick()
+        ShadowLooper.idleMainLooper()
+        assertFalse(install.optedIn)
+        reopen.pause().stop().destroy()
+    }
+
     @Test fun updateRequiresAnExplicitLocalActionAndInstallPermission() {
         val context = RuntimeEnvironment.getApplication()
         val preferences = context.getSharedPreferences("updates", Context.MODE_PRIVATE)
@@ -134,7 +174,11 @@ class UpdateActivityTest {
             assertEquals("content://${context.packageName}.updates/apk/$digest.apk", installer.data.toString())
             assertEquals(Intent.FLAG_GRANT_READ_URI_PERMISSION,
                 installer.flags and (Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION))
+            assertTrue(installer.getBooleanExtra(Intent.EXTRA_RETURN_RESULT, false))
             assertEquals(request, preferences.getString("pending", null))
+            activity.receiveResult(installer, Activity.RESULT_CANCELED, null)
+            ShadowLooper.idleMainLooper()
+            assertTrue(ApkInstall(context).attempt!!.getString("status").startsWith("Android installation cancelled"))
             controller.pause().stop().destroy()
         }
     }

@@ -33,26 +33,37 @@ its signed feed entry.
 Choose **Install** on the **APK update** entity. Encore rechecks the selected channel, downloads to private
 storage, verifies size/SHA-256, and independently checks the APK package name,
 versionCode/versionName and signer against both metadata and the installed app.
-Changing channel during a request discards its result. A persisted selection
-generation also fences dev→stable→dev, not just different channel strings. Pending installation is
+Changing channel before handing the APK to Android discards the request. A persisted
+selection generation also fences dev→stable→dev, not just different channel strings. Pending installation is
 checked again against the current channel/expiry/digest/package/signer on-device.
 If another replacement changes the installed core, the old request is rejected;
 check/request again against the new semantic-version floor.
 Content-addressed files prevent a later download replacing the bytes in an
 installer's URI. Only individually granted APK URIs leave private storage.
 
-The app posts a notification; tapping it, or choosing **Settings → Review
-downloaded update** in Encore, offers a local
-confirmation. If necessary, the user enables **Allow from this source** in Android
-Settings, then chooses **Review downloaded update** again. Android's own package installer asks for final
-confirmation. No Activity is forced to the foreground by a remote command.
-Notification permission is optional: the Settings review action also finds the pending
-request. Opening Android's installer does not mark the APK installed. If the user
-cancels, the verified request stays retryable on the device while still eligible;
-if it expires or is superseded, request the update again through Home Assistant.
-Successful replacement can kill the process; reopen Encore and **Start satellite**
-to reconnect and report the installed version from the replacement APK.
-There is no automatic boot/replacement restart or installation-success claim.
+On Android 12+, the tablet owner can open **Settings → Review downloaded update →
+Remote installs → Enable** in Encore and grant Android's **Allow from this source**
+if needed. Opt-in is off by default and never replays a download. A subsequent
+explicit HA **Install** request can commit a `PackageInstaller` self-update with
+no second tap if Android permits. Check for updates, scheduled checks and channel
+changes never commit an install. Opt-out or revoked source permission returns
+future requests to local review; an already committed session belongs to Android.
+
+If Android requires confirmation, Encore releases the unattended session and
+offers the same verified APK through the local installer. Older Android versions
+and devices without both approvals use local review from the start. Tap the
+notification or **Settings → Review downloaded update**; approve the source if
+needed, then approve the Android installer. No remote request opens an Activity.
+Notification permission is optional. A failure or cancellation does not advance
+the installed version; a verified local request stays retryable until it expires
+or is superseded.
+
+Only the replacement APK reports its new installed version. After a tracked
+native install (including its local confirmation fallback), Encore attempts to
+reconnect to HA using the same pairing, without starting the microphone from
+the background. Open Encore to restore microphone access under the existing mute
+preference, or to reconnect manually if Android blocked background startup. For
+ordinary prompted installs, reopen Encore to reconnect. There is no boot restart.
 
 Signed release builds use `com.encore.satellite.incubator` on both channels,
 as approved by Umer for the first Incubator dev release. Stable is a feed choice,
@@ -181,12 +192,11 @@ package revision cannot authorize an older/equal core through ordinary OTA.
 
 ## Device constraints, not hardware qualification
 
-- **Tab A7 Lite:** Samsung publishes Android 11 through 14 manuals for SM-T220
-  ([support](https://www.samsung.com/sec/support/model/SM-T220NZAFKOO)). Read the
-  actual unit's OS/ABI and installed signer before provisioning. On stock Android
-  8+ this app needs per-source install permission and user approval. Enterprise
-  policy/Samsung Auto Blocker, if present/enabled, may block sideloading. Do not
-  disable shared device protections remotely.
+- **Tab A7 Lite:** the first native qualification target is the SM-T220 running
+  LineageOS 21 GSI (API 34). App/OS support for a native session does not prove
+  unattended behavior on that unit. Verify OS/ABI and installed signer first.
+  Enterprise policy or Samsung Auto Blocker on stock firmware may block installs;
+  do not disable shared device protections remotely.
 - **Portal 2:** Meta now documents ADB support for Portal 1st/2nd gen: Settings →
   Debug → ADB Enabled, USB-C, then allow the computer on-device
   ([setup](https://developers.meta.com/vr/documentation/android-apps/portal-setup/)).
@@ -201,13 +211,22 @@ package revision cannot authorize an older/equal core through ordinary OTA.
 - ADB installation is a privileged host action; it does not grant the installed
   app that privilege. Normal APK signing and `REQUEST_INSTALL_PACKAGES` do not
   grant `INSTALL_PACKAGES` or device-owner status.
-- Android offers conditional unattended update paths on newer OS versions and
-  managed device-owner/affiliated-profile-owner installations
-  ([PackageInstaller](https://developer.android.com/reference/android/content/pm/PackageInstaller),
-  [user-action rules](https://developer.android.com/reference/android/content/pm/PackageInstaller.SessionParams#setRequireUserAction(int))).
-  They require separate provisioning/permissions/qualification. This app requests
-  neither device administration nor unattended-update permission. Never promise
-  silent installs on either device from these foundations.
+- Encore uses [Android's conditional self-update API](https://developer.android.com/reference/android/content/pm/PackageInstaller.SessionParams#setRequireUserAction(int)),
+  not device administration or a privileged Portal helper. Android's installer
+  makes the final decision, including when device policy requires a prompt.
+
+### Physical Tab test (separate approval)
+
+Use an isolated signed feed with two increasing core versions and versionCodes,
+the same application ID and APK signer, and matching feed trust in both APKs. The
+first APK must already contain this updater; updating the earlier Dev APK into
+that baseline still takes local confirmation. Pair the baseline, opt in locally,
+and verify a check alone does not install. Then select **Install** in HA and do
+not touch the tablet. Record the installer outcome and confirm HA reconnects on
+the new version with the same pairing. Next open Encore and verify voice and the
+saved mute preference. Exercise a confirmation/cancel/retry case on an approved
+baseline as well; don't lower an installed revision in place or change the live
+feed just to rerun qualification.
 
 ## Gates before activating this for users
 

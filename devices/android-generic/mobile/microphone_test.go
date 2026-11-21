@@ -74,6 +74,19 @@ listing:
 		t.Fatal(err)
 	}
 	state(false)
+	// Replacement can resume the control connection without a foreground
+	// Activity. HA must see muted until the user opens Encore again.
+	r.SuspendCapture(true)
+	state(true)
+	reconnect, err := Open(dir, silentOutput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reconnect.engine.Snapshot().Muted {
+		t.Fatal("update recovery overwrote the saved unmuted setting")
+	}
+	r.SuspendCapture(false)
+	state(false)
 	if err := os.Mkdir(r.path+".tmp", 0700); err != nil {
 		t.Fatal(err)
 	}

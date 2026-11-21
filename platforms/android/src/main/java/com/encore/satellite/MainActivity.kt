@@ -82,7 +82,8 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startIfPermitted() {
-        if (microphonePermissionGranted && !startRequested && service?.state?.value?.running == false) startSatellite(false)
+        val connected = service ?: return
+        if (microphonePermissionGranted && !startRequested && (!connected.state.value.running || connected.awaitingUpdateMicrophone)) startSatellite(false)
     }
 
     private fun startSatellite(unmute: Boolean) {

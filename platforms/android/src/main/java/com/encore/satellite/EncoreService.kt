@@ -41,6 +41,8 @@ class EncoreService : Service() {
     private var music: MusicPlayer? = null
     private var light: LightSensorHost? = null
     private var microphoneForeground = false
+    internal var awaitingUpdateMicrophone = false
+        private set
     private var monitorScreenVisible = false
     private val focus by lazy {
         SatelliteAudioFocus(getSystemService(AudioManager::class.java)) { focused ->
@@ -106,7 +108,10 @@ class EncoreService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == "stop") { shutdown(); stopSelf(); return START_NOT_STICKY }
+        if (intent?.action == "stop") { ApkInstall(this).cancelReconnect(); shutdown(); stopSelf(); return START_NOT_STICKY }
+        val updateReconnect = intent?.action == UPDATE_RECONNECT
+        if (updateReconnect && mutable.value.running) return START_NOT_STICKY
+        if (updateReconnect) awaitingUpdateMicrophone = true
         val bluetoothStart = intent?.action == "bluetooth"
         if (bluetoothStart && mutable.value.running) {
             runCatching { setBluetoothEnabled(true) }.onFailure { problem("Could not save Bluetooth setting") }
@@ -117,23 +122,34 @@ class EncoreService : Service() {
         val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
         val stop = PendingIntent.getService(this, 1, Intent(this, EncoreService::class.java).setAction("stop"), PendingIntent.FLAG_IMMUTABLE)
         val notification = Notification.Builder(this, "encore").setSmallIcon(R.drawable.ic_encore)
-            .setContentTitle("Encore Incubator").setContentText("Satellite running; voice and music controls are available in the app")
+            .setContentTitle("Encore Incubator").setContentText(if (updateReconnect) "Encore updated. Open Encore to restore microphone access."
+                else "Satellite running; voice and music controls are available in the app")
             .setContentIntent(open).setOngoing(true).addAction(Notification.Action.Builder(null, "Stop satellite", stop).build()).build()
         try {
-            val enableMicrophone = intent?.action != "music" && !bluetoothStart && checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+            val enableMicrophone = !updateReconnect && intent?.action != "music" && !bluetoothStart && checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
             microphoneForeground = microphoneForeground || enableMicrophone
             val bluetoothReady = bluetooth.state.value.supported && bluetooth.state.value.permitted
             check(!bluetoothStart || bluetoothReady) { "Bluetooth permission or implementation unavailable" }
             if (Build.VERSION.SDK_INT >= 30) startForeground(1, notification,
-                (if (bluetoothStart) ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE else ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK) or
+                (when {
+                    updateReconnect && Build.VERSION.SDK_INT >= 34 -> ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+                    bluetoothStart -> ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+                    updateReconnect -> ServiceInfo.FOREGROUND_SERVICE_TYPE_NONE // pre-34 has no type requirement for this work
+                    else -> ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
+                }) or
                     (if (microphoneForeground) ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE else 0))
             else startForeground(1, notification)
             val engine = checkNotNull(runtime) { "Engine unavailable" }
+            if (updateReconnect) engine.suspendCapture(true)
+            if (enableMicrophone && awaitingUpdateMicrophone) {
+                engine.suspendCapture(false)
+                awaitingUpdateMicrophone = false
+            }
             if (!mutable.value.running) {
                 // Optional sensor failure never prevents voice/music startup.
                 light = runCatching { LightSensorHost.create(this) }.getOrNull()
                 engine.setLightHost(light)
-                if (!microphoneForeground && !bluetoothStart) engine.setMuted(true)
+                if (!microphoneForeground && !bluetoothStart && !updateReconnect) engine.setMuted(true)
                 engine.start()
                 updates?.start()
                 mutable.value = mutable.value.copy(running = true)
@@ -153,10 +169,11 @@ class EncoreService : Service() {
                 if (!mutable.value.running) { stopForeground(STOP_FOREGROUND_REMOVE); stopSelf(startId) }
                 return START_NOT_STICKY
             }
-            runtime?.let { runCatching { it.setMuted(true) } }
+            if (!awaitingUpdateMicrophone) runtime?.let { runCatching { it.setMuted(true) } }
             stopMicrophone()
             problem("Could not start satellite: ${error.message}")
             shutdown()
+            if (updateReconnect) stopSelf(startId)
         }
         return START_NOT_STICKY
     }
@@ -285,7 +302,7 @@ class EncoreService : Service() {
         updates?.stop()
         // Gate capture before BLE cleanup or any network subscriber can wait.
         inhibitPresentation("muted", true)
-        runtime?.let { runCatching { it.setMuted(true) } }
+        if (!awaitingUpdateMicrophone) runtime?.let { runCatching { it.setMuted(true) } }
         stopMicrophone()
         bluetooth.running(false)
         runtime?.close()

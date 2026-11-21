@@ -72,6 +72,7 @@ type Runtime struct {
 	bluetoothConfigured bool
 	light               *illuminance.Monitor
 	microphone          *sensors.Microphone
+	captureSuspended    bool
 }
 
 func Open(directory string, output Audio) (*Runtime, error) {
@@ -330,10 +331,21 @@ func (r *Runtime) SetMonitorVisible(id int64, visible bool) {
 	}
 }
 
+// SuspendCapture gates voice while Android reconnects the satellite without
+// while-in-use microphone permission. This does not change the saved mute setting.
+func (r *Runtime) SuspendCapture(suspended bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.captureSuspended = suspended
+	muted := r.config.Muted || suspended
+	r.engine.SetMuted(muted)
+	r.microphone.SetMuted(muted)
+}
+
 func (r *Runtime) SetMuted(muted bool) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	defer func() { r.microphone.SetMuted(r.config.Muted) }()
+	defer func() { r.microphone.SetMuted(r.config.Muted || r.captureSuspended) }()
 	// Gate before saving and retain effective mute for subsequent settings saves.
 	// Only an explicitly requested, successfully saved unmute clears this latch.
 	r.engine.SetMuted(true)
@@ -344,7 +356,7 @@ func (r *Runtime) SetMuted(muted bool) error {
 		return err
 	}
 	r.config = c
-	r.engine.SetMuted(muted)
+	r.engine.SetMuted(muted || r.captureSuspended)
 	return nil
 }
 
