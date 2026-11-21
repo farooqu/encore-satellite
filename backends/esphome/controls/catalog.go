@@ -57,7 +57,6 @@ var (
 	SendspinStop    = button("sendspin_stop", "Stop music", "mdi:stop", key("sendspin_stop"), 0)
 	RingBrightness  = Entity[*api.NumberCommandRequest]{&api.ListEntitiesNumberResponse{ObjectId: "ring_brightness", Key: key("ring_brightness"), Name: "Ring brightness", Icon: "mdi:brightness-6", EntityCategory: esphome.CategoryConfig, MinValue: 1, MaxValue: 100, Step: 1, UnitOfMeasurement: "%"}}
 	RingMotion      = Entity[*api.SwitchCommandRequest]{&api.ListEntitiesSwitchResponse{ObjectId: "ring_reduced_motion", Key: key("ring_reduced_motion"), Name: "Ring reduced motion", Icon: "mdi:animation-outline", EntityCategory: esphome.CategoryConfig}}
-	SSHEnabled      = Entity[*api.SwitchCommandRequest]{&api.ListEntitiesSwitchResponse{ObjectId: "ssh_enabled", Key: key("ssh_enabled"), Name: "SSH enabled", Icon: "mdi:console-network", EntityCategory: esphome.CategoryConfig}}
 	ApplyVoiceMode  = button("apply_voice_mode", "Apply and restart", "mdi:restart", key("apply_voice_mode"), esphome.CategoryConfig)
 	Announcements   = Entity[*api.MediaPlayerCommandRequest]{&api.ListEntitiesMediaPlayerResponse{
 		ObjectId: "announcements", Key: key("announcements"), Name: "Announcements", Icon: "mdi:speaker-message",

@@ -154,6 +154,9 @@ press Action again to retry. This is independent of Improv Wi-Fi setup and does
 not unmute the microphone. If the controls do not appear after the key handoff,
 reload the ESPHome integration in Home Assistant so it reconnects with its saved key.
 
+New installs start with **Bluetooth proxy** enabled. The Home Assistant switch
+can still turn it off without disabling Improv Wi-Fi setup.
+
 Pair only on a trusted LAN: the zero-PSK exchange protects the key from passive
 sniffing, not active impersonation. While the window is open, a reachable client
 could claim the device. HA versions without zero-PSK provisioning cannot pair

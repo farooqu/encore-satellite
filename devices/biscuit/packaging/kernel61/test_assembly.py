@@ -412,7 +412,7 @@ class RootfsTests(unittest.TestCase):
         struct.pack_into("<I", elf, 64, 1)
         tools = ("bin/busybox.static", "usr/local/bin/wmtup", "usr/local/bin/btbridge",
                  "sbin/wpa_supplicant", "sbin/wpa_cli", "lib/apk/db/installed", "usr/bin/dbus-daemon",
-                 "usr/bin/dbus-uuidgen", "usr/lib/bluetooth/bluetoothd", "usr/sbin/dropbear", "usr/bin/dropbearkey",
+                 "usr/bin/dbus-uuidgen", "usr/lib/bluetooth/bluetoothd",
                  "usr/bin/flock", "usr/sbin/iptables-legacy", "usr/sbin/ip6tables-legacy",
                  "usr/sbin/iptables-legacy-restore", "usr/sbin/ip6tables-legacy-restore")
         old = ("usr/local/sbin/slotctl", "usr/local/sbin/encore-recovery", "usr/local/sbin/encore-health", "etc/encore-package.json")
@@ -441,10 +441,12 @@ class RootfsTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     rootfs.rootfs_archive(archive(extra), {})
 
-    def test_starter_packages_clock_sync_and_replaces_old_rescue_console(self):
+    def test_starter_packages_clock_sync_without_legacy_rescue_services(self):
+        obsolete = ("usr/local/sbin/usb-console", "etc/encore/usb-consoles", "usr/local/sbin/encore-ssh",
+                    "usr/sbin/dropbear", "usr/bin/dropbearkey", "usr/bin/dbclient", "root/.ssh/authorized_keys")
         archive = io.BytesIO()
         with tarfile.open(fileobj=archive, mode="w:gz") as t:
-            for name in ("usr/local/sbin/usb-rescue", "usr/local/sbin/usb-console", "etc/encore/usb-consoles"):
+            for name in ("usr/local/sbin/usb-rescue", *obsolete):
                 data = b"obsolete"
                 member = tarfile.TarInfo(name)
                 member.size = len(data)
@@ -454,8 +456,7 @@ class RootfsTests(unittest.TestCase):
             self.assertIn(b"::respawn:/usr/local/sbin/runtime-service time-sync",
                           t.extractfile("etc/inittab").read().splitlines())
             self.assertEqual(t.extractfile("usr/local/sbin/usb-rescue").read(), (HERE / "usb-rescue").read_bytes())
-            self.assertNotIn("usr/local/sbin/usb-console", t.getnames())
-            self.assertNotIn("etc/encore/usb-consoles", t.getnames())
+            self.assertTrue(set(obsolete).isdisjoint(t.getnames()))
 
 
 if __name__ == "__main__":

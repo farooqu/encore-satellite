@@ -167,12 +167,9 @@ predates those fixes; revision 6 predates models. No candidate is hardware
 qualified or approved to flash. Revision 8 changes the recovery initramfs and
 therefore the shared-base identity: it is not an app-slot update from revision 7.
 
-Revision 11 is the current local maintenance candidate, rebased onto
-`ec2167426d43c67afcc40b21cd5c33f2470117d7`. It adds key-only SSH, transactional
-Wi-Fi management and the explicit dual-stack firewall described below. Its
-Alpine base adds Dropbear and legacy firewall tools, so it is not an ordinary
-app-slot update from revision 8 either. The exact bundle/provenance and source
-kits must be retained; no shared-base migration or hardware acceptance is implied.
+The retired ARMv7 revision 11 introduced transactional Wi-Fi management and the
+dual-stack firewall. Its Alpine base changed, so it was not an ordinary app-slot
+update from revision 8. New images do not ship its optional SSH service.
 
 ## Physical buttons
 
@@ -335,8 +332,8 @@ does not reopen setup. Only WPA2-Personal is currently accepted by either setup 
 
 The encrypted ESPHome common-control endpoint on 6053 stays available independently
 of Incubator voice on 6055. It does not advertise a second Assist voice satellite.
-It exposes one persistent `Bluetooth proxy` switch, **OFF by default**. When ON,
-HA can scan, make active GATT connections and request supported Just Works bonding.
+It exposes one persistent `Bluetooth proxy` switch, **ON for new installs**. When
+ON, HA can scan, make active GATT connections and request supported Just Works bonding.
 There is no separate connection/pairing toggle and no invented PIN/numeric-comparison
 confirmation. Improv works while the proxy is off, before voice/proxy workers start.
 BlueZ bonds and the stable controller identity live under `/data/encore`, outside
@@ -353,33 +350,8 @@ controller. See [Bluetooth implementation and evidence](../../docs/bluetooth-lin
 These controls are assembled only by `devices/biscuit`, on its **encrypted
 ESPHome endpoint**. They are not shared voice-backend entities and are not
 included in Android/APK packages. No plaintext management endpoint is enabled.
-Possession of the device's Noise key grants maintenance access, including the
-ability to authorize root SSH keys; treat it as an administrator credential.
-
-### Key-only SSH
-
-SSH is **OFF by default**. Initial USB installation accepts
-`--ssh-public-key-file /path/to/owner.pub` and, separately, `--ssh-enable`.
-Enabling requires a valid key; supplying a key alone does not enable the service.
-Only single Ed25519 or RSA 3072–8192-bit OpenSSH public keys are accepted.
-Private keys, authorized-key options, certificates and multiline input are
-rejected. Never give the installer a private key.
-
-Home Assistant discovers an **SSH enabled** switch, **SSH running** status and
-public-key fingerprints. Its ESPHome actions are `ssh_status`,
-`ssh_set_enabled(enabled)`, `ssh_add_key(public_key)` and
-`ssh_remove_key(fingerprint)`. Rotate with **add → test a new SSH login → remove
-the old fingerprint**; deleting the last key while SSH is enabled is refused.
-Adding/removing keys does not terminate existing sessions; disabling SSH closes
-the firewall gate and terminates the managed listener and sessions.
-
-Dropbear runs independently of the voice runtime, with root public-key login
-only, password/keyboard-interactive authentication and forwarding disabled.
-Keys, enablement and the device-generated Ed25519 host identity persist privately
-under `/data/encore/ssh`, outside application slots. No host or authorized key is
-shipped in the bundle. Verify the host fingerprint through the trusted physical
-USB console before accepting the first SSH connection. An enabled setting is
-not proof that the supervisor is actually running: inspect **SSH running** too.
+Possession of the device's Noise key grants maintenance access; treat it as an
+administrator credential. Use physical USB for shell recovery.
 
 ### Transactional Wi-Fi changes
 
@@ -409,17 +381,15 @@ default to DROP; OUTPUT is allowed. The package owns these device filter tables.
 
 | Inbound service | Policy |
 |---|---|
-| TCP 22, SSH | Wi-Fi only, and only while the SSH supervisor enables its gate; the gate precedes established-connection acceptance. |
 | TCP 6053, ESPHome controls/Bluetooth proxy | Wi-Fi only; controls require the nonzero per-device Noise key. Unpaired starter builds listen only during the Action-authorized [first-pair window](packaging/kernel61/README.md#add-the-esphome-controls-to-home-assistant). |
 | TCP 6055, native Voice Incubator protocol 2 | Wi-Fi only; **unauthenticated**, use only on a trusted LAN/VLAN, never port-forward. |
 | UDP 5353 | mDNS multicast destinations and unicast replies on Wi-Fi. |
 | DHCP and selected ICMP/IPv6 discovery | Allowed on Wi-Fi for address configuration, diagnostics and network operation. |
 | Sendspin | No inbound port: outbound authenticated connection and its replies only. |
 
-Loopback and established/related replies are allowed, except that the SSH gate
-can block established SSH traffic. USB network SSH and unrelated Techo5 ports
-remain closed. Physical USB serial is a separate root console, not a firewall
-exception. Host namespace packet tests do not qualify the Dot's vendor kernel.
+Loopback and established/related replies are allowed. Unlisted inbound ports,
+including TCP 22, remain closed. Physical USB serial is a separate root console,
+not a firewall exception. Host packet tests do not qualify the Dot's vendor kernel.
 
 ## Sendspin music
 

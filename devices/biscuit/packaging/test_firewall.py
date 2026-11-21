@@ -72,31 +72,20 @@ def verdict(table, chain="INPUT", **packet):
 
 
 def stub():
-    """Atomic restore/replace model; invoked only through private tool wrappers."""
+    """Atomic restore model; invoked only through private tool wrappers."""
     root = Path(os.environ["FIREWALL_TEST_ROOT"])
     name = os.environ["FIREWALL_TEST_TOOL"]
     family = "6" if name.startswith("ip6") else "4"
-    restore = name.endswith("-restore")
-    args = sys.argv[1:]
-    assert args[:2] == ["-w", "5"]
-    operation = "restore" if restore else args[-1].lower()
+    assert sys.argv[1:] == ["-w", "5"]
     with (root / "events").open("a") as log:
-        log.write(json.dumps([os.getppid(), family, operation]) + "\n")
+        log.write(json.dumps([os.getppid(), family]) + "\n")
     if os.environ.get("FIREWALL_TEST_DELAY"):
         time.sleep(0.03)
-    source = sys.stdin.read() if restore else ""
-    if f"{family}-{operation}" in os.environ.get("FIREWALL_TEST_FAIL", "").split(","):
+    source = sys.stdin.read()
+    if f"{family}-restore" == os.environ.get("FIREWALL_TEST_FAIL"):
         sys.exit(1)
     path = root / (family + ".json")
-    if restore:
-        assert args == ["-w", "5"]
-        table = parse_rules(source)
-    else:
-        assert args[2:] == ["-R", "ENCORE-SSH", "1", "-i", "wlan0", "-j", args[-1]]
-        assert args[-1] in ("ACCEPT", "DROP")
-        table = json.loads(path.read_text())
-        table["ENCORE-SSH"]["rules"][0] = {"-i": "wlan0", "-j": args[-1]}
-    path.write_text(json.dumps(table))
+    path.write_text(json.dumps(parse_rules(source)))
 
 
 def packet_peer():
@@ -108,9 +97,7 @@ def packet_peer():
         family = socket.AF_INET6 if request.get("family") == 6 else socket.AF_INET
         operation = request["op"]
         try:
-            if operation == "send":
-                held[request["key"]].sendall(b"blocked-after-close")
-            elif operation == "accept":
+            if operation == "accept":
                 connection, _ = held[request["key"]].accept()
                 connection.sendall(b"outbound-reply")
                 connection.close()
@@ -207,22 +194,6 @@ def packet_scenario(script):
                 outbound.connect((client, 12345))
                 assert request(op="accept", key=f"reply{family}")
                 assert outbound.recv(32) == b"outbound-reply"
-            firewall("ssh-open")
-            assert request(op="connect", family=family, address=address, port=22, key=f"ssh{family}")
-            assert not request(op="connect", family=family, address=usb, port=22)
-            listener = next(s for s in listeners if s.family == (socket.AF_INET if family == 4 else socket.AF_INET6) and s.getsockname()[1] == 22)
-            connection, _ = listener.accept()
-            connection.settimeout(0.35)
-            firewall("ssh-close")
-            assert request(op="send", key=f"ssh{family}")
-            try:
-                connection.recv(64)
-                raise AssertionError("established SSH survived ssh-close")
-            except socket.timeout:
-                pass
-            finally:
-                connection.close()
-            assert not request(op="connect", family=family, address=address, port=22)
             # Receive joined groups so wrong-destination rejection is the
             # firewall's work, not the network stack discarding an unjoined group.
             with socket.socket(socket.AF_INET if family == 4 else socket.AF_INET6, socket.SOCK_DGRAM) as discovery:
@@ -261,7 +232,7 @@ def packet_scenario(script):
             assert dhcp.recv(64) == b"discovery-or-dhcp"
         for tool in ("iptables-legacy", "ip6tables-legacy"):
             assert "-P FORWARD DROP" in command(tool, "-S")
-        print("IPv4+IPv6: legacy restore/reapply, service boundaries, USB isolation, SSH open/close including established traffic, outbound replies, ICMP/ND, mDNS multicast/unicast and DHCPv4 unicast/broadcast packets passed")
+        print("IPv4+IPv6: legacy restore/reapply, service boundaries, USB isolation, outbound replies, ICMP/ND, mDNS multicast/unicast and DHCPv4 unicast/broadcast packets passed")
     finally:
         for listener in listeners:
             listener.close()
@@ -281,7 +252,7 @@ class FirewallTests(unittest.TestCase):
         # A deliberately closed PATH: a missing stub must not invoke a host tool.
         for name in ("cat", "mkdir", "flock"):
             (tools / name).symlink_to(shutil.which(name))
-        for name in TOOLS:
+        for name in TOOLS[2:]:
             path = tools / name
             path.write_text(f"#!{sys.executable}\nimport os, runpy\n"
                             f"os.environ['FIREWALL_TEST_TOOL'] = {name!r}\n"
@@ -300,23 +271,15 @@ class FirewallTests(unittest.TestCase):
     def tables(self):
         return [json.loads((self.root / (family + ".json")).read_text()) for family in ("4", "6")]
 
-    def assert_ssh(self, opened):
-        for table in self.tables():
-            for state in ("NEW", "ESTABLISHED", "RELATED"):
-                for interface in ("wlan0", "usb0", "eth0"):
-                    result = verdict(table, **{"-i": interface, "-p": "tcp", "--dport": 22, "--state": state})
-                    self.assertEqual(result, "ACCEPT" if opened and interface == "wlan0" else "DROP")
-
     def test_services_and_default_boundaries(self):
         self.run_firewall()
-        self.assert_ssh(False)
         for table in self.tables():
             self.assertEqual(verdict(table, "FORWARD"), "DROP")
             self.assertEqual(verdict(table, "OUTPUT"), "ACCEPT")
             self.assertEqual(verdict(table, **{"-i": "lo"}), "ACCEPT")
             self.assertEqual(verdict(table, **{"--state": "ESTABLISHED"}), "ACCEPT")
             self.assertEqual(verdict(table, **{"--state": "RELATED"}), "ACCEPT")
-            for port in (6053, 6055, 6054, 8181, 8928, 5000, 7000, 4070, 80, 443):
+            for port in (22, 6053, 6055, 6054, 8181, 8928, 5000, 7000, 4070, 80, 443):
                 for interface in ("wlan0", "usb0"):
                     result = verdict(table, **{"-i": interface, "-p": "tcp", "--dport": port})
                     self.assertEqual(result, "ACCEPT" if interface == "wlan0" and port in (6053, 6055) else "DROP")
@@ -345,60 +308,37 @@ class FirewallTests(unittest.TestCase):
                 self.assertEqual(verdict(table, **{"-i": "wlan0", "-p": protocol, "-s": dhcp["-s"], option: kind}), "ACCEPT")
             self.assertEqual(verdict(table, **{"-i": "wlan0", "-p": protocol, option: 137}), "DROP")
 
-    def test_transitions_and_repeated_apply(self):
+    def test_repeated_apply(self):
         self.run_firewall()
         original = self.tables()
-        for _ in range(2):
-            self.run_firewall("ssh-open")
-            self.assert_ssh(True)
-            self.run_firewall("ssh-close")
-            self.assert_ssh(False)
-            self.run_firewall()
-            self.assertEqual(self.tables(), original)
-        self.run_firewall("ssh-open")
         self.run_firewall()
-        self.assert_ssh(False)
+        self.assertEqual(self.tables(), original)
 
-    def test_partial_failures_close_both_families(self):
-        for action in ("apply", "ssh-open", "ssh-close"):
-            failures = ("4-restore", "6-restore") + (("4-accept", "6-accept") if action == "ssh-open" else ())
-            for failure in failures:
-                with self.subTest(action=action, failure=failure):
-                    self.run_firewall("ssh-open")
-                    self.run_firewall(action, fail=failure, success=False)
-                    self.assert_ssh(False)
-
-    def test_unrecoverable_failure_is_not_success(self):
-        self.run_firewall("ssh-open")
-        result = self.run_firewall("ssh-close", fail="4-restore,4-drop", success=False)
-        self.assertIn("could not confirm SSH closed", result.stderr)
-
-    def test_busybox_shell_lifecycle_and_rollback(self):
+    def test_busybox_shell_apply(self):
         busybox = shutil.which("busybox")
         if not busybox:
             self.skipTest("BusyBox shell not installed")
-        for action, failure in (("apply", ""), ("ssh-open", ""), ("ssh-close", ""),
-                                ("ssh-open", "6-accept")):
-            result = subprocess.run([busybox, "sh", str(self.script), action], env={
-                **self.env, "FIREWALL_TEST_FAIL": failure}, capture_output=True, text=True, timeout=10)
-            self.assertEqual(result.returncode == 0, not failure, result.stderr)
-            self.assert_ssh(action == "ssh-open" and not failure)
+        subprocess.run([busybox, "sh", str(self.script), "apply"], env=self.env, check=True, timeout=10)
+        self.assertEqual(len(self.tables()), 2)
 
-    def test_initial_failure_still_attempts_ipv6(self):
-        self.run_firewall(fail="4-restore", success=False)
-        self.assertEqual(json.loads((self.root / "6.json").read_text())["INPUT"]["policy"], "DROP")
+    def test_failure_still_attempts_both_families(self):
+        for fail, other in ((4, 6), (6, 4)):
+            with self.subTest(family=fail):
+                (self.root / f"{other}.json").unlink(missing_ok=True)
+                result = self.run_firewall(fail=f"{fail}-restore", success=False)
+                self.assertIn("policy install failed", result.stderr)
+                self.assertEqual(json.loads((self.root / f"{other}.json").read_text())["INPUT"]["policy"], "DROP")
 
     def test_missing_required_tools_and_invalid_command(self):
+        self.assertEqual(self.run_firewall("ssh-open", success=False).returncode, 2)
         (self.root / "tools/ip6tables-legacy-restore").unlink()
         self.run_firewall(success=False)
         self.assertFalse((self.root / "events").exists())
-        self.run_firewall("invalid", success=False)
-        self.assertFalse((self.root / "events").exists())
 
     def test_updates_are_serialized(self):
-        processes = [subprocess.Popen(["/bin/sh", str(self.script), action], env={
+        processes = [subprocess.Popen(["/bin/sh", str(self.script), "apply"], env={
             **self.env, "FIREWALL_TEST_DELAY": "1"}, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            for action in ("ssh-open", "ssh-close", "apply", "ssh-open")]
+            for _ in range(4)]
         for process in processes:
             _, stderr = process.communicate(timeout=15)
             self.assertEqual(process.returncode, 0, stderr)

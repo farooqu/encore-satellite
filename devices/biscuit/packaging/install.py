@@ -12,7 +12,6 @@ from pathlib import Path, PurePosixPath
 import re
 import secrets
 import shlex
-import struct
 import subprocess
 import sys
 import tarfile
@@ -104,76 +103,6 @@ def wifi_config(ssid, password):
     return f"ctrl_interface=/run/wpa_supplicant\nupdate_config=0\nnetwork={{\n ssid={encoded.hex()}\n psk={psk}\n}}\n".encode()
 
 
-def ssh_public_key(data):
-    """One OpenSSH Ed25519 or RSA 3072..8192 public key; never options/private keys.
-
-    Match the Go manager: canonical SSH wire encoding, odd RSA modulus, odd
-    exponent 3..2**24-1, ASCII comment discarded, at most 2048 input bytes.
-    """
-    bad = ValueError("expected one Ed25519 or RSA 3072..8192 public key without options")
-    if len(data) > 2048:
-        raise bad
-    data = data.removesuffix(b"\n")
-    if any(c < 32 and c != 9 or c > 126 for c in data):
-        raise bad
-    fields = data.split()
-    if len(fields) < 2 or fields[0] not in (b"ssh-ed25519", b"ssh-rsa"):
-        raise bad
-    try:
-        wire = base64.b64decode(fields[1], validate=True)
-    except ValueError:
-        raise bad from None
-    if base64.b64encode(wire) != fields[1]:
-        raise bad
-    offset = 0
-
-    def string():
-        nonlocal offset
-        if offset + 4 > len(wire):
-            raise bad
-        size, = struct.unpack_from(">I", wire, offset)
-        offset += 4
-        if offset + size > len(wire):
-            raise bad
-        value = wire[offset:offset+size]
-        offset += size
-        return value
-
-    def mpint():
-        value = string()
-        if (not value or value[0] & 128
-                or value[0] == 0 and (len(value) == 1 or not value[1] & 128)):
-            raise bad
-        return int.from_bytes(value, "big")
-
-    if string() != fields[0]:
-        raise bad
-    if fields[0] == b"ssh-ed25519":
-        if len(string()) != 32:
-            raise bad
-    else:
-        exponent, modulus = mpint(), mpint()
-        if not (3 <= exponent < 2**24 and exponent % 2 and 3072 <= modulus.bit_length() <= 8192 and modulus % 2):
-            raise bad
-    if offset != len(wire):
-        raise bad
-    return fields[0] + b" " + fields[1] + b"\n"
-
-
-def ssh_install_config(args):
-    path = getattr(args, "ssh_public_key_file", None)
-    enabled = getattr(args, "ssh_enable", False)
-    if args.command != "install" and (path or enabled):
-        raise ValueError("SSH installation flags are only for fresh installs")
-    key = None
-    if path is not None:
-        with path.open("rb") as stream:
-            key = ssh_public_key(stream.read(2049))
-    if enabled and key is None:
-        raise ValueError("--ssh-enable requires --ssh-public-key-file")
-    return key, enabled
-
-
 class ADB:
     def __init__(self, serial):
         self.prefix = ["adb", "-s", serial]
@@ -251,7 +180,6 @@ def update_eligibility(adb, manifest, store):
 def install(args):
     # Validate before even read-only device operations, including dry-run.
     starter = args.command in ("install-arm64", "transition-arm64")
-    ssh_install_config(args)
     if starter:
         from kernel61 import starter_install
         manifest, rootfs, image = starter_install.load_bundle(args.bundle, args.sha256)
@@ -337,7 +265,6 @@ def install(args):
 
 def apply_locked(args, adb, manifest, files, store, name, recovery, image):
     fresh = args.command == "install"
-    ssh_key, ssh_enabled = ssh_install_config(args)
     existing = adb.shell(f"if [ -e {store}/format ]; then cat {store}/format; fi").strip().decode()
     if fresh and existing:
         raise ValueError("Encore already exists; use update to preserve it (no implicit factory reset)")
@@ -351,7 +278,7 @@ def apply_locked(args, adb, manifest, files, store, name, recovery, image):
         # Default to first-boot Improv. USB credentials are an explicit alternative,
         # never a migration of Fire OS state.
         wifi = wifi_config(args.wifi_ssid, getpass.getpass("Wi-Fi WPA2 passphrase: ")) if args.wifi_ssid is not None else None
-        config = json.dumps({"schema": 1, "name": name}).encode()
+        config = json.dumps({"schema": 1, "name": name, "bluetooth_proxy": True}).encode()
         # Keep actual TWRP and misc backups, not personal Fire OS settings.
         args.backup_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         if args.backup_dir.is_symlink():
@@ -415,13 +342,6 @@ def apply_locked(args, adb, manifest, files, store, name, recovery, image):
                 adb.write(f"{store}/firmware/{filename}", data)
             adb.write("/data/encore/config.json", config)
             adb.write("/data/encore/noise.psk", key)
-            if ssh_key is not None:
-                adb.shell("mkdir /data/encore/ssh; chmod 700 /data/encore/ssh")
-                adb.write("/data/encore/ssh/authorized_keys.new", ssh_key)
-                adb.shell("mv /data/encore/ssh/authorized_keys.new /data/encore/ssh/authorized_keys; sync")
-                if ssh_enabled:
-                    adb.write("/data/encore/ssh/enabled.new", b"1\n")
-                    adb.shell("mv /data/encore/ssh/enabled.new /data/encore/ssh/enabled; sync")
             if wifi is not None:
                 adb.write("/data/encore/wpa_supplicant.conf", wifi)
             adb.write(f"{store}/twrp.img", recovery)

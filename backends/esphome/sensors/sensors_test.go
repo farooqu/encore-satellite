@@ -28,8 +28,7 @@ func TestDiscoveryAndStateFollowSuppliedCapabilities(t *testing.T) {
 		{name: "microphone only", sources: sensors.Sources{MicrophoneMuted: func() bool { return false }}, want: []string{"microphone_muted"}},
 		{name: "light only without sample", sources: sensors.Sources{Illuminance: illuminance.New(lightSource{})}, want: []string{"illuminance"}},
 		{name: "microphone and light", sources: sensors.Sources{MicrophoneMuted: func() bool { return true }, Illuminance: illuminance.New(lightSource{})}, want: []string{"microphone_muted", "illuminance"}},
-		{name: "network without SSH", sources: sensors.Sources{WiFi: func() (string, string, error) { return "", "", errors.New("offline") }}, want: []string{"wifi_ssid", "wifi_change_status"}},
-		{name: "SSH without network management", sources: sensors.Sources{SSH: func() (bool, []string, error) { return false, nil, nil }}, want: []string{"ssh_running", "ssh_fingerprints"}},
+		{name: "network unavailable", sources: sensors.Sources{WiFi: func() (string, string, error) { return "", "", errors.New("offline") }}, want: []string{"wifi_ssid", "wifi_change_status"}},
 		{name: "lab", sources: sensors.Sources{RunningVoiceMode: func() string { return "Voice Incubator" }}, want: []string{"running_voice_mode"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

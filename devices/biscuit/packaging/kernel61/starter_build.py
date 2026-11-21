@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from kernel61.arm64_assemble import HERE, ROOT, boot_image, initramfs, repack, sha
 from kernel61.rootfs import arm64_bluetooth
 from kernel61.starter_install import BASE_SHA, CA_SHA, DTB_SHA, FORMAT, IMAGE_SHA, boot_compatibility, load_bundle, native_identity, starter_version
+from package import legacy_ssh_member
 
 
 def native_payloads(output, image, dtb, header, busybox, fpga, runtime, verifier, core, revision, lock_sha):
@@ -76,15 +77,14 @@ fi''')
     # entry points and its fixed naming overlay rather than ship hidden extras.
     discard = {"etc/encore/runtime-config.json", "etc/encore/usb-consoles", "usr/local/bin/pcm-silence-check",
                "usr/local/bin/hwprobe", "usr/local/bin/encore-diagnostic",
-               "usr/local/sbin/arm64-hardware-probe", "usr/local/sbin/usb-console",
-               "usr/local/sbin/encore-ssh", "usr/local/bin/encore-sendspin"}
+               "usr/local/sbin/arm64-hardware-probe", "usr/local/sbin/usb-console", "usr/local/bin/encore-sendspin"}
     clean = io.BytesIO()
     with tarfile.open(fileobj=io.BytesIO(base), mode="r:gz") as src, tarfile.open(fileobj=clean, mode="w") as dst:
         for member in src:
             member.name = member.name.removeprefix("./")
             # Regenerate the PAX path too, or it overrides the normalized name.
             member.pax_headers.pop("path", None)
-            if member.name not in discard:
+            if member.name not in discard and not legacy_ssh_member(member.name):
                 dst.addfile(member, src.extractfile(member) if member.isfile() else None)
     return repack(clean.getvalue(), files)
 

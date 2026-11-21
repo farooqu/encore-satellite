@@ -286,11 +286,6 @@ func (d *biscuitControls) writable() controls.Bindings {
 			}),
 		)
 	}
-	if d.management != nil && d.management.ssh != nil {
-		bindings = append(bindings, controls.SSHEnabled.Bind(func(_ *esphome.Conn, v *api.SwitchCommandRequest) error {
-			return report(d.management.ssh.setEnabled(v.State))
-		}))
-	}
 	if d.music != nil {
 		bindings = append(bindings,
 			controls.Sendspin.Bind(func(_ *esphome.Conn, v *api.SwitchCommandRequest) error {
@@ -386,14 +381,10 @@ func (d *biscuitControls) state(c *esphome.Conn) error {
 		return err
 	}
 	if d.management != nil {
-		diagnostics, ssh := d.management.states()
-		for _, state := range diagnostics {
+		for _, state := range d.management.sensorSources().States() {
 			if err := c.Send(state); err != nil {
 				return err
 			}
-		}
-		if ssh != nil {
-			return bindings.SendStates(c.Send, []proto.Message{ssh})
 		}
 	}
 	return nil

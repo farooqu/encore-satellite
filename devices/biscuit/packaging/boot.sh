@@ -14,7 +14,7 @@ mount -t ext4 -o noatime /dev/mmcblk0p15 /store
 mount -t ext4 -o noatime /dev/mmcblk0p16 /data
 chmod 700 /data/encore
 # Both IP families must be protected before any link or radio comes up.
-# set -e prevents base-ready (and therefore runtime/SSH) on install failure.
+# set -e prevents base-ready (and therefore the runtime) on install failure.
 /usr/local/sbin/encore-firewall apply
 ip link set lo up
 # Required paths are compiled into the MediaTek driver. Create before wmtup:

@@ -270,7 +270,7 @@ class BundleTests(unittest.TestCase):
             with tarfile.open(base, "w:gz") as archive:
                 for name in ("bin/busybox.static", "sbin/wpa_supplicant", "sbin/wpa_cli", "lib/apk/db/installed",
                              "usr/bin/dbus-daemon", "usr/bin/dbus-uuidgen", "usr/lib/bluetooth/bluetoothd",
-                             "usr/sbin/dropbear", "usr/bin/dropbearkey", "usr/bin/flock",
+                             "usr/bin/flock",
                              "usr/sbin/iptables-legacy", "usr/sbin/ip6tables-legacy",
                              "usr/sbin/iptables-legacy-restore", "usr/sbin/ip6tables-legacy-restore"):
                     item = tarfile.TarInfo(name)
@@ -288,6 +288,8 @@ class BundleTests(unittest.TestCase):
             self.assertEqual(files["kernel.zImage-dtb"], image)
             self.assertEqual(manifest["base"]["kernel_sha256"], package.sha(image))
             with tarfile.open(fileobj=io.BytesIO(files["rootfs.tar.gz"]), mode="r:gz") as archive:
+                self.assertNotIn("usr/local/sbin/encore-ssh", archive.getnames())
+                self.assertNotIn(b"encore-ssh", archive.extractfile("etc/inittab").read())
                 self.assertEqual(json.load(archive.extractfile("etc/encore-kernel.json")), record)
                 self.assertEqual(archive.extractfile("usr/share/licenses/encore/LICENSE").read(),
                                  (package.ROOT / "LICENSE").read_bytes())
@@ -517,7 +519,8 @@ class RecoveryTests(unittest.TestCase):
 
         starter_install.install_native_locked(adb, self.args, manifest, files, "native-dot")
         self.assertEqual([x.name for x in state.iterdir()], ["config.json"])
-        self.assertEqual(json.loads((state / "config.json").read_bytes()), {"schema": 1, "name": "native-dot"})
+        self.assertEqual(json.loads((state / "config.json").read_bytes()),
+                         {"schema": 1, "name": "native-dot", "bluetooth_proxy": True})
         for slot, number, old in (("a", 10, a), ("b", 11, b)):
             image = files[f"boot_{slot}.img"]
             self.assertEqual((p / f"mmcblk0p{number}").read_bytes(), image + old[len(image):])
@@ -570,6 +573,8 @@ class RecoveryTests(unittest.TestCase):
         self.assertFalse((self.args.backup_dir / "encore-api-key.txt").exists())
         self.assertEqual(sorted(p.name for p in (self.device / "data/encore").iterdir()),
                          ["config.json"])
+        config = json.loads((self.device / "data/encore/config.json").read_bytes())
+        self.assertIs(config["bluetooth_proxy"], True)
 
     def test_arm64_transition_publishes_only_after_flash_readback(self):
         self.check_arm64_transition(corrupt_readback=False)
@@ -668,7 +673,8 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(self.store("slots/a.state").read_text(), "trial 2\n")
         self.assertEqual(self.store("slots/b.state").read_text(), "trial 2\n")
         config = self.device / "data/encore/config.json"
-        self.assertEqual(json.loads(config.read_bytes()), {"schema": 1, "name": "kitchen-dot"})
+        self.assertEqual(json.loads(config.read_bytes()),
+                         {"schema": 1, "name": "kitchen-dot", "bluetooth_proxy": True})
         key = self.device / "data/encore/noise.psk"
         self.assertEqual(key.read_bytes(), (self.args.backup_dir / "encore-api-key.txt").read_bytes())
         self.assertEqual(key.stat().st_mode & 0o777, 0o600)
@@ -741,7 +747,7 @@ class RecoveryTests(unittest.TestCase):
         self.assertFalse((self.device / "data/encore/wpa_supplicant.conf").exists())
         config = json.loads((self.device / "data/encore/config.json").read_bytes())
         self.assertEqual(config["name"], install.device_name("test-unit"))
-        self.assertFalse(config.get("bluetooth_proxy", False))
+        self.assertIs(config["bluetooth_proxy"], True)
 
     def test_stock_recovery_installs_bundled_kernel_without_live_bluetooth(self):
         replacement = kernel_fixture(padding=4096)

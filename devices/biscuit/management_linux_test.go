@@ -33,8 +33,7 @@ func (managementRadio) Scan(ctx context.Context, _ bool, ready func() error, _ f
 // Exercise the production encrypted endpoint, including its combined listing
 // and actual Action dispatch. Only the radio, network adapter and PCM are fake.
 func TestLinuxManagementEncryptedAPI(t *testing.T) {
-	ssh := &sshManager{dataDir: filepath.Join(t.TempDir(), "ssh"), runDir: filepath.Join(t.TempDir(), "run")}
-	m, err := newManagement(ssh)
+	m, err := newManagement()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +79,7 @@ listing:
 			break listing
 		}
 	}
-	if len(actions) != 8 || entities["bluetooth_proxy"] == 0 || entities["sendspin"] == 0 || entities["ssh_enabled"] == 0 || entities["ssh_running"] == 0 || entities["ssh_fingerprints"] == 0 || entities["wifi_ssid"] == 0 || entities["wifi_change_status"] == 0 {
+	if len(actions) != 4 || actions["wifi_cancel"] == 0 || entities["bluetooth_proxy"] == 0 || entities["sendspin"] == 0 || entities["wifi_ssid"] == 0 || entities["wifi_change_status"] == 0 {
 		t.Fatalf("incomplete combined listing: actions=%v entities=%v", actions, entities)
 	}
 	call := func(name string, args ...*api.ExecuteServiceArgument) *api.ExecuteServiceResponse {
@@ -95,23 +94,8 @@ listing:
 			}
 		}
 	}
-	if r := call("ssh_set_enabled", &api.ExecuteServiceArgument{Bool_: true}); r.Success {
-		t.Fatal("enabled SSH without a public key")
-	}
-	if r := call("ssh_add_key", &api.ExecuteServiceArgument{String_: "command=\"reboot\" " + sshTestKey(t)}); r.Success {
-		t.Fatal("accepted authorized_keys options")
-	}
-	if r := call("ssh_add_key", &api.ExecuteServiceArgument{String_: sshTestKey(t)}); !r.Success {
-		t.Fatal("public key action failed:", r.ErrorMessage)
-	}
-	if r := call("ssh_set_enabled", &api.ExecuteServiceArgument{Bool_: true}); !r.Success {
-		t.Fatal("SSH enable failed:", r.ErrorMessage)
-	}
-	if r := call("ssh_set_enabled"); r.Success {
-		t.Fatal("missing bool argument silently disabled SSH")
-	}
-	if r := call("ssh_status"); !r.Success || !strings.Contains(string(r.ResponseData), `"enabled":true`) || !strings.Contains(string(r.ResponseData), `"running":false`) {
-		t.Fatal("configured status confused with running daemon", r)
+	if r := call("wifi_cancel"); r.Success {
+		t.Fatal("accepted a missing transaction ID")
 	}
 	password := "synthetic-wifi-password"
 	r := call("wifi_stage", &api.ExecuteServiceArgument{String_: "new-network"}, &api.ExecuteServiceArgument{String_: password})
@@ -141,21 +125,10 @@ listing:
 	}
 	stop()
 	peer.send(&api.SubscribeStatesRequest{})
-	sshAvailable, wifiUnavailable := false, false
-	for !sshAvailable || !wifiUnavailable {
-		switch state := peer.receive().(type) {
-		case *api.SwitchStateResponse:
-			if state.Key == entities["ssh_enabled"] {
-				sshAvailable = state.State && !state.MissingState
-			}
-		case *api.TextSensorStateResponse:
-			if state.Key == entities["wifi_change_status"] {
-				wifiUnavailable = state.State == "unavailable"
-			}
+	for {
+		if state, ok := peer.receive().(*api.TextSensorStateResponse); ok && state.Key == entities["wifi_change_status"] && state.State == "unavailable" {
+			break
 		}
-	}
-	if r := call("ssh_status"); !r.Success {
-		t.Fatal("Wi-Fi worker loss broke SSH management:", r.ErrorMessage)
 	}
 	peer.conn.Close()
 	if err := d.Serve(ctx, listener, esphome.Info{Name: c.Name}, esphome.PSK{}); err == nil {
@@ -164,7 +137,7 @@ listing:
 }
 
 func TestLinuxManagementWithoutOptionalServices(t *testing.T) {
-	m, err := newManagement(nil)
+	m, err := newManagement()
 	if err != nil {
 		t.Fatal(err)
 	}

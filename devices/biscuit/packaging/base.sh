@@ -14,7 +14,7 @@ docker run --rm --network host \
     # while its GPL-only/OpenSSL linkage grant remains unresolved.
     apk --arch aarch64 --root /rootfs --initdb --no-scripts add \
       alpine-baselayout busybox busybox-static wpa_supplicant dbus bluez \
-      dropbear flock iptables iptables-legacy alpine-release alsa-utils "!ssl_client" >&2
+      flock iptables iptables-legacy alpine-release alsa-utils "!ssl_client" >&2
     # Device nodes belong to the booted kernel, not the builder container.
     tar -czf - --exclude="./dev/*" -C /rootfs .
   ' > "$out.part"

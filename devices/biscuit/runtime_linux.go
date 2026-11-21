@@ -166,11 +166,7 @@ func Run(parent context.Context, c Config, probeReference bool) error {
 			return bluez.OpenCentral(value, lost)
 		},
 	})
-	var ssh *sshManager
-	if packagedExecutable("/usr/local/sbin/encore-ssh") {
-		ssh = newSSHManager()
-	}
-	admin, err := newManagement(ssh)
+	admin, err := newManagement()
 	if err != nil {
 		return err
 	}

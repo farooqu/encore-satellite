@@ -20,6 +20,15 @@ ROOT = HERE.parents[2]
 FORMAT = "encore-biscuit-v1"
 
 
+def legacy_ssh_member(name):
+    # Older Alpine bases and sealed trials can still contain these files.
+    path = PurePosixPath(name)
+    return ("dropbear" in path.name
+            or str(path) in {"usr/bin/dbclient", "usr/bin/ssh", "usr/bin/scp", "usr/local/sbin/encore-ssh"}
+            or path.is_relative_to("root/.ssh") or path.is_relative_to("data/encore/ssh")
+            or path.is_relative_to("etc/dropbear"))
+
+
 def sha(data):
     return hashlib.sha256(data).hexdigest()
 
@@ -181,8 +190,8 @@ def build(base, binary, wmtup, btbridge, revision, output, kernel_directory, sen
                 continue
             if PurePosixPath(name).is_absolute() or ".." in PurePosixPath(name).parts:
                 raise ValueError("unsafe base archive path")
-            if name.startswith("dev/"):
-                continue  # mdev populates a private tmpfs at boot, not archive nodes
+            if name.startswith("dev/") or legacy_ssh_member(name):
+                continue
             if not (member.isfile() or member.isdir() or member.issym() or member.islnk()):
                 raise ValueError("unsupported base archive member")
             data = archive.extractfile(member).read() if member.isfile() or member.islnk() else b""
@@ -198,15 +207,11 @@ def build(base, binary, wmtup, btbridge, revision, output, kernel_directory, sen
 
     for required in ("bin/busybox.static", "sbin/wpa_supplicant", "sbin/wpa_cli", "lib/apk/db/installed",
                      "usr/bin/dbus-daemon", "usr/bin/dbus-uuidgen", "usr/lib/bluetooth/bluetoothd",
-                     "usr/sbin/dropbear", "usr/bin/dropbearkey", "usr/bin/flock",
+                     "usr/bin/flock",
                      "usr/sbin/iptables-legacy", "usr/sbin/ip6tables-legacy",
                      "usr/sbin/iptables-legacy-restore", "usr/sbin/ip6tables-legacy-restore"):
         if required not in entries:
             raise ValueError(f"base missing {required}; use packaging/base.sh")
-    # Never import a builder's host identity or login keys into a device bundle.
-    if any(name.startswith(("etc/dropbear/", "root/.ssh/", "data/encore/ssh/"))
-           and (info.isfile() or info.issym()) for name, (info, _) in entries.items()):
-        raise ValueError("base must not contain SSH keys or Dropbear host identity")
     busybox = entries["bin/busybox.static"][1]
     arm_elf(busybox, static=True)
     for path in (binary, wmtup, btbridge):
@@ -225,7 +230,6 @@ def build(base, binary, wmtup, btbridge, revision, output, kernel_directory, sen
                          ("slotctl", "usr/local/sbin/slotctl"), ("run", "usr/local/sbin/encore-run"),
                          ("console", "usr/local/sbin/encore-console"),
                          ("bluetooth", "usr/local/sbin/encore-bluetooth"),
-                         ("ssh", "usr/local/sbin/encore-ssh"),
                          ("firewall", "usr/local/sbin/encore-firewall"),
                          ("network", "usr/local/sbin/encore-network"),
                          ("recovery", "usr/local/sbin/encore-recovery"),
@@ -235,7 +239,6 @@ def build(base, binary, wmtup, btbridge, revision, output, kernel_directory, sen
     add("etc/inittab", b"::sysinit:/etc/encore/boot.sh\n::respawn:/usr/local/sbin/encore-run\n"
         b"::respawn:/usr/local/sbin/encore-console\n"
         b"::respawn:/usr/local/sbin/encore-bluetooth\n"
-        b"::respawn:/usr/local/sbin/encore-ssh\n"
         b"::respawn:/usr/local/sbin/encore-network\n"
         b"::once:/usr/local/sbin/encore-health\n::ctrlaltdel:/bin/busybox.static reboot\n"
         b"::shutdown:/bin/busybox.static sync\n")
@@ -245,15 +248,11 @@ def build(base, binary, wmtup, btbridge, revision, output, kernel_directory, sen
     with tarfile.open(Path(kernel_directory) / "source.tar.gz", "r:gz") as source:
         add("usr/share/licenses/encore/Linux-COPYING", source.extractfile("src/COPYING").read())
     add("etc/resolv.conf", b"")
-    # Locked password does not lock Dropbear public-key authentication. The
-    # supervisor supplies only validated keys with forwarding restrictions.
     add("etc/passwd", b"root:x:0:0:root:/root:/bin/sh\nmessagebus:x:100:101:messagebus:/run/dbus:/sbin/nologin\n")
     add("etc/group", b"root:x:0:root\nmessagebus:x:101:messagebus\n")
     add("etc/shadow", b"root:!:0:0:99999:7:::\n", 0o600)
     add("etc/shells", b"/bin/sh\n")
-    for directory in ("root", "root/.ssh"):
-        add(directory, b"", 0o700, tarfile.DIRTYPE)
-    add("root/.ssh/authorized_keys", b"", 0o777, tarfile.SYMTYPE, "/run/encore/ssh/authorized_keys")
+    add("root", b"", 0o700, tarfile.DIRTYPE)
     for directory in ("proc", "sys", "dev", "dev/pts", "run", "run/encore", "tmp", "data", "store", "etc/encore"):
         add(directory, b"", 0o1777 if directory == "tmp" else 0o755, tarfile.DIRTYPE)
     add("usr/share/licenses/encore/LICENSE", (ROOT / "LICENSE").read_bytes())

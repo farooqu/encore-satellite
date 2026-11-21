@@ -64,11 +64,13 @@ def build_base(inputs, work, kernel):
         for member in archive:
             if member.isfile() and re.fullmatch(r"etc/apk/keys/[A-Za-z0-9@._+-]+\.rsa\.pub", member.name):
                 (keys / Path(member.name).name).write_bytes(archive.extractfile(member).read())
+    # The pinned input bundle predates SSH removal; do not install its Dropbear APKs.
+    packages = sorted(path for path in apks.iterdir() if not path.name.startswith("dropbear-"))
     # APK scripts cannot run as target executables here. Set up only the
     # accounts and directories the packaged boot scripts need.
     subprocess.run([apk, "--arch", "aarch64", "--root", base, "--keys-dir", keys,
                     "--repositories-file", "/dev/null", "--no-network", "--no-scripts", "--initdb",
-                    "add", *sorted(apks.iterdir())], check=True)
+                    "add", *packages], check=True)
     (base / "etc/passwd").write_text("root:x:0:0:root:/root:/bin/sh\nmessagebus:x:100:101:messagebus:/run/dbus:/sbin/nologin\n")
     (base / "etc/group").write_text("root:x:0:root\nmessagebus:x:101:messagebus\n")
     (base / "etc/shadow").write_text("root:!:0:0:99999:7:::\n")

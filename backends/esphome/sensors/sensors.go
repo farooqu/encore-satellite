@@ -2,8 +2,6 @@
 package sensors
 
 import (
-	"strings"
-
 	"github.com/farooqu/encore-satellite/core/illuminance"
 	esphome "github.com/ygelfand/go-esphome-device"
 	"github.com/ygelfand/go-esphome-device/api"
@@ -17,7 +15,6 @@ type Sources struct {
 	MicrophoneMuted  func() bool
 	Illuminance      *illuminance.Monitor
 	WiFi             func() (ssid, changeStatus string, err error)
-	SSH              func() (running bool, fingerprints []string, err error)
 	RunningVoiceMode func() string
 }
 
@@ -28,8 +25,6 @@ const (
 	illuminanceID     = "illuminance"
 	wifiSSIDID        = "wifi_ssid"
 	wifiStatusID      = "wifi_change_status"
-	sshRunningID      = "ssh_running"
-	sshFingerprintsID = "ssh_fingerprints"
 	runningVoiceID    = "running_voice_mode"
 )
 
@@ -55,12 +50,6 @@ func (s Sources) catalog() []proto.Message {
 		entities = append(entities,
 			&api.ListEntitiesTextSensorResponse{Key: key(wifiSSIDID), ObjectId: wifiSSIDID, Name: "Wi-Fi SSID", EntityCategory: esphome.CategoryDiagnostic},
 			&api.ListEntitiesTextSensorResponse{Key: key(wifiStatusID), ObjectId: wifiStatusID, Name: "Wi-Fi change status", EntityCategory: esphome.CategoryDiagnostic},
-		)
-	}
-	if s.SSH != nil {
-		entities = append(entities,
-			&api.ListEntitiesBinarySensorResponse{Key: key(sshRunningID), ObjectId: sshRunningID, Name: "SSH running", EntityCategory: esphome.CategoryDiagnostic},
-			&api.ListEntitiesTextSensorResponse{Key: key(sshFingerprintsID), ObjectId: sshFingerprintsID, Name: "SSH public-key fingerprints", EntityCategory: esphome.CategoryDiagnostic},
 		)
 	}
 	if s.RunningVoiceMode != nil {
@@ -100,13 +89,6 @@ func (s Sources) States() []proto.Message {
 		states = append(states,
 			&api.TextSensorStateResponse{Key: key(wifiSSIDID), State: ssid, MissingState: err != nil},
 			&api.TextSensorStateResponse{Key: key(wifiStatusID), State: status},
-		)
-	}
-	if s.SSH != nil {
-		running, fingerprints, err := s.SSH()
-		states = append(states,
-			&api.BinarySensorStateResponse{Key: key(sshRunningID), State: running, MissingState: err != nil},
-			&api.TextSensorStateResponse{Key: key(sshFingerprintsID), State: strings.Join(fingerprints, ", "), MissingState: err != nil},
 		)
 	}
 	if s.RunningVoiceMode != nil {

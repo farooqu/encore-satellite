@@ -6,6 +6,7 @@ from pathlib import Path, PurePosixPath
 import tarfile
 
 from kernel61.arm64_probe import native_elf
+from package import legacy_ssh_member
 
 HERE = Path(__file__).resolve().parent
 TRIAL_FORMAT = "encore-biscuit-kernel61-trial-v1"
@@ -30,8 +31,10 @@ def rootfs_archive(base, kernel_record):
             if (path.is_absolute() or ".." in path.parts or str(path) != name
                     or name in entries or not (info.isfile() or info.isdir() or info.issym())):
                 raise ValueError("unsafe/duplicate userspace member: " + name)
-            if (name.startswith(("dev/", "data/", "store/", "run/", "tmp/", "root/.ssh/", "etc/dropbear/", "var/lib/bluetooth/"))
-                    and not info.isdir() and name != "root/.ssh/authorized_keys"):
+            if legacy_ssh_member(name):
+                continue
+            if (name.startswith(("dev/", "data/", "store/", "run/", "tmp/", "var/lib/bluetooth/"))
+                    and not info.isdir()):
                 raise ValueError("userspace contains runtime state/identity: " + name)
             data = archive.extractfile(info).read() if info.isfile() else b""
             entries[name] = info, data
@@ -42,7 +45,7 @@ def rootfs_archive(base, kernel_record):
                 raise ValueError("non-directory archive parent: " + str(parent))
     for name in ("sbin/wpa_supplicant", "sbin/wpa_cli", "lib/apk/db/installed",
                  "usr/bin/dbus-daemon", "usr/bin/dbus-uuidgen", "usr/lib/bluetooth/bluetoothd",
-                 "usr/sbin/dropbear", "usr/bin/dropbearkey", "usr/bin/flock",
+                 "usr/bin/flock",
                  "usr/sbin/iptables-legacy", "usr/sbin/ip6tables-legacy",
                  "usr/sbin/iptables-legacy-restore", "usr/sbin/ip6tables-legacy-restore"):
         if name not in entries:
@@ -61,7 +64,7 @@ def rootfs_archive(base, kernel_record):
     for name in ("slotctl", "encore-recovery", "encore-health"):
         entries.pop("usr/local/sbin/" + name, None)
     entries.pop("etc/encore-package.json", None)
-    for source, target in (("run", "encore-run"), ("ssh", "encore-ssh"),
+    for source, target in (("run", "encore-run"),
                            ("network", "encore-network"), ("firewall", "encore-firewall")):
         add("usr/local/sbin/" + target, (HERE.parent / source).read_bytes(), 0o755)
     add("etc/encore/dhcp.sh", (HERE.parent / "dhcp.sh").read_bytes(), 0o755)
@@ -73,7 +76,6 @@ def rootfs_archive(base, kernel_record):
     add("etc/encore-kernel.json", json.dumps(kernel_record, sort_keys=True).encode())
     add("usr/share/licenses/encore/KERNEL-SOURCE.md", (HERE / "README.md").read_bytes())
     # The trial uses no saved identity, credentials, bonds or update-trust file.
-    add("root/.ssh/authorized_keys", b"", 0o777, tarfile.SYMTYPE, "/run/encore/ssh/authorized_keys")
     for name in ("dev", "sys", "proc", "run", "run/encore", "data", "store", "tmp"):
         add(name, b"", 0o755, tarfile.DIRTYPE)
     if sum(len(data) for _, data in entries.values()) > 96 << 20:

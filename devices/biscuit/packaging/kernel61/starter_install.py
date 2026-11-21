@@ -141,7 +141,7 @@ def install_native_locked(adb, args, manifest, files, name):
     for slot in "ab":
         adb.write(f"{store}/slots/{slot}/rootfs.tar.gz", files["rootfs.tar.gz"])
     adb.write(f"{store}/highest-revision", f"{manifest['package_revision']}\n".encode())
-    adb.write(f"{next_data}/config.json", json.dumps({"schema": 1, "name": name}).encode() + b"\n")
+    adb.write(f"{next_data}/config.json", json.dumps({"schema": 1, "name": name, "bluetooth_proxy": True}).encode() + b"\n")
     adb.shell(f"mv {next_data} {STATE}; sync")
     # Keep the live USB recovery session open until all readbacks pass.
     # Start with B, so A remains stock during the first boot-store write.
@@ -396,7 +396,7 @@ def install_locked(adb, args, manifest, rootfs, recovery, name):
         adb.write(f"{pending}/slots/{slot}.state", b"held\n")
     adb.write(f"{pending}/recovery.img", recovery)
     adb.write(f"{pending}/manifest.json", json.dumps(manifest, sort_keys=True).encode() + b"\n")
-    adb.write(f"{next_data}/config.json", json.dumps({"schema": 1, "name": name}).encode() + b"\n")
+    adb.write(f"{next_data}/config.json", json.dumps({"schema": 1, "name": name, "bluetooth_proxy": True}).encode() + b"\n")
     if key is not None:
         adb.write(f"{next_data}/noise.psk", key)
     adb.write(f"{pending}/active", b"a\n")

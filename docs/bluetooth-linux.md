@@ -2,7 +2,8 @@
 
 Bluetooth is required base functionality for supported Encore devices. The
 Bluetooth **proxy** is a separate feature: one persistent `bluetooth_proxy`
-boolean, omitted/default **false**. Its encrypted ESPHome switch enables scans,
+boolean. Biscuit installers set it **on** for new installs; existing configs
+without the setting still mean off. Its encrypted ESPHome switch enables scans,
 active GATT connections and supported pairing together. There is no second
 active-connection/pairing toggle. BLE Improv first-boot Wi-Fi provisioning works
 with the proxy OFF; forwarding advertisements does not provision Wi-Fi.
@@ -188,7 +189,7 @@ independently of the optional proxy, before voice/proxy on first boot:
   readable for ten seconds before advertising/application cleanup.
 - Improv is cleartext at the BLE link layer, unlike encrypted ESPHome. Offer only
   on explicit first-boot setup or locally authorized recovery, not every network
-  outage. Keep the USB/ADB/SSH/direct-USB alternatives independent of proxy OFF
+  outage. Keep USB/ADB recovery independent of proxy OFF
   and of any unavailable replacement kernel.
 
 ## Reproducible verification and remaining Dot qualification
