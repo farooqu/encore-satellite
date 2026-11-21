@@ -1,12 +1,12 @@
 #!/bin/busybox.static sh
-# One attempt per service per boot, except the retrying Wi-Fi manager.
+# One attempt per service per boot, except the Wi-Fi manager and time sync.
 # All peripheral children have detached stdio and their own process group.
 set -eu
 BB=/bin/busybox.static
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 umask 077
 name=${1:-}
-case "$name" in base|radio|wifi|dhcp|bluetooth|network|app|enrollment|health) ;; *) exit 2;; esac
+case "$name" in base|radio|wifi|dhcp|time-sync|bluetooth|network|app|enrollment|health) ;; *) exit 2;; esac
 dir=/run/encore/services/$name
 child=
 sleeper=
@@ -69,6 +69,9 @@ run() {
         i=$((i+1)); test "$i" -lt 100 || return 1; "$BB" sleep 1
       done
       exec udhcpc -f -i wlan0 -s /etc/encore/dhcp.sh -p /run/udhcpc.pid;;
+    time-sync)
+      # Client only. Initial DNS/network failure must not gate any other service.
+      exec "$BB" ntpd -n -p time.cloudflare.com -p time.nist.gov;;
     bluetooth)
       wait_for test -e /sys/class/net/wlan0
       exec /usr/local/sbin/encore-bluetooth;;
@@ -128,7 +131,11 @@ if "$BB" mkdir "$dir/attempted" 2>/dev/null; then
     echo "$status" > "$dir/exit-status"
     # A failed network worker can leave a candidate marker. Its next owner
     # retries last-good recovery before accepting another request.
-    test "$name" = network && test "$status" != 0 || break
+    case "$name" in
+      time-sync) ;;
+      network) test "$status" != 0 || break;;
+      *) break;;
+    esac
     delay 5
   done
 fi

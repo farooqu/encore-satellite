@@ -201,7 +201,11 @@ An update requires a healthy running slot, muted physical privacy and read-only
 confirmation that MISC already selects recovery. The installer and OTA app do
 not write MISC; only marked recovery init re-arms it. Check that a normal reboot
 returns to Encore on the exact target and that the clock is valid for TLS and
-feed expiry; do not bypass either check. An approved update stages only the inactive cache slot,
+feed expiry; do not bypass either check. The starter runs a supervised BusyBox
+NTP client against `time.cloudflare.com` and `time.nist.gov` (outbound UDP 123).
+It retries after network loss without holding up enrollment, voice or LAN
+startup. A stale clock can still prevent updates until a time server is reachable.
+An approved update stages only the inactive cache slot,
 sets a durable high-water mark before publishing the selector, and requests a
 reboot. Recovery spends the trial attempt before switching to the new root.
 The health service commits only after sustained runtime readiness; a failed

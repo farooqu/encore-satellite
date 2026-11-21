@@ -441,7 +441,7 @@ class RootfsTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     rootfs.rootfs_archive(archive(extra), {})
 
-    def test_starter_replaces_sealed_bases_old_rescue_console(self):
+    def test_starter_packages_clock_sync_and_replaces_old_rescue_console(self):
         archive = io.BytesIO()
         with tarfile.open(fileobj=archive, mode="w:gz") as t:
             for name in ("usr/local/sbin/usb-rescue", "usr/local/sbin/usb-console", "etc/encore/usb-consoles"):
@@ -451,6 +451,8 @@ class RootfsTests(unittest.TestCase):
                 t.addfile(member, io.BytesIO(data))
         packed = starter_build.starter_rootfs(archive.getvalue(), {})
         with tarfile.open(fileobj=io.BytesIO(packed), mode="r:gz") as t:
+            self.assertIn(b"::respawn:/usr/local/sbin/runtime-service time-sync",
+                          t.extractfile("etc/inittab").read().splitlines())
             self.assertEqual(t.extractfile("usr/local/sbin/usb-rescue").read(), (HERE / "usb-rescue").read_bytes())
             self.assertNotIn("usr/local/sbin/usb-console", t.getnames())
             self.assertNotIn("etc/encore/usb-consoles", t.getnames())
