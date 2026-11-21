@@ -13,6 +13,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/farooqu/encore-satellite/backends/bluetooth"
+	"github.com/farooqu/encore-satellite/backends/esphome/announcements"
 	"github.com/farooqu/encore-satellite/backends/esphome/controls"
 	"github.com/farooqu/encore-satellite/backends/esphome/sensors"
 	"github.com/farooqu/encore-satellite/core/music"
@@ -204,7 +205,7 @@ type biscuitControls struct {
 	management    *management
 	updates       *linuxUpdates
 	ring          *ringSettings
-	announcements *announcementPlayer
+	announcements *announcements.Player
 	microphone    *sensors.Microphone
 	mu            sync.Mutex
 	stateMu       sync.Mutex
@@ -248,12 +249,7 @@ func (d *biscuitControls) writable() controls.Bindings {
 		}),
 	)
 	if d.announcements != nil {
-		bindings = append(bindings, controls.Announcements.Bind(func(c *esphome.Conn, v *api.MediaPlayerCommandRequest) error {
-			if v.DeviceId != 0 {
-				return nil
-			}
-			return d.announcements.command(c, v)
-		}))
+		bindings = append(bindings, controls.Announcements.Bind(d.announcements.Command))
 	}
 	if d.ring != nil {
 		bindings = append(bindings,
@@ -373,7 +369,7 @@ func (d *biscuitControls) state(c *esphome.Conn) error {
 		&api.SwitchStateResponse{Key: speakerMuteKey, State: muted},
 	}
 	if d.announcements != nil {
-		states = append(states, d.announcements.state())
+		states = append(states, d.announcements.State(volume/100))
 	}
 	if d.ring != nil {
 		states = append(states, d.ring.states()...)
@@ -419,7 +415,7 @@ func (d *biscuitControls) broadcast() error {
 }
 func (d *biscuitControls) ConnClosed(c *esphome.Conn) {
 	if d.announcements != nil {
-		d.announcements.closed(c)
+		d.announcements.ConnClosed(c)
 	}
 	d.mu.Lock()
 	delete(d.subscribers, c)
@@ -446,13 +442,13 @@ func (d *biscuitControls) Run(ctx context.Context) {
 		}
 	})
 	if d.announcements != nil {
-		workers.Go(func() { d.announcements.run(ctx) })
+		workers.Go(func() { d.announcements.Run(ctx) })
 		workers.Go(func() {
 			for {
 				select {
 				case <-ctx.Done():
 					return
-				case <-d.announcements.changed:
+				case <-d.announcements.Changes():
 					_ = d.broadcast()
 				}
 			}

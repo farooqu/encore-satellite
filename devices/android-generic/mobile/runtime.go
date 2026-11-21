@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/farooqu/encore-satellite/backends/bluetooth"
+	"github.com/farooqu/encore-satellite/backends/esphome/announcements"
 	"github.com/farooqu/encore-satellite/backends/esphome/controls"
 	"github.com/farooqu/encore-satellite/backends/esphome/sensors"
 	"github.com/farooqu/encore-satellite/backends/incubator"
@@ -56,6 +57,8 @@ type Runtime struct {
 	engine              *session.Engine
 	voice               *incubator.Server
 	control             *esphome.Server
+	announcements       *announcements.Player
+	announcementStateMu sync.Mutex
 	running             context.Context
 	cancel              context.CancelFunc
 	pairing             string // empty, waiting, or expired
@@ -111,6 +114,7 @@ func Open(directory string, output Audio) (*Runtime, error) {
 	r.mac = r.config.MAC
 	r.engine = session.New(androidhost.NewPlayback(output))
 	r.engine.SetMuted(r.config.Muted)
+	r.announcements = announcements.New(r.engine)
 	r.microphone = sensors.NewMicrophone(r.config.Muted)
 	// Keep wire AEC and remote recording off until their routes are qualified.
 	r.voice = &incubator.Server{Engine: r.engine, Name: r.Name(), MAC: r.config.MAC, Version: "0.1.0-android", EnableModels: true}
@@ -190,6 +194,25 @@ func (r *Runtime) startControl(ctx context.Context, l net.Listener, key esphome.
 		OnSetEncryptionKey: esphomepairing.RefuseKey}
 	r.control = control
 	r.serveListener(ctx, l, control.Serve)
+	r.done.Go(func() { r.announcements.Run(ctx) })
+	r.done.Go(func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-r.announcements.Changes():
+				_ = r.sendAnnouncementState(control.Broadcast)
+			}
+		}
+	})
+}
+
+func (r *Runtime) sendAnnouncementState(send func(proto.Message) error) error {
+	// Serialize the initial snapshot with broadcasts so it cannot overwrite a
+	// newer state. The app uses unity gain; Android manages system volume.
+	r.announcementStateMu.Lock()
+	defer r.announcementStateMu.Unlock()
+	return send(r.announcements.State(1))
 }
 
 type runtimeListener struct {
@@ -420,7 +443,10 @@ func (r *Runtime) sensors() sensors.Sources {
 }
 
 func (r *Runtime) writable() controls.Bindings {
-	bindings := controls.Bindings{controls.AndroidChannel.Bind(r.setUpdateChannel)}
+	bindings := controls.Bindings{
+		controls.AndroidChannel.Bind(r.setUpdateChannel),
+		controls.Announcements.Bind(r.announcements.Command),
+	}
 	r.mu.Lock()
 	dashboard := r.dashboard
 	hasUpdater := r.updater != nil
@@ -499,12 +525,16 @@ func (r *Runtime) Handle(ctx context.Context, c *esphome.Conn, msg proto.Message
 		if err := r.writable().SendStates(c.Send, states); err != nil {
 			return err
 		}
+		if err := r.sendAnnouncementState(c.Send); err != nil {
+			return err
+		}
 		return r.proxy.Handle(ctx, c, msg)
 	}
 	return r.proxy.Handle(ctx, c, msg)
 }
 
 func (r *Runtime) ConnClosed(c *esphome.Conn) {
+	r.announcements.ConnClosed(c)
 	r.microphone.Unsubscribe(c)
 	r.proxy.ConnClosed(c)
 }

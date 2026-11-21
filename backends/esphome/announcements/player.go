@@ -1,4 +1,5 @@
-package biscuit
+// Package announcements plays ESPHome announcement URLs on the shared voice lane.
+package announcements
 
 import (
 	"context"
@@ -18,8 +19,6 @@ import (
 	"github.com/farooqu/encore-satellite/core/session"
 )
 
-var announcementKey = controls.Announcements.Key()
-
 type mediaRequest struct {
 	url      string
 	revision uint64
@@ -29,11 +28,10 @@ type requestFence string
 
 func (f requestFence) Error() string { return string(f) }
 
-// announcementPlayer fetches HA's converted WAV on one bounded worker, using
+// Player fetches HA's converted WAV on one bounded worker, using
 // the engine's existing voice lane. It is independent of Sendspin music.
-type announcementPlayer struct {
+type Player struct {
 	engine   *session.Engine
-	player   *speaker
 	client   *http.Client
 	requests chan mediaRequest
 	changed  chan struct{}
@@ -44,11 +42,11 @@ type announcementPlayer struct {
 	playing  bool
 }
 
-func newAnnouncementPlayer(engine *session.Engine, player *speaker) *announcementPlayer {
-	return &announcementPlayer{engine: engine, player: player, client: &http.Client{Timeout: 3 * time.Minute}, requests: make(chan mediaRequest, 1), changed: make(chan struct{}, 1)}
+func New(engine *session.Engine) *Player {
+	return &Player{engine: engine, client: &http.Client{Timeout: 3 * time.Minute}, requests: make(chan mediaRequest, 1), changed: make(chan struct{}, 1)}
 }
 
-func (m *announcementPlayer) state() *api.MediaPlayerStateResponse {
+func (m *Player) State(volume float32) *api.MediaPlayerStateResponse {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	state := api.MediaPlayerState_MEDIA_PLAYER_STATE_IDLE
@@ -57,18 +55,19 @@ func (m *announcementPlayer) state() *api.MediaPlayerStateResponse {
 	}
 	// HA does not map the protocol's ANNOUNCING state. Incubator receives its
 	// own announcing/announced events from the engine, not a synthetic HA state.
-	volume, _ := m.player.outputState()
-	return &api.MediaPlayerStateResponse{Key: announcementKey, State: state, Volume: volume / 100}
+	return &api.MediaPlayerStateResponse{Key: controls.Announcements.Key(), State: state, Volume: volume}
 }
 
-func (m *announcementPlayer) signal() {
+func (m *Player) Changes() <-chan struct{} { return m.changed }
+
+func (m *Player) signal() {
 	select {
 	case m.changed <- struct{}{}:
 	default:
 	}
 }
 
-func (m *announcementPlayer) stopLocked(reason requestFence) {
+func (m *Player) stopLocked(reason requestFence) {
 	m.revision++
 	if m.cancel != nil {
 		m.cancel(reason)
@@ -80,17 +79,20 @@ func (m *announcementPlayer) stopLocked(reason requestFence) {
 	}
 }
 
-func (m *announcementPlayer) command(c *esphome.Conn, cmd *api.MediaPlayerCommandRequest) error {
+func (m *Player) Command(c *esphome.Conn, cmd *api.MediaPlayerCommandRequest) error {
+	if cmd.DeviceId != 0 {
+		return nil
+	}
 	if cmd.HasCommand && cmd.Command != api.MediaPlayerCommand_MEDIA_PLAYER_COMMAND_STOP {
-		return errors.New("dot: unsupported announcement command")
+		return errors.New("esphome: unsupported announcement command")
 	}
 	if cmd.HasVolume {
-		return errors.New("dot: announcement volume uses the shared speaker controls")
+		return errors.New("esphome: announcements have no separate volume control")
 	}
 	if cmd.HasMediaUrl {
 		u, err := url.Parse(cmd.MediaUrl)
 		if err != nil || len(cmd.MediaUrl) > 4096 || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || u.Fragment != "" || cmd.HasCommand {
-			return errors.New("dot: announcement requires an HTTP(S) URL")
+			return errors.New("esphome: announcement requires an HTTP(S) URL")
 		}
 	}
 	m.mu.Lock()
@@ -113,7 +115,7 @@ func (m *announcementPlayer) command(c *esphome.Conn, cmd *api.MediaPlayerComman
 	return nil
 }
 
-func (m *announcementPlayer) closed(c *esphome.Conn) {
+func (m *Player) ConnClosed(c *esphome.Conn) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.owner == c {
@@ -122,7 +124,7 @@ func (m *announcementPlayer) closed(c *esphome.Conn) {
 	}
 }
 
-func (m *announcementPlayer) run(ctx context.Context) {
+func (m *Player) Run(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -150,7 +152,7 @@ func (m *announcementPlayer) run(ctx context.Context) {
 				defer response.Body.Close()
 				if response.StatusCode != http.StatusOK {
 					inputFailure = "http_status"
-					return errors.New("dot: announcement HTTP status not OK")
+					return errors.New("esphome: announcement HTTP status not OK")
 				}
 				inputFailure = "wav_failed"
 				err = audio.ReadWAV(response.Body, func(samples []int16) error {
@@ -176,7 +178,7 @@ func (m *announcementPlayer) run(ctx context.Context) {
 					var trailing int64
 					trailing, err = io.Copy(io.Discard, io.LimitReader(response.Body, maxTrailing+1))
 					if err == nil && trailing > maxTrailing {
-						err = errors.New("dot: excessive trailing WAV data")
+						err = errors.New("esphome: excessive trailing WAV data")
 					}
 				}
 				if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
@@ -198,7 +200,7 @@ func (m *announcementPlayer) run(ctx context.Context) {
 			m.mu.Unlock()
 			m.signal()
 			// Only fixed labels and counts; HTTP errors may embed signed URLs.
-			log.Printf("dot: announcement revision=%d outcome=%s accepted_blocks=%d accepted_samples=%d drain=%s",
+			log.Printf("esphome: announcement revision=%d outcome=%s accepted_blocks=%d accepted_samples=%d drain=%s",
 				request.revision, result.Outcome, result.AcceptedBlocks, result.AcceptedSamples, result.Drain)
 		}
 	}

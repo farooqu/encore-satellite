@@ -171,7 +171,22 @@ func espHomeState(t *testing.T, r *Runtime) string {
 
 func pairingNoisePeer(t *testing.T, key esphome.PSK) func(proto.Message, proto.Message) {
 	t.Helper()
-	c, err := net.DialTimeout("tcp", "127.0.0.1:6053", time.Second)
+	send, receive := noisePeer(t, "127.0.0.1:6053", key)
+	return func(request, response proto.Message) {
+		t.Helper()
+		send(request)
+		got := receive()
+		if got.ProtoReflect().Descriptor() != response.ProtoReflect().Descriptor() {
+			t.Fatalf("unexpected encrypted response %T, want %T", got, response)
+		}
+		proto.Reset(response)
+		proto.Merge(response, got)
+	}
+}
+
+func noisePeer(t *testing.T, addr string, key esphome.PSK) (func(proto.Message), func() proto.Message) {
+	t.Helper()
+	c, err := net.DialTimeout("tcp", addr, time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -215,14 +230,13 @@ func pairingNoisePeer(t *testing.T, key esphome.PSK) func(proto.Message, proto.M
 	if err != nil {
 		t.Fatal(err)
 	}
-	return func(request, response proto.Message) {
+	send := func(request proto.Message) {
 		t.Helper()
 		payload, err := proto.Marshal(request)
 		if err != nil {
 			t.Fatal(err)
 		}
 		in, _ := esphome.Lookup(request)
-		out, _ := esphome.Lookup(response)
 		frame := binary.BigEndian.AppendUint16(nil, uint16(in.ID))
 		frame = binary.BigEndian.AppendUint16(frame, uint16(len(payload)))
 		wire, err := tx.Encrypt(nil, nil, append(frame, payload...))
@@ -230,10 +244,18 @@ func pairingNoisePeer(t *testing.T, key esphome.PSK) func(proto.Message, proto.M
 			t.Fatal(err)
 		}
 		write(wire)
-		frame, err = rx.Decrypt(nil, nil, read())
-		if err != nil || len(frame) < 4 || int(binary.BigEndian.Uint16(frame[2:4])) != len(frame)-4 ||
-			uint32(binary.BigEndian.Uint16(frame[:2])) != out.ID || proto.Unmarshal(frame[4:], response) != nil {
+	}
+	receive := func() proto.Message {
+		t.Helper()
+		frame, err := rx.Decrypt(nil, nil, read())
+		if err != nil || len(frame) < 4 || int(binary.BigEndian.Uint16(frame[2:4])) != len(frame)-4 {
 			t.Fatal("unexpected encrypted response", err)
 		}
+		m, ok := esphome.NewMessage(uint32(binary.BigEndian.Uint16(frame[:2])))
+		if !ok || proto.Unmarshal(frame[4:], m) != nil {
+			t.Fatal("invalid ESPHome message")
+		}
+		return m
 	}
+	return send, receive
 }

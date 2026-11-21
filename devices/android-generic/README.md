@@ -240,7 +240,13 @@ pairing records persist. The screen stays awake while the Activity is visible.
   are disabled for the running Activity, including locally revealed pairing keys.
 - Only server-requested Incubator follow-ups exist. No Assist, runtime route
   switching, Assist-only follow-up toggle, enrollment stream, advertised wire
-  AEC route, or ESPHome `media_player` is included.
+  AEC route is included.
+- The paired ESPHome endpoint exposes **Announcements** for Home Assistant TTS
+  and URL playback. Like Biscuit, it accepts PCM16, 16 kHz mono WAV and supports
+  Stop through Home Assistant. It uses the shared voice output and respects its
+  mute and Stop behavior. Android controls output volume; Sendspin music is separate.
+  If the entity is missing on an already paired device after updating, reload
+  the device's ESPHome integration in Home Assistant.
 - The optional [Android Bluetooth proxy](../../docs/bluetooth-android.md) is
   independently default-OFF and scan-only on API 26+ with a detected BLE adapter.
   Settings explains consent and version-specific grants. Scans pause outside a

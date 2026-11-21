@@ -23,6 +23,7 @@ import (
 	"github.com/ygelfand/go-esphome-device/api"
 
 	"github.com/farooqu/encore-satellite/backends/bluetooth"
+	"github.com/farooqu/encore-satellite/backends/esphome/announcements"
 	"github.com/farooqu/encore-satellite/backends/incubator"
 	"github.com/farooqu/encore-satellite/core/session"
 )
@@ -64,7 +65,7 @@ func (l *announcementLogs) Write(p []byte) (int, error) {
 	if strings.Contains(line, "fixture-private-token") {
 		l.leak.Store(true)
 	}
-	if strings.Contains(line, "dot: announcement revision=") {
+	if strings.Contains(line, "esphome: announcement revision=") {
 		l.lines <- line
 	}
 	return len(p), nil
@@ -103,7 +104,7 @@ func TestAnnouncementsEncryptedAPIHTTPPCMAndIncubatorLifecycle(t *testing.T) {
 		Proxy:         bluetooth.New(managementRadio{}, bluetooth.Options{}),
 		player:        player,
 		music:         newMusic(config, &settings{path: filepath.Join(t.TempDir(), "config.json"), config: config}, player),
-		announcements: newAnnouncementPlayer(engine, player),
+		announcements: announcements.New(engine),
 	}
 	key, err := esphome.GeneratePSK()
 	if err != nil {
