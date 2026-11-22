@@ -23,9 +23,10 @@ const (
 	speakerStartupSteps = 60
 	speakerMaxSteps     = 120
 	speakerMaxPercent   = speakerMaxSteps * 100.0 / 120
-	// 40 ms covers the observed ~29 ms refill-to-DELAY-error interval with
-	// ~11 ms nominal margin, within the 4096-frame playback ring.
-	speakerLeadFrames = 1920
+	speakerPeriodFrames = 1024
+	speakerPeriods      = 4
+	// Use the full 85.3 ms playback ring at 48 kHz for refill headroom.
+	speakerLeadFrames = speakerPeriodFrames * speakerPeriods
 )
 
 type speaker struct {

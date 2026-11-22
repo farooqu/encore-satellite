@@ -147,9 +147,17 @@ func buttonWait(t *testing.T, message string, ready func() bool) {
 	}
 }
 
+type buttonPCM struct{ speakerPCM }
+
+func (p *buttonPCM) Write(b []byte) (int, error) {
+	// This fake reports zero delay each tick. Accept only one tick's worth
+	// of 48 kHz stereo PCM, not an entire playback ring every 2 ms.
+	return p.speakerPCM.Write(b[:min(len(b), 96*4)])
+}
+
 func buttonMusic(t *testing.T) (*speaker, func() int16) {
 	t.Helper()
-	p := &speakerPCM{}
+	p := &buttonPCM{}
 	s := newSpeaker(p)
 	t.Cleanup(func() { s.Close() })
 	s.MusicStart(1, nil)

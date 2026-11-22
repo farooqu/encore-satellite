@@ -180,8 +180,8 @@ func Run(parent context.Context, c Config, probeReference bool) error {
 	if err = configureMixer(mixer); err != nil {
 		return fmt.Errorf("dot: speaker routing: %w", err)
 	}
-	// Wake at or below 35 ms; refill remains capped at the 40 ms lead.
-	pcm, err := alsa.OpenPlayback(0, 23, alsa.Config{Channels: 2, Rate: 48000, Format: alsa.FormatS16_LE, Bits: 16, PeriodSize: 1024, Periods: 4, PlaybackWakeLead: speakerLeadFrames - 240})
+	// Keep the wake threshold 5 ms below the refill target.
+	pcm, err := alsa.OpenPlayback(0, 23, alsa.Config{Channels: 2, Rate: 48000, Format: alsa.FormatS16_LE, Bits: 16, PeriodSize: speakerPeriodFrames, Periods: speakerPeriods, PlaybackWakeLead: speakerLeadFrames - 240})
 	if err != nil {
 		return err
 	}
