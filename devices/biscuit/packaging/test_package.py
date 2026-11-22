@@ -495,7 +495,7 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual((self.device / "dev/block/mmcblk0p12").read_bytes(), self.twrp)
 
     def test_native_seed_installs_both_images_but_never_imports_enrollment(self):
-        from kernel61 import starter_install
+        import starter_install
 
         p = self.device / "dev/block"
         recovery = self.twrp.ljust(16 << 20, b"R")
@@ -562,7 +562,7 @@ class RecoveryTests(unittest.TestCase):
         self.check_fresh_arm64_install(seed=True)
 
     def check_fresh_arm64_install(self, seed):
-        from kernel61 import starter_install
+        import starter_install
 
         p12 = self.device / "dev/block/mmcblk0p12"
         twrp = self.twrp.ljust(16 << 20, b"R")
@@ -640,7 +640,7 @@ class RecoveryTests(unittest.TestCase):
         self.check_arm64_transition(corrupt_readback=True)
 
     def check_arm64_transition(self, corrupt_readback):
-        from kernel61 import starter_install
+        import starter_install
 
         self.bundle(17)
         install.install(self.args)

@@ -6,15 +6,13 @@ import json
 import os
 from pathlib import Path
 import subprocess
-import sys
 import tarfile
 import zipfile
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from kernel61.arm64_assemble import HERE, ROOT, boot_image, initramfs, repack, sha
-from kernel61.rootfs import arm64_bluetooth
-from kernel61.starter_install import BASE_SHA, CA_SHA, DTB_SHA, FORMAT, IMAGE_SHA, boot_compatibility, load_bundle, native_identity, starter_version
+from arm64_assemble import HERE, ROOT, boot_image, initramfs, repack, sha
 from package import legacy_ssh_member
+from rootfs import arm64_bluetooth
+from starter_install import BASE_SHA, CA_SHA, DTB_SHA, FORMAT, IMAGE_SHA, boot_compatibility, load_bundle, native_identity, starter_version
 
 
 def native_payloads(output, image, dtb, header, busybox, fpga, runtime, verifier, core, revision, lock_sha):
@@ -49,12 +47,12 @@ def starter_rootfs(base, binaries, version=None, ca=None, *, locked=False):
         files["sbin/init"] = ((HERE / "arm64-probe-init").read_bytes(), 0o755)
         files["usr/local/sbin/encore-bluetooth"] = (arm64_bluetooth(), 0o755)
     for source, target in (("runtime-service", "runtime-service"), ("stock-firmware", "encore-stock-firmware"),
-                           ("usb-rescue", "usb-rescue"), ("../run", "encore-run"),
-                           ("../slotctl", "slotctl"), ("../health", "encore-health"),
-                           ("../network", "encore-network"), ("../firewall", "encore-firewall")):
+                           ("usb-rescue", "usb-rescue"), ("run", "encore-run"),
+                           ("slotctl", "slotctl"), ("health", "encore-health"),
+                           ("network", "encore-network"), ("firewall", "encore-firewall")):
         files["usr/local/sbin/" + target] = ((HERE / source).read_bytes(), 0o755)
-    files["etc/encore/dhcp.sh"] = ((HERE.parent / "dhcp.sh").read_bytes(), 0o755)
-    startup = (HERE / "boot.sh").read_text().split('/usr/local/bin/wmtup -patches', 1)[0]
+    files["etc/encore/dhcp.sh"] = ((HERE / "dhcp.sh").read_bytes(), 0o755)
+    startup = (HERE / "arm64-boot.sh").read_text().split('/usr/local/bin/wmtup -patches', 1)[0]
     startup = startup.replace('mount -t tmpfs -o mode=0700,size=16m tmpfs /data',
                               '''mount -t ext4 -o noatime,nosuid,nodev,noexec /dev/mmcblk0p16 /data
 test ! -L /data/encore
@@ -92,7 +90,7 @@ fi''')
 def source_hashes():
     paths = {p for directory in ("devices/biscuit", "platforms", "core", "backends", "internal", "cmd/btbridge")
              for p in (ROOT / directory).rglob("*.go")}
-    paths.update(p for directory in (HERE, HERE.parent) for p in directory.iterdir() if p.is_file())
+    paths.update(p for p in HERE.iterdir() if p.is_file())
     paths.update((ROOT / "go.mod", ROOT / "go.sum"))
     return {str(p.relative_to(ROOT)): sha(p.read_bytes()) for p in sorted(paths)}
 

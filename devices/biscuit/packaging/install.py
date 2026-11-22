@@ -20,6 +20,7 @@ import zipfile
 
 from package import FORMAT, boot_image, sha, validate_kernel
 import kernel_artifact
+import starter_install
 
 
 def unique(pairs):
@@ -194,7 +195,6 @@ def install(args):
     # Validate before even read-only device operations, including dry-run.
     starter = args.command in ("install-arm64", "transition-arm64")
     if starter:
-        from kernel61 import starter_install
         manifest, rootfs, image = starter_install.load_bundle(args.bundle, args.sha256)
     else:
         manifest, files = load_bundle(args.bundle, args.sha256)
@@ -388,7 +388,6 @@ def install_native(args):
     # locally hashed or unsigned seed can reach the native installer.
     sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "release"))
     from pipeline import native_starter, verify
-    from kernel61 import starter_install
 
     receipt = verify(args.candidate, args.public_key, args.receipt_sha256)
     if receipt["target"] != "biscuit" or not native_starter(receipt):

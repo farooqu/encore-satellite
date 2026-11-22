@@ -13,7 +13,7 @@ import time
 import unittest
 
 HERE = Path(__file__).resolve().parent
-ROOT = HERE.parents[3]
+ROOT = HERE.parents[2]
 
 
 def eventually(check, seconds=5):

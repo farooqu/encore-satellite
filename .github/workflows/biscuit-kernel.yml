@@ -5,13 +5,13 @@ on:
   pull_request:
     paths:
       - '.github/workflows/biscuit-kernel.yml'
-      - 'devices/biscuit/packaging/kernel61/**'
+      - 'devices/biscuit/packaging/**'
       - 'Makefile'
   push:
     branches: [main]
     paths:
       - '.github/workflows/biscuit-kernel.yml'
-      - 'devices/biscuit/packaging/kernel61/**'
+      - 'devices/biscuit/packaging/**'
       - 'Makefile'
 
 permissions:

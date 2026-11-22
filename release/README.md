@@ -6,7 +6,7 @@ Android release workflow. The Biscuit ARM64 starter derives its public SemVer
 from main history independently; the retired Linux 3.18 path no longer creates
 releases or entries in the ledger. No target is declared release-supported.
 
-The [Biscuit build and installation guide](../devices/biscuit/packaging/kernel61/README.md)
+The [Biscuit build and installation guide](../devices/biscuit/packaging/README.md)
 covers the current Linux 6.1/AArch64 starter: recovery, kernel, Alpine userspace
 and the native runtime. The dedicated kernel workflow checks the pinned source.
 The keyless ARM64 build produces a native A/B seed, full OTA and source kits

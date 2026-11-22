@@ -103,7 +103,7 @@ Encore assistant. No Kiosk Satellite application code or assets are included.
   `i2s_to_spi_v34.bin` blob is not legal clearance, publication approval, or an
   exception for a separately recovered FPGA tail. See
   [firmware provenance](devices/biscuit/packaging/FPGA-PROVENANCE.txt) and the
-  [current package guide](devices/biscuit/packaging/kernel61/README.md).
+  [current package guide](devices/biscuit/packaging/README.md).
 - The experimental Dot Sendspin companion (not bundled in the ARM64 starter)
   builds the official Apache-2.0
   `sendspin-cpp` SDK at `a4a9b65fb356657e3a39a2ab70b4aae957bf53e0` with

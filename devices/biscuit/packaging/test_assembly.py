@@ -10,16 +10,17 @@ import re
 import shutil
 import struct
 import subprocess
-import sys
 import tarfile
 import tempfile
 import unittest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from kernel61 import arm64_assemble, locked_build, rootfs, starter_build
+import arm64_assemble
+import locked_build
+import rootfs
+import starter_build
 
 HERE = Path(__file__).resolve().parent
-BACKUP = HERE.parents[3] / ".amp/in/orb-backup"
+BACKUP = HERE.parents[2] / ".amp/in/orb-backup"
 
 
 class BootDecisionTests(unittest.TestCase):
@@ -76,7 +77,7 @@ sleep) echo UNEXPECTED_SLEEP >> "$ROOT/events"; exit 1;;
 esac
 exec "$BUSYBOX" "$@"
 ''')
-        source = (HERE / "init").read_text().replace("/bin/busybox.static", str(bb))
+        source = (HERE / "arm64-init").read_text().replace("/bin/busybox.static", str(bb))
         source = source.replace("@ROOTFS_SHA256@", hashlib.sha256(archive).hexdigest())
         # In this host-only harness rescue exits, rather than opening a shell.
         a, b = source.index("rescue() {"), source.index("$BB mount -t proc")
@@ -339,7 +340,7 @@ exec "$BUSYBOX" "$@"
         (self.root / "run/encore/usb-ready").write_text(str(os.getpid()))
         # The compiled MT6628 glue opens /etc/firmware/WIFI_RAM_CODE_8163;
         # reaching the same bytes through /lib/firmware alone is insufficient.
-        source = (HERE / "boot.sh").read_text().split("/usr/local/bin/wmtup", 1)[0]
+        source = (HERE / "arm64-boot.sh").read_text().split("/usr/local/bin/wmtup", 1)[0]
         source += 'test "$(cat /etc/firmware/WIFI_RAM_CODE_8163)" = radio-image\n'
         bb = self.script("firmware-bb", 'case "$1" in --install|mount) exit 0;; esac\nexec "$BUSYBOX" "$@"\n')
         firewall = self.script("firmware-firewall", "exit 0\n")
@@ -355,7 +356,7 @@ exec "$BUSYBOX" "$@"
     def test_base_never_enables_radio_without_usb_or_after_firewall_failure(self):
         # Run the real boot prefix up to radio/link activation; all mount and
         # firewall operations are shims. USB readiness uses real process liveness.
-        source = (HERE / "boot.sh").read_text().split("ip link set lo up")[0] + "echo RADIO_ALLOWED\n"
+        source = (HERE / "arm64-boot.sh").read_text().split("ip link set lo up")[0] + "echo RADIO_ALLOWED\n"
         bb = self.script("base-bb", 'case "$1" in --install|mount) exit 0;; esac\nexec "$BUSYBOX" "$@"\n')
         firewall = self.script("firewall", 'exit "$FW_STATUS"\n')
         source = source.replace("/bin/busybox.static", str(bb)).replace("/usr/local/sbin/encore-firewall", str(firewall))
@@ -376,7 +377,7 @@ exec "$BUSYBOX" "$@"
                 self.assertEqual("RADIO_ALLOWED" in (self.root / "run/encore/base.log").read_text(), allowed)
 
     def test_dhcp_and_base_readiness_require_a_live_supplicant(self):
-        source = (HERE / "boot.sh").read_text().split("echo ctrl_interface=", 1)[1]
+        source = (HERE / "arm64-boot.sh").read_text().split("echo ctrl_interface=", 1)[1]
         source = "set -eu\necho ctrl_interface=" + source
         source = source.replace("/run/", str(self.root / "run") + "/")
         check = self.script("wifi-start", source)

@@ -14,15 +14,14 @@ import shlex
 import stat
 import struct
 import subprocess
-import sys
 import tarfile
 
-HERE = Path(__file__).resolve().parent
-ROOT = HERE.parents[3]
-sys.path.insert(0, str(HERE.parent))
-from kernel61.arm64_probe import BUSYBOX_SHA256, COMMIT, SOURCE_SHA256, image_header, native_busybox, native_elf
-from kernel61.rootfs import TRIAL_FORMAT, rootfs_archive
+from arm64_probe import BUSYBOX_SHA256, COMMIT, SOURCE_SHA256, image_header, native_busybox, native_elf
 from package import cpio, sha
+from rootfs import TRIAL_FORMAT, rootfs_archive
+
+HERE = Path(__file__).resolve().parent
+ROOT = HERE.parents[2]
 
 TEMPLATE_SHA256 = "a948a28b3871674b1adabd4a9f47b5d0e6f877f5af8acf6faba6f0a37cb50dda"
 FPGA_SHA256 = "77a558bacdaaf9e343f02f2d74f27a5f2bb2dc8b6d66cc2499b60ed14ef62fe6"
@@ -100,7 +99,7 @@ def initramfs(busybox, rootfs_hash, microphone_firmware, store_rootfs=STORE_ROOT
         raise ValueError("recovery re-arm requires a verified-update starter")
     if native is not None and (starter or signed is not None):
         raise ValueError("native boot does not use the recovery selector")
-    init = (HERE / "init").read_text().replace(
+    init = (HERE / "arm64-init").read_text().replace(
         "@ROOTFS_SHA256@", rootfs_hash).replace(
         "/store/encore/kernel61-trial/rootfs.tar.gz", store_rootfs)
     if native is not None:
@@ -264,7 +263,7 @@ def runtime_files(directory):
     native_elf(runtime, static=True)
     # Mounts/firewall/firmware policy is shared with the hardware build; radio
     # ownership moves from the one-shot base into independent init services.
-    boot = (HERE / "boot.sh").read_text().split("/usr/local/bin/wmtup", 1)[0]
+    boot = (HERE / "arm64-boot.sh").read_text().split("/usr/local/bin/wmtup", 1)[0]
     boot += ('cp /etc/encore/runtime-config.json /data/encore/config.json\n'
              'chmod 600 /data/encore/config.json\n'
              'touch /run/encore/base-ready\n')
@@ -295,8 +294,8 @@ def main():
                         help="sealed pre-rename runtime directory; enables integrated init services")
     args = parser.parse_args()
     inputs = {path.name: sha(path.read_bytes()) for path in HERE.iterdir() if path.is_file()}
-    service_sources = {str(path.relative_to(ROOT)): sha(path.read_bytes())
-                       for path in HERE.parent.iterdir() if path.is_file()}
+    service_sources = {str((HERE / name).relative_to(ROOT)): inputs[name]
+                       for name in ("bluetooth", "dhcp.sh", "firewall", "network", "run")}
     base = args.base_rootfs.read_bytes()
     if sha(base) != args.base_sha256:
         parser.error("native base rootfs differs from supplied pin")
@@ -381,8 +380,6 @@ def main():
         raise ValueError("runtime sources changed during compilation")
     if any(sha((HERE / name).read_bytes()) != digest for name, digest in inputs.items()):
         raise ValueError("packaging sources changed during assembly")
-    if any(sha((ROOT / name).read_bytes()) != digest for name, digest in service_sources.items()):
-        raise ValueError("service sources changed during assembly")
     manifest = {"format": ("encore-biscuit-arm64-runtime-trial-v1" if runtime_manifest else
                            "encore-biscuit-arm64-hardware-trial-v1"), "release": False,
                 "architecture": "aarch64", "distribution": "Alpine " + release,

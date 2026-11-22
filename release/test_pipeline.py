@@ -394,7 +394,7 @@ class PipelineTests(unittest.TestCase):
         android_tip = commit("fix(android): handle reconnect", "devices/android-generic/app/Host.java")
         # A recovery tag and draft cannot establish a release baseline.
         android_release = publish("android-generic-r1000000003", android_tip, draft=True)
-        biscuit_tip = commit("fix(biscuit): update kernel notice", "devices/biscuit/packaging/kernel61/README.md")
+        biscuit_tip = commit("fix(biscuit): update kernel notice", "devices/biscuit/packaging/README.md")
         registry, _ = inventory("1.2.0")
 
         def plan(source):

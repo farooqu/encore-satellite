@@ -1,11 +1,8 @@
 """The experimental payload cannot be mistaken for a release kernel."""
 import struct
-import sys
-from pathlib import Path
 import unittest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from kernel61.arm64_probe import image_header, native_elf
+from arm64_probe import image_header, native_elf
 from package import arm_elf, validate_kernel
 
 

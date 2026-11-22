@@ -100,7 +100,10 @@ jobs:
               '.source == $source and .version == $version and .revision == $revision' "$plan" >/dev/null
             if ! jq -e '.targets | index("biscuit") != null' "$plan" >/dev/null; then exit 0; fi
           fi
-          tag=$(PYTHONPATH=devices/biscuit/packaging/kernel61 python3 -c '
+          packaging=devices/biscuit/packaging
+          # Manual builds and queued runs can still select a pre-move commit.
+          if [[ ! -f "$packaging/locked_build.py" ]]; then packaging+=/kernel61; fi
+          tag=$(PYTHONPATH="$packaging" python3 -c '
           from locked_build import HERE, read_lock
           print(read_lock((HERE / "ci-inputs.json").read_bytes())["external_bundle_tag"] or "")
           ')
@@ -108,7 +111,7 @@ jobs:
             echo '::notice::No approved external bundle is available; skipping assembly.'
             exit 0
           fi
-          printf 'tag=%s\nversion=%s\nrevision=%s\n' "$tag" "$version" "$revision" >> "$GITHUB_OUTPUT"
+          printf 'tag=%s\nversion=%s\nrevision=%s\npackaging=%s\n' "$tag" "$version" "$revision" "$packaging" >> "$GITHUB_OUTPUT"
       - name: Install release build tools
         if: steps.inputs.outputs.tag != ''
         run: |
@@ -137,9 +140,10 @@ jobs:
         env:
           VERSION: ${{ steps.inputs.outputs.version }}
           REVISION: ${{ steps.inputs.outputs.revision }}
+          PACKAGING: ${{ steps.inputs.outputs.packaging }}
         run: |
           set -euo pipefail
-          python3 devices/biscuit/packaging/kernel61/locked_build.py \
+          python3 "$PACKAGING/locked_build.py" \
             --inputs "$RUNNER_TEMP/inputs" --output build/biscuit-arm64-dev \
             --version "$VERSION" --revision "$REVISION"
           git diff --exit-code

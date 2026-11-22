@@ -29,6 +29,7 @@ ANDROID_FEED_TYPE = "encore-android-update+jws"
 ARM64_STARTER = "encore-biscuit-arm64-starter-v1"
 NATIVE_STARTER = "encore-biscuit-native-ab-v1"
 ARM64_FEED_TYPE = "encore-linux-update+jws"
+BISCUIT_PACKAGING = "devices/biscuit/packaging"
 BISCUIT_ARM64_ROOT = bytes.fromhex("302a300506032b6570032100") + base64.b64decode(
     "Ggx1WlubkJjSPNpKoaEDzPZYMzUxbiPunioZcmvxsuc=")  # Same root as BiscuitARM64Root in platforms/linuxupdate.
 
@@ -125,15 +126,22 @@ def record(path):
 
 
 def load_biscuit_starter(path, artifact_sha256):
-    sys.path.insert(0, str(ROOT / "devices/biscuit/packaging"))
-    from kernel61.starter_install import load_bundle
+    sys.path.insert(0, str(ROOT / BISCUIT_PACKAGING))
+    from starter_install import load_bundle
     return load_bundle(path, artifact_sha256)
 
 
+def biscuit_source_packaging(source):
+    # Retained receipts and their guide links refer to the layout at their source commit.
+    if run("git", "ls-tree", "--name-only", source, "--", f"{BISCUIT_PACKAGING}/ci-inputs.json").strip():
+        return BISCUIT_PACKAGING
+    return f"{BISCUIT_PACKAGING}/kernel61"
+
+
 def biscuit_lock(source):
-    sys.path.insert(0, str(ROOT / "devices/biscuit/packaging"))
-    from kernel61.locked_build import read_lock
-    data = run("git", "show", f"{source}:devices/biscuit/packaging/kernel61/ci-inputs.json")
+    sys.path.insert(0, str(ROOT / BISCUIT_PACKAGING))
+    from locked_build import read_lock
+    data = run("git", "show", f"{source}:{biscuit_source_packaging(source)}/ci-inputs.json")
     lock = read_lock(data)
     require(lock["external_bundle_tag"] is not None, "ARM64 external inputs are not approved at the receipt source")
     return hashlib.sha256(data).hexdigest(), lock["sha256"]
@@ -195,8 +203,8 @@ def inspect_artifact(receipt, path, aapt="aapt", apksigner="apksigner"):
 
 
 def inspect_native_pair(receipt, path):
-    sys.path.insert(0, str(ROOT / "devices/biscuit/packaging"))
-    from kernel61.starter_install import NATIVE_FILES, load_native_bundle, native_members
+    sys.path.insert(0, str(ROOT / BISCUIT_PACKAGING))
+    from starter_install import NATIVE_FILES, load_native_bundle, native_members
     manifest, files = load_native_bundle(path, receipt["artifact"]["sha256"])
     lock_sha, _ = biscuit_lock(receipt["source"])
     require(manifest["input_lock_sha256"] == lock_sha, "native seed external lock differs from receipt source")
@@ -334,7 +342,7 @@ def prepare(spec, output, aapt="aapt", apksigner="apksigner"):
     elif starter:
         manifest, rootfs, _ = load_biscuit_starter(paths["artifact"], receipt["artifact"]["sha256"])
         receipt["ota"] = {"name": "rootfs.tar.gz", "sha256": hashlib.sha256(rootfs).hexdigest(), "size": len(rootfs)}
-        from kernel61.starter_build import source_hashes
+        from starter_build import source_hashes
         hashes = source_hashes()
         tracked = set(run("git", "ls-files", "-z").decode().split("\0"))
         require(hashes.keys() <= tracked and manifest.get("sources") == hashes,
@@ -368,7 +376,7 @@ def prepare_native_ci(build, output):
              "artifact": str(build / "primary" / seed), "reproduced_artifact": str(build / "repeat" / seed),
              "ota": str(build / "primary" / ota), "reproduced_ota": str(build / "repeat" / ota),
              "evidence": str(build / "evidence.txt"), "toolchain": "pinned in CI workflow and external-input lock",
-             "recipe": "devices/biscuit/packaging/kernel61/locked_build.py",
+             "recipe": f"{BISCUIT_PACKAGING}/locked_build.py",
              "sources": {"kernel": str(build / "sources/kernel-source.tar.gz"),
                          "alpine": str(build / "sources/alpine-go-source.tar.gz")}}, output)
 
@@ -493,13 +501,14 @@ def publish(directory, receipt, execute, *, automatic_dev=False, dev_plan=None):
         notes = dev_plan["changelog"].rstrip() + "\n"
     if arm64_starter(receipt):
         source = receipt["source"]
+        guide = f"{biscuit_source_packaging(source)}/README.md"
         summary = ("Biscuit ARM64 native A/B pilot. The seed ZIP is for a fresh install; the OTA ZIP requires a signed native feed."
                    if native_starter(receipt) else
                    "Biscuit ARM64 development build. Use the ZIP for a fresh install; rootfs.tar.gz requires a signed runtime OTA feed.")
         notes = (notes + "\n## Biscuit installation\n\n" if notes else "") + (
             summary + "\n\n"
             f"[Source commit](https://github.com/{REPOSITORY}/commit/{source}) · "
-            f"[Install guide](https://github.com/{REPOSITORY}/blob/{source}/devices/biscuit/packaging/kernel61/README.md)\n")
+            f"[Install guide](https://github.com/{REPOSITORY}/blob/{source}/{guide})\n")
     elif dev_plan is None:
         if run("git", "ls-tree", "--name-only", receipt["source"], "--", changelog).strip():
             notes = run("git", "show", f"{receipt['source']}:{changelog}").decode()

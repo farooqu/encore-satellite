@@ -16,7 +16,7 @@ from urllib.parse import urlsplit
 import zipfile
 
 from package import sha
-from kernel61.starter_install import load_bundle as load_arm64_starter
+from starter_install import load_bundle as load_arm64_starter
 
 
 def encode(value):

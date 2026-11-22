@@ -73,7 +73,7 @@ affect recovery installs.
 
 Publish ordinary signed Dev releases before the device pilot; do not reserve a
 separate pilot version. Install the first retained Dev release's exact signed
-seed with the [native installer](../devices/biscuit/packaging/kernel61/README.md#signed-native-ab-pilot).
+seed with the [native installer](../devices/biscuit/packaging/README.md#signed-native-ab-pilot).
 After fresh enrollment, apply the next retained Dev release through Home Assistant.
 USB verification checks that the new version is running and confirmed, that
 the former slot still holds its previous version, and that enrollment survives
@@ -101,7 +101,7 @@ rebuilding or retagging. For runtime OTA, such a promotion would sign new
 channel metadata for the same rootfs bytes, not put the starter ZIP on a feed.
 Release promotion is not implemented by the automatic dev workflow.
 
-1. `devices/biscuit/packaging/kernel61/ci-inputs.json` locks only external
+1. `devices/biscuit/packaging/ci-inputs.json` locks only external
    bytes. CI fetches the pinned upstream Linux source and Go archives from
    their upstream URLs. Once approved for this use, retain the exact other
    four files (`alpine-apks.tar.gz`, `alpine-source.tar.gz`, `apk-tools-static.apk`,
@@ -153,7 +153,7 @@ the updater.
 To install, use `pipeline.py verify` from the release source checkout with the
 approved public key and reviewed receipt hash. Then pass the signed receipt's
 `artifact.sha256` for the ZIP to the existing guarded installer. See the
-[ARM64 install guide](../devices/biscuit/packaging/kernel61/README.md).
+[ARM64 install guide](../devices/biscuit/packaging/README.md).
 Compatible signed **runtime** updates replace the rootfs in the inactive Encore
 slot without rewriting recovery or the stock partitions. Use the feed procedure
 below with the Biscuit signing root and `target=biscuit` in `activate-feed.yml`;

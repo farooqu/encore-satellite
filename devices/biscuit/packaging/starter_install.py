@@ -14,8 +14,8 @@ import zipfile
 import zlib
 from pathlib import Path, PurePosixPath
 
-from kernel61.arm64_assemble import boot_image, initramfs, FPGA_SHA256, STARTER_FORMAT, TEMPLATE_SHA256
-from kernel61.arm64_probe import BUSYBOX_SHA256, native_elf
+from arm64_assemble import boot_image, initramfs, FPGA_SHA256, STARTER_FORMAT, TEMPLATE_SHA256
+from arm64_probe import BUSYBOX_SHA256, native_elf
 from package import FORMAT as LEGACY, sha
 
 FORMAT = STARTER_FORMAT

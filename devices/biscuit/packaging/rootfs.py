@@ -5,7 +5,7 @@ import json
 from pathlib import Path, PurePosixPath
 import tarfile
 
-from kernel61.arm64_probe import native_elf
+from arm64_probe import native_elf
 from package import legacy_ssh_member
 
 HERE = Path(__file__).resolve().parent
@@ -13,7 +13,7 @@ TRIAL_FORMAT = "encore-biscuit-kernel61-trial-v1"
 
 
 def arm64_bluetooth():
-    bluetooth = (HERE.parent / "bluetooth").read_text()
+    bluetooth = (HERE / "bluetooth").read_text()
     if bluetooth.count("/proc/idme/bt_mac_addr") != 1:
         raise ValueError("Bluetooth identity source contract changed; review DT-IDME integration")
     # The 6.1 connectivity import consumes the factory IDME value directly from DT.
@@ -66,8 +66,8 @@ def rootfs_archive(base, kernel_record):
     entries.pop("etc/encore-package.json", None)
     for source, target in (("run", "encore-run"),
                            ("network", "encore-network"), ("firewall", "encore-firewall")):
-        add("usr/local/sbin/" + target, (HERE.parent / source).read_bytes(), 0o755)
-    add("etc/encore/dhcp.sh", (HERE.parent / "dhcp.sh").read_bytes(), 0o755)
+        add("usr/local/sbin/" + target, (HERE / source).read_bytes(), 0o755)
+    add("etc/encore/dhcp.sh", (HERE / "dhcp.sh").read_bytes(), 0o755)
     add("usr/local/sbin/encore-bluetooth", arm64_bluetooth(), 0o755)
     add("usr/local/sbin/usb-rescue", (HERE / "usb-rescue").read_bytes(), 0o755)
     add("sbin/init", (HERE / "arm64-probe-init").read_bytes(), 0o755)

@@ -28,7 +28,8 @@ def affected(paths, registry):
         elif (path.startswith(("platforms/linuxble/", "platforms/linuxsendspin/", "platforms/linuxupdate/"))
               and not path.endswith(".md")) or path in {
                   ".github/workflows/biscuit-arm64-dev.yml", ".github/workflows/biscuit-kernel.yml",
-                  ".github/workflows/biscuit-sign.yml", "devices/biscuit/packaging/kernel61/README.md",
+                  ".github/workflows/biscuit-sign.yml", "devices/biscuit/packaging/README.md",
+                  "devices/biscuit/packaging/kernel61/README.md",  # Pre-move release history.
               }:
             # The kernel recipe embeds this README in the runtime's license directory.
             result.add("biscuit")

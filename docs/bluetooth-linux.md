@@ -77,7 +77,7 @@ audio/Wi-Fi coexistence needs target measurement, not an assumed identical budge
 
 ## Echo Dot 2 prerequisites (Biscuit, Alpine AArch64)
 
-The [Biscuit starter](../devices/biscuit/packaging/kernel61/README.md) supplies
+The [Biscuit starter](../devices/biscuit/packaging/README.md) supplies
 Encore's pinned Linux 6.1 kernel and AArch64 userspace. The stock/TWRP kernel is
 not the runtime Bluetooth stack. A Fire OS version string, a working raw H4
 scan or successful Wi-Fi is not a substitute for validating the packaged stack.
@@ -130,7 +130,7 @@ and small proxy conversions. Notices are in `ACKNOWLEDGEMENTS.md` and
 
 `farooqu/techo5-dot` at `b2a50c74bbe8b34785748574aa39fbd045fc4e46` was a
 reference for bridge quirks and service lifecycle. It is not the current base.
-Biscuit uses [pinned LibreEcho-Linux source and Encore patches](../devices/biscuit/packaging/kernel61/README.md#build-locally).
+Biscuit uses [pinned LibreEcho-Linux source and Encore patches](../devices/biscuit/packaging/README.md#build-locally).
 See the [historical source kit](../devices/biscuit/packaging/KERNEL-SOURCE.md)
 for the retired Linux 3.18 build and its obligations.
 

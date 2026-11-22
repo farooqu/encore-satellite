@@ -69,7 +69,7 @@ an AArch64 Linux 6.1 kernel, recovery initramfs, Alpine userspace and Encore's
 native runtime. One private build demonstrated clean Wi-Fi enrollment over
 Improv BLE and Action-gated Home Assistant setup on hardware. This is not
 general install, reboot, OTA or audio qualification. See the
-[Biscuit build and install guide](devices/biscuit/packaging/kernel61/README.md)
+[Biscuit build and install guide](devices/biscuit/packaging/README.md)
 for the current requirements and limits. The Linux 3.18/ARMv7 release path is retired.
 Internal board names are **Biscuit** for Echo Dot (2nd gen) and **Radar** for
 Echo (2nd gen). Radar has no device implementation here; shared Linux helpers

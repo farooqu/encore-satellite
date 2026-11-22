@@ -1,7 +1,7 @@
 # Historical Echo Dot 2 Linux 3.18 kernel source kit
 
 The Linux 3.18 release path is retired. This file documents the old source kit
-and the firmware exception, not the [current AArch64 build](kernel61/README.md).
+and the firmware exception, not the [current AArch64 build](README.md).
 
 `source.tar.gz` accompanied each legacy kernel artifact. It contains the
 patched kernel source (`src/`, including its COPYING and component notices),

@@ -2,7 +2,7 @@
 
 **Experimental, not hardware-qualified.** Biscuit builds use Linux 6.1.178,
 Alpine 3.22 AArch64, the native Encore runtime and a separate USB recovery
-environment. See [the current build and fresh-install instructions](packaging/kernel61/README.md).
+environment. See [the current build and fresh-install instructions](packaging/README.md).
 The Linux 3.18/ARMv7 release path is retired. Other Echo models are not supported.
 
 ## Internal names
@@ -381,7 +381,7 @@ default to DROP; OUTPUT is allowed. The package owns these device filter tables.
 
 | Inbound service | Policy |
 |---|---|
-| TCP 6053, ESPHome controls/Bluetooth proxy | Wi-Fi only; controls require the nonzero per-device Noise key. Unpaired starter builds listen only during the Action-authorized [first-pair window](packaging/kernel61/README.md#add-the-esphome-controls-to-home-assistant). |
+| TCP 6053, ESPHome controls/Bluetooth proxy | Wi-Fi only; controls require the nonzero per-device Noise key. Unpaired starter builds listen only during the Action-authorized [first-pair window](packaging/README.md#add-the-esphome-controls-to-home-assistant). |
 | TCP 6055, native Voice Incubator protocol 2 | Wi-Fi only; **unauthenticated**, use only on a trusted LAN/VLAN, never port-forward. |
 | UDP 5353 | mDNS multicast destinations and unicast replies on Wi-Fi. |
 | DHCP and selected ICMP/IPv6 discovery | Allowed on Wi-Fi for address configuration, diagnostics and network operation. |
@@ -444,7 +444,7 @@ CPU/RAM, underruns, Wi-Fi/BLE coexistence and timer recovery remain Dot tests.
 
 ## Build, fresh install and updates
 
-Use the [AArch64 build and install guide](packaging/kernel61/README.md) for
+Use the [AArch64 build and install guide](packaging/README.md) for
 current inputs, recovery preflight, fresh enrollment, persistent boot routing and
 rollback. Compatible signed runtime updates stage an inactive Encore rootfs slot;
 kernel and recovery changes are separate. Neither path writes the stock system

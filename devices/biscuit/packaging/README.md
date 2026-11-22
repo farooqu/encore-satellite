@@ -7,7 +7,7 @@ historical ARMv7 packages nor RAM-root trial artifacts are install inputs.
 ## Signed native A/B pilot
 
 Use the `biscuit-native-signed` candidate directory from the
-[GitHub signing workflow](../../../../release/publishing.md#biscuit-native-ab-github-signing),
+[GitHub signing workflow](../../../release/publishing.md#biscuit-native-ab-github-signing),
 not the unsigned seed or the OTA ZIP by itself. From the candidate's exact
 source checkout, with the unit in reviewed Biscuit TWRP via fastboot, run
 `python3 devices/biscuit/packaging/install.py install-native` with `--serial`,
@@ -47,7 +47,7 @@ make biscuit-package BISCUIT_SEALED_BASE=/path/to/starter-inputs \
 This writes a new `build/biscuit/encore-biscuit-$UNUSED_REVISION/starter.zip`.
 Use a complete SemVer and a positive, previously unused package revision for a
 candidate. For main-based public dev identities, see the
-[publishing runbook](../../../../release/publishing.md#biscuit-arm64-public-dev-starter).
+[publishing runbook](../../../release/publishing.md#biscuit-arm64-public-dev-starter).
 Put the retained audiofix1 `rootfs.tar.gz` and `audited-header.bin` and the
 `6.1.178-encore-biscuit-arm64-stpfix1` `Image` and `biscuit-arm64-probe.dtb`
 in that directory. The starter reuses the pinned AArch64 Alpine 3.22.8 packages
@@ -192,7 +192,7 @@ Pages base. Starting with a recovery verifier that supports both channels, you
 can select Dev in Home Assistant; the Dot remembers the choice across reboots.
 Changing back to Stable does not downgrade a Dev install. A newer compatible
 Stable release must be available. An older recovery verifier stays Stable-only.
-See [release publishing](../../../../release/publishing.md) for signing and
+See [release publishing](../../../release/publishing.md) for signing and
 retaining the exact runtime archive from the starter ZIP and selecting it on a
 feed. Production feed activation is separate from a build or fresh install.
 
@@ -312,9 +312,7 @@ No QEMU build target or emulation configuration is part of this device package.
 
 ```sh
 go test -race ./...
-python3 -m unittest discover -s devices/biscuit/packaging -p 'test_*.py'
-python3 -m unittest discover -s devices/biscuit/packaging/kernel61 -p 'test_*.py'
-sh -n devices/biscuit/packaging/kernel61/usb-rescue
+make biscuit-check
 ```
 
 The source pin is stable 6.1.178 plus LibreEcho's substantial device/vendor
@@ -395,8 +393,9 @@ APK/executable hashes. Preserve its GPL-2.0-only source/notice obligations befor
 distribution. Retain the native base's `lib/apk/db/installed`, authenticated APKs
 and hashes; never relabel ARM32 package evidence as AArch64. The trial includes
 ALSA utilities, BlueZ 5.82 and wpa_supplicant, not PulseAudio or PipeWire.
-`../base.sh OUTPUT.tar.gz` builds the AArch64 package base. The authenticated standalone apk tool can build the
-same package set where a Docker daemon is unavailable.
+`sh devices/biscuit/packaging/base.sh OUTPUT.tar.gz` builds the AArch64 package
+base. The authenticated standalone apk tool can build the same package set
+where a Docker daemon is unavailable.
 
 The SPI microphone driver requests `i2s_to_spi_v34.bin` during kernel device
 probe, before the store mounts. Pass the pinned source archive's retained
@@ -413,7 +412,7 @@ This does not change the sealed kernel currently pinned by the starter builder;
 review and qualify the new kernel and pin its matching inputs separately.
 
 ```sh
-python3 devices/biscuit/packaging/kernel61/arm64_probe.py \
+python3 devices/biscuit/packaging/arm64_probe.py \
   --source-archive /path/to/retained/linux-source.tar.gz \
   --output .amp/in/orb-backup/biscuit-arm64-kernel
 ```

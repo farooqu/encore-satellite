@@ -12,7 +12,7 @@ import sys
 import tarfile
 
 HERE = Path(__file__).resolve().parent
-ROOT = HERE.parents[3]
+ROOT = HERE.parents[2]
 FILES = {"alpine-apks.tar.gz", "alpine-source.tar.gz", "apk-tools-static.apk", "audited-header.bin",
          "go-linux-amd64.tar.gz", "go-source.tar.gz", "linux-source.tar.gz"}
 
