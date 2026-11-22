@@ -1,0 +1,26 @@
+#!/bin/sh
+set -eu
+
+while read -r local_ref local_oid remote_ref remote_oid; do
+    case "$remote_ref" in refs/heads/*) ;; *) continue ;; esac
+    case "$local_oid" in *[!0]*) ;; *) continue ;; esac  # Branch deletion.
+
+    case "$remote_oid" in
+        *[!0]*) base=$remote_oid ;;
+        *)  # A new branch has no remote tip; exclude existing main history.
+            if ! base=$(git rev-parse --verify --quiet "refs/remotes/$1/main^{commit}"); then
+                printf 'Cannot check new branch %s: fetch main from %s first.\n' "$remote_ref" "$1" >&2
+                exit 1
+            fi
+            ;;
+    esac
+
+    if ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+        printf 'Cannot check %s: fetch %s to get the current remote history first.\n' "$remote_ref" "$1" >&2
+        exit 1
+    fi
+    if ! python3 release/biscuit_dev.py --check-commits "$base" "$local_oid" </dev/null; then
+        printf 'Push blocked by the Conventional Commits check for %s.\n' "$remote_ref" >&2
+        exit 1
+    fi
+done

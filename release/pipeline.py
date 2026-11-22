@@ -509,16 +509,24 @@ def stage_feed(receipt, feed, public_key, site, channel, now=None):
 
 
 def planned_changelog(receipt, plan):
+    target = receipt["target"]
     require(plan["source"] == receipt["source"] and plan["version"] == receipt["core_version"] and
-            plan["revision"] == receipt["revision"] and receipt["target"] in plan["targets"],
+            plan["revision"] == receipt["revision"] and target in plan["targets"],
             "Dev release plan differs from signed candidate")
-    return plan["changelog"]
+    if "target_changelogs" in plan:
+        notes = plan["target_changelogs"].get(target)
+    else:
+        # Existing runs can replay an immutable plan generated before the split.
+        heading = {"android-generic": "Android", "biscuit": "Biscuit"}[target]
+        match = re.search(rf"^## {heading}\n.*?(?=^## |\Z)", plan["changelog"], re.M | re.S)
+        notes = match[0].rstrip() if match else None
+    require(isinstance(notes, str) and notes.strip(), "Dev release plan has no changelog for candidate target")
+    return notes
 
 
 def publish(directory, receipt, execute, *, automatic_dev=False, dev_plan=None):
     release_tag = tag(receipt)
     version = receipt["core_version"]
-    changelog = f"release/changelogs/{version}.md"
     title = f"{release_tag} · {version}"
     notes = ""
     if dev_plan is not None:
@@ -536,13 +544,10 @@ def publish(directory, receipt, execute, *, automatic_dev=False, dev_plan=None):
             f"[Source commit](https://github.com/{REPOSITORY}/commit/{source}) · "
             f"[Install guide](https://github.com/{REPOSITORY}/blob/{source}/{guide})\n")
     elif dev_plan is None:
-        if run("git", "ls-tree", "--name-only", receipt["source"], "--", changelog).strip():
-            notes = run("git", "show", f"{receipt['source']}:{changelog}").decode()
-        else:
-            # Older manually reserved snapshots predate generated changelogs. Do
-            # not invent a previous release: include their complete commit history.
-            notes = "Initial retained experimental snapshot; not stable qualification. No channel activation.\n\n" + run(
-                "git", "log", "--reverse", "--format=- %s (%H)", receipt["source"]).decode()
+        # Legacy reservations had no per-product changelog; their cohort notes
+        # and full Git history both contain unrelated products.
+        notes = ("Retained experimental Android snapshot. No channel activation.\n\n"
+                 f"[Source commit](https://github.com/{REPOSITORY}/commit/{receipt['source']})\n")
     if receipt["target"] == "android-generic":
         title = f"Android {version}"
     commands = [
@@ -621,7 +626,7 @@ def main():
         if name == "publish":
             sub.add_argument("--execute", action="store_true")
             sub.add_argument("--automatic-dev", action="store_true", help="Use the repository's required immutability setting instead of an admin preflight")
-            sub.add_argument("--dev-plan", type=Path, help="Version-specific changelog and target selection from Foundation checks")
+            sub.add_argument("--dev-plan", type=Path, help="Version-specific changelog and target selection from CI · Repository checks")
         if name in {"feed", "stage-feed"}:
             sub.add_argument("--channel", choices=("dev", "stable"), required=True)
         if name == "feed":

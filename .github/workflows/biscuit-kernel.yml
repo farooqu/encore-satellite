@@ -1,4 +1,4 @@
-name: Echo Dot (2nd gen) Linux kernel (Biscuit)
+name: Biscuit · Check Linux kernel
 
 on:
   workflow_dispatch:

@@ -1,8 +1,12 @@
-name: Biscuit ARM64 dev builds
+name: Biscuit · Build Dev packages
+run-name: >-
+  ${{ github.event_name == 'workflow_run' && format('Automatic Dev · {0}', github.event.workflow_run.head_sha) ||
+      format('Manual · Rebuild {0}', inputs.source || github.sha) }}
 
 on:
   workflow_run:
-    workflows: [Foundation checks]
+    # Match the old display name for in-flight runs and historical reruns.
+    workflows: ['CI · Repository checks', 'Foundation checks']
     types: [completed]
     branches: [main]
   workflow_dispatch:

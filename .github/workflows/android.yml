@@ -1,11 +1,17 @@
-name: Android APK checks and signing
+name: Android Tablet · Checks and Dev release
+run-name: >-
+  ${{ github.event_name == 'workflow_run' && format('Automatic Dev · {0}', github.event.workflow_run.head_sha) ||
+      github.event_name == 'pull_request' && format('PR #{0} · APK checks', github.event.pull_request.number) ||
+      github.event_name == 'workflow_dispatch' && inputs.signed_candidate && 'Manual · Signed APK candidate' ||
+      format('APK checks · {0}', github.ref_name) }}
 
 on:
   pull_request:
   push:
     branches-ignore: [main]
   workflow_run:
-    workflows: [Foundation checks]
+    # Match the old display name for in-flight runs and historical reruns.
+    workflows: ['CI · Repository checks', 'Foundation checks']
     types: [completed]
     branches: [main]
   workflow_dispatch:
@@ -111,7 +117,10 @@ jobs:
             ~/.m2/repository/org/robolectric/android-all-instrumented
           # build-android pins SendspinDroid, whose checkout supplies Gradle and shared modules.
           key: android-maven-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('devices/android-generic/**/*.gradle.kts', 'devices/android-generic/gradle.properties', 'devices/android-generic/build-android') }}
-          restore-keys: android-maven-v1-${{ runner.os }}-${{ runner.arch }}-
+          # Borrow downloaded dependencies, not task outputs. Save under this app's own key.
+          restore-keys: |
+            android-maven-v1-${{ runner.os }}-${{ runner.arch }}-
+            android-assistant-maven-v1-${{ runner.os }}-${{ runner.arch }}-
       - name: Regenerate engine, assemble, test and lint
         if: github.event_name != 'workflow_run' || steps.dev.outputs.revision != ''
         run: devices/android-generic/build-android :app:assembleDebug :app:testDebugUnitTest :app:lintDebug

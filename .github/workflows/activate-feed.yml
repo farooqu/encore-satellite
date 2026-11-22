@@ -1,4 +1,4 @@
-name: Select or renew a release channel feed
+name: Release · Update OTA feed
 
 on:
   workflow_call:

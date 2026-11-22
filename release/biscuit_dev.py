@@ -1,9 +1,9 @@
 """Derive the shared Encore release identity from first-parent main history."""
 
+import argparse
 from pathlib import Path
 import re
 import subprocess
-import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 # The private dev.5 reservation is the last identity carried over. Never move
@@ -12,7 +12,28 @@ ANCHOR = "e47198791e746f71c233f0663e2fd5413093827c"
 # Last commit in the original height-versioned series (0.1.35). Keep that
 # series verifiable forever; only later commits use message-driven SemVer.
 SEMVER_BASE = "f6b6fd02bb42913608ff6957c0bc3bdc88bc50d0"
-CONVENTIONAL = re.compile(r"([a-z]+)(?:\([^()\n]+\))?(!)?: .+")
+CONVENTIONAL = re.compile(r"([a-z]+)(?:\([^()\n]+\))?(!)?: (.+)")
+COMMIT_TYPES = {"build", "chore", "ci", "docs", "feat", "fix", "perf", "refactor", "revert", "style", "test"}
+
+
+def check_commits(base, head):
+    records = subprocess.check_output(
+        ["git", "log", "-z", "--format=%h %B", "--end-of-options", f"{base}..{head}", "--"],
+        cwd=ROOT, text=True,
+    )
+    invalid = []
+    for record in records.split("\0")[:-1]:
+        sha, _, message = record.partition(" ")
+        subject = message.partition("\n")[0]
+        match = CONVENTIONAL.fullmatch(subject)
+        if not match or match[1] not in COMMIT_TYPES or not match[3].strip():
+            invalid.append(sha)
+    if invalid:
+        raise SystemExit(
+            f"Invalid Conventional Commit subject in: {', '.join(invalid)}\n"
+            "Use type(scope)!: summary (scope and ! are optional), e.g. fix(android): restore reconnect.\n"
+            f"Allowed types: {', '.join(sorted(COMMIT_TYPES))}."
+        )
 
 
 def identity(source):
@@ -42,9 +63,23 @@ def identity(source):
     return f"{major}.{minor}.{patch}", revision
 
 
-if __name__ == "__main__":
-    release = identity(sys.argv[1])
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("source", nargs="?", help="full source SHA to version")
+    mode.add_argument("--check-commits", nargs=2, metavar=("BASE", "HEAD"),
+                      help="require Conventional Commit subjects in BASE..HEAD")
+    args = parser.parse_args()
+    if args.check_commits:
+        check_commits(*args.check_commits)
+        return
+
+    release = identity(args.source)
     # Owner is holding 0.2.0 and beyond. Keep identity calculation independent
     # from this publication hold so a future unlock cannot change old identities.
     if release[0].startswith("0.1."):
         print(*release)
+
+
+if __name__ == "__main__":
+    main()

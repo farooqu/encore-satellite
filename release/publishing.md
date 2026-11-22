@@ -10,7 +10,7 @@ advance Dev; PR/check artifacts cannot. Signing stays restricted to protected
 `main` with verified commits. Stable always selects an exact qualified version
 manually.
 
-New Dev builds for Biscuit and Android use the same frozen first-parent anchor
+New Dev builds for Biscuit, Android Tablet and Android Assistant use the same frozen first-parent anchor
 (`release/biscuit_dev.py`). A source commit deterministically fixes the core
 version and increasing OTA revision (also Android's `versionCode`). Android
 main-derived receipts use `identity: main`, without a reservation. The old
@@ -18,19 +18,51 @@ ledger is retained to verify historical receipts; do not allocate new entries.
 After the versioning cutover, `feat` advances the minor, a breaking change
 advances the major, and every other main commit advances the patch. Automatic
 builds remain on `0.1.x` while `0.2.0` is on hold; subsequent patches do not
-publish a held minor or major in disguise. After Foundation checks, one Dev
+publish a held minor or major in disguise. After **CI · Repository checks**, one Dev
 plan compares the push tip against each device's own last immutable published
-release on first-parent `main`. Shared package inputs select both targets;
+release on first-parent `main`. Shared package inputs select the targets that use them;
 device-only inputs select that device. An unpublished build, draft, or bare
 tag does not consume pending changes. A skipped target leaves its published
 release and feed untouched and can jump SemVer and OTA revision numbers on its
 next build. The APK and native seed/OTA identify the shared version they contain.
 
-The Foundation run summary and its `dev-release-plan` artifact contain the
-version's changelog, including an explicit **No build** for skipped targets
-(even if neither target builds). Each selected target's GitHub release uses
-that same changelog. Reviewed manual candidate builds remain available and do
-not automatically publish or promote Stable.
+The **CI · Repository checks** summary shows the combined changelog, including an explicit
+**No build** for each skipped target. The shared `dev-release-plan` artifact
+also carries separate release notes per selected target. Each GitHub release
+and, for Tablet and Biscuit, each automatic Dev OTA entry uses only its own
+target's notes. For a commit with changes specific to different products, notes
+link to the commit and list only the files relevant to that target. The Assistant
+remains a sideload APK with no OTA feed and uses its latest immutable
+`android-assistant-r…` release as its own baseline.
+Reviewed manual candidate builds remain available and do not automatically
+publish or promote Stable.
+
+## Conventional Commits
+
+Use `type(scope): summary`; the scope is optional, e.g.
+`fix(android): restore reconnect` or `docs: clarify install steps`. Use `feat`
+for a minor bump and `!` or a `BREAKING CHANGE: …` footer for a major bump.
+Other accepted types are `build`, `chore`, `ci`, `docs`, `fix`, `perf`,
+`refactor`, `revert`, `style`, and `test`. The versioning anchor and published
+versions do not change.
+
+**CI · Repository checks** lints all commits introduced by a PR and all new `main`
+history since the enforcement cutoff. Use a Conventional Commit subject for
+the final merge or squash commit too.
+
+Enable the local pre-push hook once per clone with
+`git config --local core.hooksPath .githooks`. If you already use a custom hooks
+directory, chain `.githooks/pre-push` from your existing hook instead of replacing
+your configuration. The hook uses Python 3 to check commits sent to each branch
+before Git uploads them. For a new branch it compares against the named remote's
+`main`, so fetch `main` from that remote first. Tags and branch deletions are
+unaffected. To check manually, run
+`python3 release/biscuit_dev.py --check-commits origin/main HEAD`.
+
+CI runs after GitHub accepts a direct push: an invalid commit on `main` blocks
+automatic Dev releases, including on later pushes. Fix invalid subjects before
+pushing; if one lands on append-only `main`, resolve it with the maintainer
+rather than rewriting history or moving the cutoff.
 
 ## Biscuit native A/B GitHub signing
 
@@ -40,7 +72,7 @@ ZIP, the build evidence and matching sources. Both ZIPs must have the same
 two boot images and the same runtime; repeat builds must match both ZIPs.
 The seed is for a fresh install. The OTA is for existing native installs only.
 
-Use the manual **Sign a reviewed Biscuit native candidate** workflow on
+Manually run **Biscuit · Sign and deliver Dev** on
 protected `main`, with the build run ID, exact source SHA and the separately
 reviewed receipt SHA256. Provide `BISCUIT_METADATA_PRIVATE_KEY_PEM` as an
 environment secret and `BISCUIT_METADATA_PUBLIC_KEY_PEM` as a variable in
@@ -110,8 +142,8 @@ Release promotion is not implemented by the automatic dev workflow.
    republish the upstream kernel input archive or include stock radio firmware.
    For a private, local build, supply all seven locked files directly to
    `locked_build.py --inputs`; no release tag or upload is required.
-2. After Foundation checks, `biscuit-arm64-dev.yml` checks out the exact main
-   commit, builds Linux and the DTB from that tree's recipe, and constructs
+2. After **CI · Repository checks**, **Biscuit · Build Dev packages** checks out
+   the exact main commit, builds Linux and the DTB from that tree's recipe, and constructs
    Alpine from the locked APKs, not from an earlier Encore image. It emits one
    version's complete starter ZIP and matching unsigned runtime payload, with
    byte-identical repeat assemblies, the two corresponding source kits and
@@ -181,8 +213,9 @@ Release and upload the flat prepared directory with `gh release create` (use
 This is an external upload even though it is a draft; ask before doing it. Never
 use the final version tag for staging.
 
-Dispatch `retain-release.yml` on main, supplying the staging tag, target and
-reviewed receipt SHA256, initially with `publish=false`. After its validation
+Dispatch **Release · Publish GitHub assets** (`retain-release.yml`) on main,
+supplying the staging tag, target and reviewed receipt SHA256, initially with
+`publish=false`. After its validation
 and environment review, separately authorize a dispatch with `publish=true`.
 The workflow verifies signatures, exact asset set/sizes/hashes, immutable source
 and reservation, source ancestry on main, and the Android certificate. It checks
@@ -264,7 +297,8 @@ workflow archives the checkpoint tree for Pages, so it must never contain the
 repository checkout. Bootstrap does not create or serve a feed.
 
 After permission to upload the signed entry, put `dev.jws` or `stable.jws` in a
-new draft feed-staging Release. Dispatch `activate-feed.yml` on main with the
+new draft feed-staging Release. Dispatch **Release · Update OTA feed**
+(`activate-feed.yml`) on main with the
 core version (without the `android-` or `biscuit-` prefix), channel, staging tag
 and receipt hash, initially `activate=false`.
 It requires a published immutable matching artifact, re-downloads/verifies all

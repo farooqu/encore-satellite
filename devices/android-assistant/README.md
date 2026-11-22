@@ -83,13 +83,12 @@ and need device testing.
 
 ## GitHub Dev releases
 
-The [Encore Satellite Assistant APK workflow](../../.github/workflows/android-assistant.yml)
+The [Android Assistant · Checks and Dev release workflow](../../.github/workflows/android-assistant.yml)
 builds and checks the APK on pull requests without accessing signing secrets.
-After successful Foundation checks for a push to protected `main`, it checks
-out that exact commit. Each successful build of an eligible, verified commit
-is signed and published to Dev as an immutable GitHub prerelease. It does not
-wait for an Assistant-only file change. The shared Dev version policy and
-`android-assistant` entry in `release/dev-automation.json` govern eligibility.
+After **CI · Repository checks** passes on protected `main`, the workflow reads
+the shared Dev plan. If the plan selects Assistant, it builds that exact
+verified commit and can sign and publish it as an immutable GitHub prerelease.
+Assistant-specific changes and shared inputs used by Assistant can select it.
 The tag is `android-assistant-r<version code>`; the Android version code comes
 from `main` history, so a rerun keeps the same identity. The prerelease includes
 `encore-satellite-assistant.apk`, SHA-256 checksums, and matching source. It

@@ -1,4 +1,4 @@
-name: Retain an approved release
+name: Release · Publish GitHub assets
 
 on:
   workflow_call:

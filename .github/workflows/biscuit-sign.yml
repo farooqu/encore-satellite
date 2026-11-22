@@ -1,8 +1,14 @@
-name: Sign a reviewed Biscuit native candidate
+name: Biscuit · Sign and deliver Dev
+run-name: >-
+  ${{ github.event_name == 'workflow_run' && format('Automatic Dev · {0}', github.event.workflow_run.head_sha) ||
+      inputs.operation == 'check-gate' && 'Manual · Check signing gate' ||
+      inputs.operation == 'deliver-dev' && format('Manual · Deliver Dev candidate {0}', inputs.source) ||
+      format('Manual · Sign candidate {0}', inputs.source) }}
 
 on:
   workflow_run:
-    workflows: [Biscuit ARM64 dev builds]
+    # Match the old display name for in-flight runs and historical reruns.
+    workflows: ['Biscuit · Build Dev packages', 'Biscuit ARM64 dev builds']
     types: [completed]
     branches: [main]
   workflow_dispatch:

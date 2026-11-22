@@ -1,9 +1,15 @@
-name: Encore Satellite Assistant APK
+name: Android Assistant · Checks and Dev release
+run-name: >-
+  ${{ github.event_name == 'workflow_run' && format('Automatic Dev · {0}', github.event.workflow_run.head_sha) ||
+      github.event_name == 'pull_request' && format('PR #{0} · APK checks', github.event.pull_request.number) ||
+      inputs.publish && format('Manual · Publish APK {0}', inputs.version) ||
+      format('Manual · Unsigned APK candidate {0}', inputs.version) }}
 
 on:
   pull_request:
   workflow_run:
-    workflows: [Foundation checks]
+    # Match the old display name for in-flight runs and historical reruns.
+    workflows: ['CI · Repository checks', 'Foundation checks']
     types: [completed]
     branches: [main]
   workflow_dispatch:
@@ -35,6 +41,9 @@ jobs:
     cache-mode: write
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    permissions:
+      actions: read
+      contents: read
     outputs:
       publish: ${{ steps.release.outputs.publish }}
       version: ${{ steps.release.outputs.version }}
@@ -45,6 +54,13 @@ jobs:
           ref: ${{ github.event.workflow_run.head_sha || '' }}
           fetch-depth: 0
           persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        if: github.event_name == 'workflow_run'
+        with:
+          name: dev-release-plan
+          path: ${{ runner.temp }}/dev-release-plan
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
       - name: Select Assistant release identity and policy
         id: release
         env:
@@ -58,13 +74,18 @@ jobs:
           publish=false
           revision=$GITHUB_RUN_NUMBER
           if [[ "$GITHUB_EVENT_NAME" == workflow_run ]]; then
-            identity=$(python3 release/biscuit_dev.py "$SOURCE")
-            if [[ -n "$identity" ]] && jq -e '.automatic_dev_targets | index("android-assistant") != null' release/dev-automation.json >/dev/null; then
-              read -r VERSION revision <<< "$identity"
-              publish=true
-            else
-              echo '::notice::This source is outside the automatic Dev release policy; building without signing.'
+            plan="$RUNNER_TEMP/dev-release-plan/plan.json"
+            jq -e --arg source "$SOURCE" '.source == $source and (.targets | type == "array")' "$plan" >/dev/null
+            if ! jq -e '.targets | index("android-assistant") != null' "$plan" >/dev/null; then
+              echo '::notice::Assistant was not selected in the Dev release plan.'
+              exit 0
             fi
+            identity=$(python3 release/biscuit_dev.py "$SOURCE")
+            read -r VERSION revision <<< "$identity"
+            jq -e --arg version "$VERSION" --argjson revision "$revision" \
+              '.version == $version and .revision == $revision' "$plan" >/dev/null
+            jq -e '.automatic_dev_targets | index("android-assistant") != null' release/dev-automation.json >/dev/null
+            publish=true
           elif [[ "$MANUAL_PUBLISH" == true ]]; then
             test "$MANUAL_ALLOWED" = true
             jq -e '.publishing_enabled == true' release/dev-automation.json >/dev/null || {
@@ -84,15 +105,19 @@ jobs:
           printf 'publish=%s\nversion=%s\nrevision=%s\n' "$publish" "$VERSION" "$revision" >> "$GITHUB_OUTPUT"
           printf 'ENCORE_VERSION_NAME=%s\nENCORE_VERSION_CODE=%s\n' "$VERSION" "$revision" >> "$GITHUB_ENV"
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        if: github.event_name != 'workflow_run' || steps.release.outputs.publish == 'true'
         with:
           go-version: '1.27.4'
           cache: false
       - name: Use Java 21
+        if: github.event_name != 'workflow_run' || steps.release.outputs.publish == 'true'
         run: echo "JAVA_HOME=$JAVA_HOME_21_X64" >> "$GITHUB_ENV"
       - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+        if: github.event_name != 'workflow_run' || steps.release.outputs.publish == 'true'
         with:
           packages: platform-tools
       - name: Install pinned Android and Gradle tools
+        if: github.event_name != 'workflow_run' || steps.release.outputs.publish == 'true'
         run: |
           set -euo pipefail
           sdkmanager 'platforms;android-36' 'build-tools;36.0.0' 'ndk;28.0.13004108'
@@ -102,16 +127,20 @@ jobs:
           echo "GRADLE=$RUNNER_TEMP/gradle-9.4.1/bin/gradle" >> "$GITHUB_ENV"
           sudo apt-get update && sudo apt-get install -y meson ninja-build
       - name: Cache Gradle modules and Robolectric SDKs
+        if: github.event_name != 'workflow_run' || steps.release.outputs.publish == 'true'
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.gradle/caches/modules-2/files-2.1
             ~/.gradle/caches/modules-2/metadata-2.*
             ~/.m2/repository/org/robolectric/android-all-instrumented
-          # The workflow pins the Gradle distribution.
-          key: android-assistant-maven-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('devices/android-assistant/**/*.gradle.kts', 'devices/android-assistant/gradle.properties', 'devices/android-assistant/build-android', '.github/workflows/android-assistant.yml') }}
-          restore-keys: android-assistant-maven-v1-${{ runner.os }}-${{ runner.arch }}-
+          key: android-assistant-maven-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('devices/android-assistant/**/*.gradle.kts', 'devices/android-assistant/gradle.properties', 'devices/android-assistant/build-android') }}
+          # Borrow downloaded dependencies, not task outputs. Save under this app's own key.
+          restore-keys: |
+            android-assistant-maven-v1-${{ runner.os }}-${{ runner.arch }}-
+            android-maven-v1-${{ runner.os }}-${{ runner.arch }}-
       - name: Prepare the pinned Robolectric test SDK
+        if: github.event_name != 'workflow_run' || steps.release.outputs.publish == 'true'
         run: |
           set -euo pipefail
           # MicActivityTest runs on API 35 with Robolectric 4.16 (instrumentation i7).
@@ -128,11 +157,15 @@ jobs:
             mv "$jar.part" "$jar"
           fi
       - name: Build and check the assistant
+        if: github.event_name != 'workflow_run' || steps.release.outputs.publish == 'true'
         run: |
           go test ./devices/android-assistant/mobile
           devices/android-assistant/build-android assembleDebug testDebugUnitTest lintDebug assembleRelease
       - name: Stage unsigned release and matching source
         if: steps.release.outputs.publish == 'true' || github.event_name == 'workflow_dispatch'
+        env:
+          PUBLISH: ${{ steps.release.outputs.publish }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           dir="$RUNNER_TEMP/assistant-unsigned"
@@ -140,6 +173,12 @@ jobs:
           cp devices/android-assistant/build/outputs/apk/release/EncoreSatelliteAssistant-release-unsigned.apk "$dir/unsigned.apk"
           git archive --format=tar.gz --prefix=encore-satellite/ -o "$dir/encore-assistant-source.tar.gz" HEAD
           python3 release/android_dev.py --assistant-sources "$dir/encore-assistant-dependencies-source.tar.gz"
+          if [[ "$GITHUB_EVENT_NAME" == workflow_run ]]; then
+            jq -er '.target_changelogs["android-assistant"] | select(type == "string" and length > 0)' \
+              "$RUNNER_TEMP/dev-release-plan/plan.json" > "$dir/release-notes.md"
+          elif [[ "$PUBLISH" == true ]]; then
+            python3 release/dev_plan.py --assistant-notes "$SOURCE" "$dir/release-notes.md"
+          fi
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: steps.release.outputs.publish == 'true' || github.event_name == 'workflow_dispatch'
         with:
@@ -250,9 +289,13 @@ jobs:
           fi
           cd "$RUNNER_TEMP/assistant-release"
           sha256sum -c SHA256SUMS
+          notes="$RUNNER_TEMP/release-notes.md"
+          mv release-notes.md "$notes"
+          printf '\nExperimental Dev sideload APK. [Installation guide](https://github.com/%s/blob/%s/devices/android-assistant/README.md). No update feed is activated.\n' \
+            "$GITHUB_REPOSITORY" "$SOURCE" >> "$notes"
           gh release create "$tag" ./* --repo "$GITHUB_REPOSITORY" "${target_args[@]}" \
             --draft --prerelease --title "Encore Satellite Assistant Dev $VERSION (r$REVISION)" \
-            --notes "Experimental Dev sideload APK. [Installation guide](https://github.com/$GITHUB_REPOSITORY/blob/$SOURCE/devices/android-assistant/README.md). No update feed is activated."
+            --notes-file "$notes"
           mkdir "$RUNNER_TEMP/assistant-retained"
           gh release download "$tag" --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/assistant-retained"
           diff -qr . "$RUNNER_TEMP/assistant-retained"

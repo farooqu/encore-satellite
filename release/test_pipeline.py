@@ -261,8 +261,9 @@ class PipelineTests(unittest.TestCase):
         notes = "## Android\n\n- Restore playback after reconnect\n"
         plan = self.build / "plan.json"
         plan.write_text(json.dumps({"source": self.source, "version": self.receipt["core_version"],
-                                    "revision": self.receipt["revision"], "targets": ["android-generic"],
-                                    "changelog": notes}))
+                                    "revision": self.receipt["revision"], "targets": ["android-generic", "biscuit"],
+                                    "changelog": notes + "\n## Biscuit\n\n- Fix boot pacing\n",
+                                    "target_changelogs": {"android-generic": notes, "biscuit": "- Fix boot pacing"}}))
         output = self.build / "with-notes.jws"
         args = ("--channel", "dev", "--issued", self.now + 1, "--expires", self.now + 3600,
                 "--key", self.key, "--output", output, "--dev-plan", plan)
@@ -271,8 +272,10 @@ class PipelineTests(unittest.TestCase):
         payload = pipeline.verify_jws(output, pipeline.ANDROID_FEED_TYPE, self.public)
         self.assertEqual(payload["release_summary"], notes.strip())
         receipt = json.loads(plan.read_bytes())
-        plan.write_text(json.dumps({**receipt, "revision": receipt["revision"] + 1}))
         output.unlink()
+        plan.write_text(json.dumps({**receipt, "target_changelogs": {"biscuit": "- Fix boot pacing"}}))
+        self.assertIn("no changelog for candidate target", self.verified("feed", *args, success=False).stderr)
+        plan.write_text(json.dumps({**receipt, "revision": receipt["revision"] + 1}))
         self.assertIn("Dev release plan differs", self.verified("feed", *args, success=False).stderr)
 
         excessive = self.build / "excessive.jws"
@@ -388,9 +391,9 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual({**dev, "channel": "stable"}, stable)
         self.assertEqual(dev["revision"], revision)
         self.assertEqual(dev["url"], f"https://github.com/farooqu/encore-satellite/releases/download/android-{core}/app.apk")
-        notes = "## Android\n\n- Fix startup\n\n## Biscuit\n\n- No build\n"
+        notes = "## Android\n\n- Fix startup\n"
         plan = {"source": self.source, "version": core, "revision": revision,
-                "targets": ["android-generic"], "changelog": notes}
+                "targets": ["android-generic"], "changelog": notes + "\n## Biscuit\n\n- No build\n"}
         plan_path = self.build / "plan.json"
         plan_path.write_text(json.dumps(plan))
         command = json.loads(self.verified("publish", "--automatic-dev", "--dev-plan", plan_path).stdout)["commands"][0]
@@ -440,7 +443,7 @@ class PipelineTests(unittest.TestCase):
 
         docs_plan = plan(docs)
         self.assertEqual(docs_plan["targets"], [])
-        self.assertEqual(docs_plan["changelog"].count("No build"), 2)
+        self.assertEqual(docs_plan["changelog"].count("No build"), 3)
         android_plan = plan(android_tip)
         self.assertEqual(android_plan["targets"], [android])
         self.assertIn("## Biscuit\n\n- No build", android_plan["changelog"])
@@ -461,6 +464,8 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(shared["changelog"].count("fix(core): restore session state"), 2)
         self.assertIn("fix(biscuit): update native OTA", shared["changelog"].split("## Biscuit", 1)[1])
         self.assertNotIn("update native OTA", shared["changelog"].split("## Biscuit", 1)[0])
+        self.assertIn("update native OTA", shared["target_changelogs"][biscuit])
+        self.assertNotIn("update native OTA", shared["target_changelogs"][android])
         publish("android-0.1.7", shared_tip)
         publish("biscuit-0.1.7", shared_tip)
         build_inputs = commit("fix(build): pin shared Go modules", "go.sum")
@@ -493,6 +498,81 @@ class PipelineTests(unittest.TestCase):
             for metadata, previous in feeds.values():
                 self.assertEqual((site / metadata["target"] / "incubator/dev.jws").read_bytes(), previous)
         self.assertEqual([feeds[target][0]["revision"] for target in (android, biscuit)], [1000000003, 1000000004])
+
+    def test_assistant_uses_its_own_published_baseline_and_shared_audio_inputs(self):
+        def commit(subject, *paths):
+            for path in paths:
+                file = self.repo / path
+                file.parent.mkdir(parents=True, exist_ok=True)
+                file.write_text(subject)
+            self.git("add", *paths)
+            self.git("commit", "-qm", subject)
+            return self.git("rev-parse", "HEAD").strip()
+
+        def published(tag, source, *assets, draft=False):
+            self.git("tag", tag, source)
+            return {"tag_name": tag, "immutable": not draft, "draft": draft,
+                    "assets": [{"name": name} for name in assets]}
+
+        assistant = "android-assistant"
+        assistant_assets = ("encore-satellite-assistant.apk", "SHA256SUMS")
+        commit("fix(core): old change before Assistant", "core/session/history.go")
+        base = commit("fix(assistant): ship first mic host", "devices/android-assistant/build-android")
+        releases = [published("android-assistant-r1", base, *assistant_assets)]
+        assistant_tip = commit("fix(assistant): keep wake cue local", "devices/android-assistant/Mic.kt")
+        releases.append(published("android-assistant-r2", assistant_tip, *assistant_assets, draft=True))
+        # A later Tablet release cannot consume the unshipped Assistant fix.
+        tablet_tip = commit("fix(tablet): redraw dashboard", "devices/android-generic/Tablet.kt")
+        releases.append(published("android-0.1.4", tablet_tip, "receipt.json", "receipt.jws"))
+        releases.append(published("biscuit-0.1.4", tablet_tip, "receipt.json", "receipt.jws"))
+        commit("fix(tablet): change layout and adjust shared voice host",
+               "devices/android-generic/Layout.kt", "platforms/android/src/main/java/host/AudioIo.kt")
+        shared_tip = commit("fix(android): avoid clipping echo reference", "platforms/android/src/main/cpp/voice_aec.cpp")
+        registry, _ = inventory()
+        armed = list(dev_plan.TARGETS)
+        with (patch.multiple(dev_plan, ROOT=self.repo, ANCHOR=self.source), patch.object(check, "ROOT", self.repo),
+              patch.multiple(biscuit_dev, ROOT=self.repo, ANCHOR=self.source, SEMVER_BASE=base)):
+            initial = dev_plan.plan(base, [], registry, armed)["target_changelogs"][assistant]
+            self.assertIn("ship first mic host", initial)
+            self.assertNotIn("old change before Assistant", initial)
+            self.assertEqual(dev_plan.plan(tablet_tip, releases, registry, armed)["targets"],
+                             ["android-generic", "biscuit", assistant])
+            result = dev_plan.plan(shared_tip, releases, registry, armed)
+            self.assertEqual(result["targets"], ["android-generic", assistant])
+            notes = result["target_changelogs"]
+            self.assertIn("keep wake cue local", notes[assistant])
+            self.assertIn("avoid clipping echo reference", notes[assistant])
+            self.assertIn("AudioIo.kt", notes[assistant])
+            self.assertNotIn("Layout.kt", notes[assistant])
+            self.assertNotIn("change layout", notes[assistant])
+            self.assertNotIn("redraw dashboard", notes[assistant])
+            self.assertNotIn("keep wake cue local", notes["android-generic"])
+            self.assertEqual(dev_plan.assistant_changelog(shared_tip, releases, registry), notes[assistant])
+            releases.append(published("android-assistant-r3", shared_tip, *assistant_assets))
+            tablet_only = commit("fix(tablet): sharpen dashboard", "devices/android-generic/Tablet.kt")
+            self.assertEqual(dev_plan.plan(tablet_only, releases, registry, armed)["targets"], ["android-generic"])
+
+    def test_commit_check_grandfathers_base_but_rejects_invalid_history_at_valid_tip(self):
+        resolver = self.repo / "release/biscuit_dev.py"
+
+        def commit(message):
+            self.git("commit", "--allow-empty", "-qm", message)
+            return self.git("rev-parse", "HEAD").strip()
+
+        def lint(base):
+            return subprocess.run([sys.executable, resolver, "--check-commits", base, "HEAD"],
+                                  cwd=self.repo, text=True, capture_output=True)
+
+        commit("fix: keep the default route")
+        commit("feat(voice)!: replace the voice adapter\n\nBREAKING CHANGE: clients must reconnect")
+        result = lint(self.source)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        invalid = commit("featt(voice): mistyped feature")
+        commit("ci: check all newly introduced commits")
+        result = lint(self.source)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(invalid[:7], result.stderr)
+        self.assertEqual(lint(invalid).returncode, 0)
 
     def test_release_history_advances_lockstep_and_holds_minor(self):
         # Synthetic old anchor and one height-versioned commit before cutover.
