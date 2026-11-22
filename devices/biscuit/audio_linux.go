@@ -162,6 +162,7 @@ func configureMixer(m interface {
 }
 
 func configureMic(m *alsa.Mixer) error {
+	const micPGA = 72 // +36 dB analog gain, in 0.5 dB steps.
 	for _, adc := range []string{"A", "B", "C", "D"} {
 		for _, c := range []struct {
 			suffix string
@@ -181,10 +182,10 @@ func configureMic(m *alsa.Mixer) error {
 			}
 		}
 		name := "ADC_" + adc + " MICPGA Volume Ctrl"
-		if err := m.SetInt(name, 39); err != nil {
+		if err := m.SetInt(name, micPGA-1); err != nil {
 			return err
 		}
-		if err := m.SetInt(name, 40); err != nil {
+		if err := m.SetInt(name, micPGA); err != nil {
 			return err
 		}
 	}
