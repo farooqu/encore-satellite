@@ -22,7 +22,7 @@
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <uses-permission android:name="android.permission.UPDATE_PACKAGES_WITHOUT_USER_ACTION" />
     <application android:label="Encore Incubator" android:theme="@android:style/Theme.Material.NoActionBar"
-        android:icon="@drawable/ic_encore" android:allowBackup="false" android:usesCleartextTraffic="true">
+        android:icon="@mipmap/ic_launcher" android:allowBackup="false" android:usesCleartextTraffic="true">
         <meta-data android:name="com.encore.core_version" android:value="${coreVersion}" />
         <meta-data android:name="com.encore.update_base_url" android:value="${updateBaseUrl}" />
         <meta-data android:name="com.encore.update_public_key" android:value="${updatePublicKey}" />
