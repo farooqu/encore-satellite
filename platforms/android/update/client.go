@@ -34,6 +34,7 @@ type Release struct {
 	MinSDK            int      `json:"min_sdk"`
 	ABIs              []string `json:"abis"`
 	URL               string   `json:"url"`
+	ReleaseSummary    string   `json:"release_summary,omitempty"`
 	Size              int64    `json:"size"`
 	SHA256            string   `json:"sha256"`
 	CertificateSHA256 string   `json:"certificate_sha256"`

@@ -268,7 +268,7 @@ class UpdateRuntimeShadow {
     @Implementation fun configureUpdates(host: UpdateHost, current: String) {}
     @Implementation fun updateChannel() = "dev"
     @Implementation fun updateGeneration() = 4L
-    @Implementation fun updateStatus(channel: String, generation: Long, latest: String, status: String, known: Boolean, busy: Boolean) {
+    @Implementation fun updateStatus(channel: String, generation: Long, latest: String, status: String, known: Boolean, busy: Boolean, assetURL: String, changelog: String) {
         statuses.add(status)
         if (status.startsWith("Downloaded and verified")) UpdateMobileShadow.attempt.published.countDown()
     }

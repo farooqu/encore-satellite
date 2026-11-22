@@ -22,15 +22,16 @@ const updateKey = controls.AndroidUpdateKey
 const channelKey = controls.AndroidChannelKey
 const updateStatusKey = 0x454e4306
 
-func updateDiagnostic(state *api.UpdateStateResponse) *api.TextSensorStateResponse {
-	return &api.TextSensorStateResponse{Key: updateStatusKey, State: state.ReleaseSummary}
+func updateDiagnostic(status string) *api.TextSensorStateResponse {
+	return &api.TextSensorStateResponse{Key: updateStatusKey, State: status}
 }
 
 func (r *Runtime) ConfigureUpdates(host UpdateHost, current string) {
 	r.mu.Lock()
 	r.updater = host
+	r.updateStatusText = "Not checked yet"
 	r.updateState = &api.UpdateStateResponse{Key: updateKey, CurrentVersion: current, LatestVersion: current,
-		MissingState: true, Title: controls.UpdateTitle, ReleaseSummary: "Not checked yet"}
+		MissingState: true, Title: controls.UpdateTitle, ReleaseSummary: r.updateStatusText}
 	r.mu.Unlock()
 }
 
@@ -50,29 +51,38 @@ func (r *Runtime) UpdateGeneration() int64 {
 // different, unparseable version (including an empty string) as installable.
 // Use the installed version when there is no verified offer; the diagnostic
 // sensor distinguishes a check failure from a successful up-to-date check.
-func (r *Runtime) UpdateStatus(channel string, generation int64, latest, status string, known, busy bool) {
+func (r *Runtime) UpdateStatus(channel string, generation int64, latest, status string, known, busy bool, assetURL, changelog string) {
 	r.mu.Lock()
 	if r.config.Channel != channel || r.config.ChannelGeneration != generation || r.updateState == nil || r.updater == nil {
 		r.mu.Unlock()
 		return
 	}
+	releaseURL := controls.ChangelogURL(assetURL)
 	if busy && latest == "" && !r.updateState.MissingState {
 		// Keep the verified offer visible while rechecking it for installation.
 		latest, known = r.updateState.LatestVersion, true
+		releaseURL = r.updateState.ReleaseUrl
+		changelog = r.updateState.ReleaseSummary
 	}
 	if !known || latest == "" {
 		latest = r.updateState.CurrentVersion
 	}
+	if latest == r.updateState.CurrentVersion {
+		releaseURL = ""
+		changelog = status
+	}
 	r.updateState.LatestVersion = latest
-	r.updateState.ReleaseSummary = status
+	r.updateState.ReleaseSummary = changelog
+	r.updateState.ReleaseUrl = releaseURL
 	r.updateState.MissingState = !known
 	r.updateState.InProgress = busy
+	r.updateStatusText = status
 	state := proto.Clone(r.updateState).(*api.UpdateStateResponse)
 	control := r.control
 	r.mu.Unlock()
 	if control != nil {
 		_ = control.Broadcast(state)
-		_ = control.Broadcast(updateDiagnostic(state))
+		_ = control.Broadcast(updateDiagnostic(status))
 	}
 }
 

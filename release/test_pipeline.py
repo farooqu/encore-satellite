@@ -255,6 +255,35 @@ class PipelineTests(unittest.TestCase):
         pipeline.sign(original, pipeline.ANDROID_FEED_TYPE, key, wrong)
         self.stage(wrong, "dev", success=False)
 
+    def test_inline_changelog_can_be_added_on_feed_renewal(self):
+        self.prepare()
+        self.stage(self.feed("dev"), "dev")
+        notes = "## Android\n\n- Restore playback after reconnect\n"
+        plan = self.build / "plan.json"
+        plan.write_text(json.dumps({"source": self.source, "version": self.receipt["core_version"],
+                                    "revision": self.receipt["revision"], "targets": ["android-generic"],
+                                    "changelog": notes}))
+        output = self.build / "with-notes.jws"
+        args = ("--channel", "dev", "--issued", self.now + 1, "--expires", self.now + 3600,
+                "--key", self.key, "--output", output, "--dev-plan", plan)
+        self.verified("feed", *args)
+        self.stage(output, "dev")
+        payload = pipeline.verify_jws(output, pipeline.ANDROID_FEED_TYPE, self.public)
+        self.assertEqual(payload["release_summary"], notes.strip())
+        receipt = json.loads(plan.read_bytes())
+        plan.write_text(json.dumps({**receipt, "revision": receipt["revision"] + 1}))
+        output.unlink()
+        self.assertIn("Dev release plan differs", self.verified("feed", *args, success=False).stderr)
+
+        excessive = self.build / "excessive.jws"
+        pipeline.sign({**payload, "issued": self.now + 2, "release_summary": "é" * 1537},
+                      pipeline.ANDROID_FEED_TYPE, self.key, excessive)
+        self.stage(excessive, "dev", success=False)
+        trimmed = pipeline.inline_changelog("é" * 2000)
+        self.assertLessEqual(len(trimmed.encode("utf-8")), 3072)
+        self.assertTrue(trimmed.startswith("é" * 1500))
+        self.assertTrue(trimmed.endswith("full changelog._"))
+
     def test_prerelease_promotion_and_semver_rollback(self):
         self.prepare()
         prerelease = copy.deepcopy(self.receipt)

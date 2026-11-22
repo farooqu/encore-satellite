@@ -23,6 +23,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/farooqu/encore-satellite/backends/bluetooth"
@@ -48,6 +49,53 @@ func TestARM64PublicUpdateRequiresConfirmationAndPreservesEnrollment(t *testing.
 	for _, channel := range []string{"stable", "dev"} {
 		t.Run(channel, func(t *testing.T) { testARM64PublicUpdate(t, channel) })
 	}
+}
+
+type updatePollStore struct {
+	arm64UpdateStore
+	checks         atomic.Int32
+	resumePeriodic <-chan struct{}
+}
+
+func (s *updatePollStore) InstalledHighWater(linuxupdate.Manifest) (int64, error) {
+	if s.checks.Add(1) == 2 {
+		<-s.resumePeriodic
+	}
+	return 0, fmt.Errorf("test stop before HTTP")
+}
+
+func TestARM64ChecksAtStartupAndEverySixHours(t *testing.T) {
+	selection := filepath.Join(t.TempDir(), "selection.json")
+	synctest.Test(t, func(t *testing.T) {
+		resume := make(chan struct{}, 1)
+		defer close(resume)
+		store := &updatePollStore{resumePeriodic: resume}
+		u := &linuxUpdates{arm64: store, selectionPath: selection, channel: "stable", jobs: make(chan updateRequest, 1)}
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		go u.run(ctx, func() error { return nil })
+		assertChecks := func(want int32) {
+			t.Helper()
+			synctest.Wait()
+			if got := store.checks.Load(); got != want {
+				t.Fatalf("checked %d times, want %d", got, want)
+			}
+		}
+		assertChecks(1)
+		time.Sleep(6*time.Hour - time.Second)
+		assertChecks(1)
+		time.Sleep(time.Second)
+		assertChecks(2)
+		if err := u.selectChannel("dev"); err != nil {
+			t.Fatal(err)
+		}
+		resume <- struct{}{}
+		assertChecks(3)
+		if err := u.selectChannel("stable"); err != nil {
+			t.Fatal(err)
+		}
+		assertChecks(4)
+	})
 }
 
 func testARM64PublicUpdate(t *testing.T, channel string) {
@@ -88,6 +136,7 @@ func testARM64PublicUpdate(t *testing.T, channel string) {
 		t.Fatal(err)
 	}
 	digest := func(b []byte) string { return fmt.Sprintf("%x", sha256.Sum256(b)) }
+	const changelog = "## Biscuit\n\n- Improve Wi-Fi recovery"
 	var metadata, downloads atomic.Int32
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -99,9 +148,12 @@ func testARM64PublicUpdate(t *testing.T, channel string) {
 			}
 			rel := linuxupdate.Release{Target: m.Target, Format: m.Format, Channel: channel, Backend: m.Backend,
 				CoreVersion: "0.1.1", Revision: 23, BaseSHA256: m.BaseSHA256, Size: int64(len(update)), SHA256: digest(update),
-				URL: "https://" + r.Host + "/asset", Issued: time.Now().Unix() - 300, Expires: time.Now().Unix() + 300}
+				ReleaseSummary: changelog,
+				URL:            "https://github.com/farooqu/encore-satellite/releases/download/biscuit-0.1.1/rootfs.tar.gz", Issued: time.Now().Unix() - 300, Expires: time.Now().Unix() + 300}
 			if mode == 3 {
 				rel.CoreVersion, rel.Revision = "0.1.2", 24
+				rel.URL = "https://" + r.Host + "/asset"
+				rel.ReleaseSummary = ""
 			}
 			b, _ := json.Marshal(rel)
 			message := base64.RawURLEncoding.EncodeToString([]byte(linuxupdate.Header)) + "." + base64.RawURLEncoding.EncodeToString(b)
@@ -163,17 +215,20 @@ func testARM64PublicUpdate(t *testing.T, channel string) {
 	for _, mode := range []int32{0, 1} {
 		metadata.Store(mode)
 		job(false)
-		if s := u.states()[1].(*api.UpdateStateResponse); s.MissingState || s.LatestVersion != s.CurrentVersion {
+		if s := u.states()[1].(*api.UpdateStateResponse); s.MissingState || s.LatestVersion != s.CurrentVersion || strings.Contains(s.ReleaseSummary, changelog) {
 			t.Fatalf("unexpected update offer: %v", s)
 		}
 	}
 	metadata.Store(2)
 	job(false)
-	if got := u.states()[1].(*api.UpdateStateResponse).LatestVersion; got != "0.1.1" {
-		t.Fatalf("missing verified offer: %q", got)
+	if got := u.states()[1].(*api.UpdateStateResponse); got.LatestVersion != "0.1.1" || !strings.HasSuffix(got.ReleaseSummary, "\n\n"+changelog) || got.ReleaseUrl != "https://github.com/farooqu/encore-satellite/releases/tag/biscuit-0.1.1" {
+		t.Fatalf("missing verified offer or changelog: %v", got)
 	}
 	metadata.Store(3)
 	job(true) // A release swap between offer and confirm requires new confirmation.
+	if got := u.states()[1].(*api.UpdateStateResponse); got.LatestVersion != "0.1.2" || got.ReleaseUrl != "" || strings.Contains(got.ReleaseSummary, changelog) {
+		t.Fatalf("replacement offer retained previous changelog: %v", got)
+	}
 	assertFile(filepath.Join(store.Directory, "active"), "a\n")
 	if downloads.Load() != 0 || reboots != 0 {
 		t.Fatal("a check or moved feed initiated installation")

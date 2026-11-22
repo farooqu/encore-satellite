@@ -59,6 +59,7 @@ type linuxUpdates struct {
 	jobs            chan updateRequest
 	cancel          context.CancelFunc
 	busy, activated bool
+	checkAfterJob   bool
 	client          linuxupdate.Client
 	store           linuxupdate.Store
 	arm64           arm64UpdateStore
@@ -208,14 +209,27 @@ func (u *linuxUpdates) selectChannel(channel string) error {
 		u.state.LatestVersion = ""
 		u.state.MissingState = true
 	}
+	u.state.ReleaseUrl = ""
 	u.state.InProgress = false
 	u.state.ReleaseSummary = "Channel saved; check for updates (nothing installed)"
+	if u.arm64 != nil {
+		if u.busy {
+			u.state.ReleaseSummary = "Channel saved; checking new channel after current request stops"
+			u.checkAfterJob = true
+		} else {
+			u.requestLocked(false)
+		}
+	}
 	return nil
 }
 
 func (u *linuxUpdates) request(install bool) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
+	u.requestLocked(install)
+}
+
+func (u *linuxUpdates) requestLocked(install bool) {
 	if u.busy || u.activated {
 		return
 	}
@@ -229,6 +243,7 @@ func (u *linuxUpdates) request(install bool) {
 		u.state.LatestVersion = ""
 	} else if !install {
 		u.state.LatestVersion = u.state.CurrentVersion
+		u.state.ReleaseUrl = ""
 	}
 	u.state.ReleaseSummary = "Checking signed selected-channel metadata"
 	u.jobs <- updateRequest{channel: u.channel, generation: u.generation, install: install, offer: u.offer}
@@ -244,7 +259,8 @@ func (u *linuxUpdates) states() []proto.Message {
 	return []proto.Message{&api.SelectStateResponse{Key: updateChannelKey, State: u.channel, MissingState: !linuxupdate.Channel(u.channel)}, proto.Clone(&u.state)}
 }
 func (u *linuxUpdates) run(ctx context.Context, changed func() error) {
-	tick := time.NewTicker(time.Hour)
+	// Match ESPHome's default for managed HTTP updates.
+	tick := time.NewTicker(6 * time.Hour)
 	defer tick.Stop()
 	if u.arm64 != nil {
 		u.request(false)
@@ -273,6 +289,10 @@ func (u *linuxUpdates) run(ctx context.Context, changed func() error) {
 			u.cancel = nil
 			u.busy = false
 			u.state.InProgress = false
+			if u.checkAfterJob {
+				u.checkAfterJob = false
+				u.requestLocked(false)
+			}
 			u.mu.Unlock()
 			_ = changed()
 		}
@@ -288,8 +308,13 @@ func (u *linuxUpdates) executeARM64(ctx context.Context, job updateRequest, chan
 		}
 		u.offer = offer
 		u.state.LatestVersion = u.state.CurrentVersion
+		u.state.ReleaseUrl = ""
 		if offer != nil {
 			u.state.LatestVersion = offer.CoreVersion
+			u.state.ReleaseUrl = controls.ChangelogURL(offer.URL)
+			if offer.ReleaseSummary != "" {
+				summary += "\n\n" + offer.ReleaseSummary
+			}
 		}
 		u.state.ReleaseSummary = summary
 	}

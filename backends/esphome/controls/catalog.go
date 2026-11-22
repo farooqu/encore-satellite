@@ -1,6 +1,8 @@
 package controls
 
 import (
+	"strings"
+
 	"github.com/farooqu/encore-satellite/core/audio"
 	esphome "github.com/ygelfand/go-esphome-device"
 	"github.com/ygelfand/go-esphome-device/api"
@@ -14,6 +16,17 @@ func button(id, name, icon string, k uint32, category api.EntityCategory) Entity
 
 // UpdateTitle identifies the software independently of its packaging format.
 const UpdateTitle = "Encore Satellite"
+
+// ChangelogURL returns the release notes page for a verified, published Encore asset.
+func ChangelogURL(asset string) string {
+	const releases = "https://github.com/farooqu/encore-satellite/releases/"
+	path, ok := strings.CutPrefix(asset, releases+"download/")
+	tag, name, split := strings.Cut(path, "/")
+	if !ok || !split || tag == "" || tag == "." || tag == ".." || name == "" || strings.ContainsAny(path, "?#%\\") || strings.Contains(name, "/") {
+		return ""
+	}
+	return releases + "tag/" + tag
+}
 
 func update(id string, k uint32) Entity[*api.UpdateCommandRequest] {
 	return Entity[*api.UpdateCommandRequest]{&api.ListEntitiesUpdateResponse{ObjectId: id, Key: k, Name: "Firmware update", DeviceClass: "firmware", EntityCategory: esphome.CategoryConfig}}

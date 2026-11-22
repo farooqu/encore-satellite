@@ -16,9 +16,9 @@ derive the desired channel from the app's version suffix on every boot.
 
 Keep the installed package's immutable target/backend/channel/revision provenance
 separate from the desired channel. A change from dev to stable, or stable to dev,
-changes only which channel is checked subsequently. Clear stale availability and
-pending authorization from the previous channel; a check may run immediately,
-but **selection never installs, replaces, restarts, downgrades, or falls back**.
+changes only which channel is checked. Clear stale availability and pending
+authorization from the previous channel and request a check of the new channel.
+**Selection never installs, replaces, restarts, downgrades, or falls back**.
 In-flight work must recheck selection before offering or activating its result.
 After a restart, report the saved desired channel, not the old installed channel.
 
@@ -27,6 +27,13 @@ After a restart, report the saved desired channel, not the old installed channel
 Expose an ESPHome update entity (`apk_update` on Android, `linux_update` on Linux),
 plus **Check for updates** button `check_updates`.
 An update check uses only the selected target/backend/channel signed feed.
+The device normally checks on startup and every six hours while running,
+matching ESPHome's managed HTTP update cadence; Home Assistant does not schedule
+these checks. Android may report a restored install attempt in place of its
+startup check. A verified offer may carry Markdown release notes in the signed
+`release_summary` field. Home Assistant shows them inline and links to the full
+changelog for an Encore GitHub release. Older feeds without the field still work;
+no extra changelog fetch is required by the device.
 Report actual installed version/revision and latest eligible version/revision;
 include revision in displayed version strings to identify the exact package.
 No eligible upgrade reports current==latest; network/trust/compatibility errors

@@ -37,19 +37,20 @@ type Manifest struct {
 }
 
 type Release struct {
-	Target      string `json:"target"`
-	Backend     string `json:"backend"`
-	Format      string `json:"format"`
-	Channel     string `json:"channel"`
-	CoreVersion string `json:"core_version"`
-	Revision    int64  `json:"revision"`
-	BaseSHA256  string `json:"base_sha256"`
-	URL         string `json:"url"`
-	Size        int64  `json:"size"`
-	SHA256      string `json:"sha256"`
-	Issued      int64  `json:"issued"`
-	Expires     int64  `json:"expires"`
-	Proof       string `json:"-"` // authenticated compact JWS retained for boot verification
+	Target         string `json:"target"`
+	Backend        string `json:"backend"`
+	Format         string `json:"format"`
+	Channel        string `json:"channel"`
+	CoreVersion    string `json:"core_version"`
+	Revision       int64  `json:"revision"`
+	BaseSHA256     string `json:"base_sha256"`
+	URL            string `json:"url"`
+	ReleaseSummary string `json:"release_summary,omitempty"`
+	Size           int64  `json:"size"`
+	SHA256         string `json:"sha256"`
+	Issued         int64  `json:"issued"`
+	Expires        int64  `json:"expires"`
+	Proof          string `json:"-"` // authenticated compact JWS retained for boot verification
 }
 
 type checkpoint struct {

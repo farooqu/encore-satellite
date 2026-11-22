@@ -132,6 +132,9 @@ jobs:
     environment: ${{ github.event_name == 'workflow_run' && 'android-dev-signing' || 'android-signing' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    permissions:
+      actions: read
+      contents: read
     outputs:
       revision: ${{ needs.check.outputs.revision }}
       receipt_sha256: ${{ steps.receipt.outputs.sha256 }}
@@ -230,6 +233,13 @@ jobs:
           sha=$(sha256sum "$RUNNER_TEMP/android-release/receipt.json" | cut -d ' ' -f 1)
           printf 'sha256=%s\nsigned_artifact=android-dev-signed-%s\nsigned_feed_artifact=android-dev-signed-feed-%s\n' \
             "$sha" "$GITHUB_RUN_ATTEMPT" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        if: github.event_name == 'workflow_run'
+        with:
+          name: dev-release-plan
+          path: ${{ runner.temp }}/dev-release-plan
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
       - name: Sign the Android receipt and Dev entry with the APK's OTA root
         if: github.event_name == 'workflow_run'
         env:
@@ -254,6 +264,7 @@ jobs:
           issued=$(date +%s)
           python3 release/pipeline.py feed "$candidate" --key "$key" --public-key "$root" \
             --receipt-sha256 "$RECEIPT_SHA256" --channel dev --issued "$issued" \
+            --dev-plan "$RUNNER_TEMP/dev-release-plan/plan.json" \
             --expires "$((issued + 604800))" --output "$feed/dev.jws"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: github.event_name == 'workflow_run'

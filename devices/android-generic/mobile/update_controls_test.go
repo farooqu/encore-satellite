@@ -111,18 +111,21 @@ func TestAPKUpdateCapabilityOnESPHome(t *testing.T) {
 				case <-time.After(time.Second):
 					t.Fatal("check command did not reach updater")
 				}
-				assertStatus := func(latest, status string, known, busy bool) {
+				assertStatus := func(latest, status string, known, busy bool, url, summary string) {
 					t.Helper()
 					if got, ok := receive().(*api.UpdateStateResponse); !ok || got.CurrentVersion != "1.2.3" ||
-						got.LatestVersion != latest || got.MissingState == known || got.InProgress != busy {
+						got.LatestVersion != latest || got.MissingState == known || got.InProgress != busy || got.ReleaseUrl != url || got.ReleaseSummary != summary {
 						t.Fatalf("unexpected update state: %v", got)
 					}
 					if got, ok := receive().(*api.TextSensorStateResponse); !ok || got.Key != diagnostic || got.State != status {
 						t.Fatalf("unexpected diagnostic: %v", got)
 					}
 				}
-				r.UpdateStatus("dev", 0, "1.2.4", "Available", true, false)
-				assertStatus("1.2.4", "Available", true, false)
+				const asset = "https://github.com/farooqu/encore-satellite/releases/download/android-generic-r82/encore.apk"
+				const changelog = "https://github.com/farooqu/encore-satellite/releases/tag/android-generic-r82"
+				const notes = "## Android\n\n- Fix reconnect\n- Restore playback"
+				r.UpdateStatus("dev", 0, "1.2.4", "Available", true, false, asset, notes)
+				assertStatus("1.2.4", "Available", true, false, changelog, notes)
 				send(&api.UpdateCommandRequest{Key: update, Command: api.UpdateCommand_UPDATE_COMMAND_UPDATE})
 				select {
 				case install := <-requests:
@@ -132,21 +135,21 @@ func TestAPKUpdateCapabilityOnESPHome(t *testing.T) {
 				case <-time.After(time.Second):
 					t.Fatal("Install command did not reach updater")
 				}
-				r.UpdateStatus("dev", 0, "", "Downloading", false, true)
-				assertStatus("1.2.4", "Downloading", true, true)
-				r.UpdateStatus("dev", 0, "1.2.4", "Installing; waiting for Android", true, true)
-				assertStatus("1.2.4", "Installing; waiting for Android", true, true)
-				r.UpdateStatus("dev", 0, "1.2.4", "Approve on device", true, false)
-				assertStatus("1.2.4", "Approve on device", true, false)
-				r.UpdateStatus("dev", 0, "1.2.4", "Android installation cancelled or failed", true, false)
-				assertStatus("1.2.4", "Android installation cancelled or failed", true, false)
-				r.UpdateStatus("dev", 0, "", "Bad feed signature", false, false)
-				assertStatus("1.2.3", "Bad feed signature", false, false)
+				r.UpdateStatus("dev", 0, "", "Downloading", false, true, "", "")
+				assertStatus("1.2.4", "Downloading", true, true, changelog, notes)
+				r.UpdateStatus("dev", 0, "1.2.4", "Installing; waiting for Android", true, true, asset, notes)
+				assertStatus("1.2.4", "Installing; waiting for Android", true, true, changelog, notes)
+				r.UpdateStatus("dev", 0, "1.2.4", "Approve on device", true, false, asset, notes)
+				assertStatus("1.2.4", "Approve on device", true, false, changelog, notes)
+				r.UpdateStatus("dev", 0, "1.2.4", "Android installation cancelled or failed", true, false, asset, notes)
+				assertStatus("1.2.4", "Android installation cancelled or failed", true, false, changelog, notes)
+				r.UpdateStatus("dev", 0, "", "Bad feed signature", false, false, "", "")
+				assertStatus("1.2.3", "Bad feed signature", false, false, "", "Bad feed signature")
 
 				// Simulate the replacement APK configuring a new version, then
 				// have a new ESPHome connection subscribe to the resulting state.
 				r.ConfigureUpdates(requests, "1.2.4")
-				r.UpdateStatus("dev", 0, "1.2.4", "Installed Encore 1.2.4", true, false)
+				r.UpdateStatus("dev", 0, "1.2.4", "Installed Encore 1.2.4", true, false, "", "")
 				send, receive := loopbackPeer(t, l.Addr().String())
 				send(&api.SubscribeStatesRequest{})
 				for gotStatus, gotVersion := false, false; !gotStatus || !gotVersion; {

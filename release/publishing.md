@@ -230,9 +230,13 @@ python3 release/pipeline.py feed build/retained --public-key /private/platform-p
   --key /private/platform-metadata.pem --output build/dev.jws
 ```
 
-The feed contains only the existing device contract; its binary URL is the
-immutable versioned GitHub Release asset. No `latest`, staging or expiring URL
-is signed. For stable, change `--channel stable` and the output filename; it
+The binary URL is the immutable versioned GitHub Release asset. No `latest`,
+staging or expiring URL is signed. Automatic Dev feeds use the candidate's
+verified release plan for inline Home Assistant release notes. For a manual
+feed, pass `--changelog path/to/reviewed-notes.md` with the Markdown from the
+exact retained release. Notes are optional, signed with the rest of the entry,
+and excerpted if they exceed 3 KiB. Renewing an entry can add notes without
+changing which bytes it selects. For stable, change `--channel stable` and the output filename; it
 rejects prerelease cores, including **0.1.1-dev.1**. Stable promotion signs a new
 entry selecting the same already-reviewed bytes/revision, without rebuilding,
 rewriting the receipt, changing APK identity or relabelling bundle provenance.

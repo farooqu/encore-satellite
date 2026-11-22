@@ -28,7 +28,7 @@ func TestHomeAssistantKeyEnablesEncryptedControlsAfterReopen(t *testing.T) {
 	}
 	r.ConfigureHardware("  ACME Inc. ", " Tab\t10.1  Pro ")
 	r.ConfigureUpdates(make(updateRequests, 1), " 1.2.3-dev.4 ")
-	r.UpdateStatus("dev", r.UpdateGeneration(), "1.2.4", "Update available", true, false)
+	r.UpdateStatus("dev", r.UpdateGeneration(), "1.2.4", "Update available", true, false, "", "")
 	if err := r.Start(); err != nil {
 		t.Fatal(err)
 	}

@@ -107,7 +107,7 @@ class ApkUpdates(private val context: Context, private val runtime: Runtime, pri
                     if (pending != null && runCatching { validateRequest(context, JSONObject(pending)) }.isFailure) {
                         clearPending()
                     }
-                    runtime.updateStatus(channel, generation, "", if (install) "Downloading and verifying APK" else "Checking updates", false, install)
+                    runtime.updateStatus(channel, generation, "", if (install) "Downloading and verifying APK" else "Checking updates", false, install, "", "")
                     active.verifier ?: Mobile.newUpdates(updateTrust?.getString("com.encore.update_base_url").orEmpty(),
                         updateTrust?.getString("com.encore.update_public_key").orEmpty(), context.packageName,
                         certificates(installed).single(), Build.SUPPORTED_ABIS.first(),
@@ -160,7 +160,7 @@ class ApkUpdates(private val context: Context, private val runtime: Runtime, pri
                         runCatching { validateRequest(context, pending) }.isSuccess && updateFile(context, pending).isFile
                     if (pending != null && !ready) clearPending()
                     if (release == null) {
-                        if (!publishAttempt(channel, generation, offer = false)) runtime.updateStatus(channel, generation, current, "Up to date", true, false)
+                        if (!publishAttempt(channel, generation, offer = false)) runtime.updateStatus(channel, generation, current, "Up to date", true, false, "", "")
                     } else {
                         val latest = release.getString("core_version")
                         if (install) {
@@ -168,7 +168,8 @@ class ApkUpdates(private val context: Context, private val runtime: Runtime, pri
                             runCatching { notifyReady(context) }
                         }
                         if (!ready || !publishAttempt(channel, generation)) {
-                            runtime.updateStatus(channel, generation, latest, if (ready) READY_TO_INSTALL else "Update available", true, false)
+                            runtime.updateStatus(channel, generation, latest, if (ready) READY_TO_INSTALL else "Update available", true, false,
+                                release.optString("url"), release.optString("release_summary"))
                         }
                     }
                 }
@@ -194,13 +195,13 @@ class ApkUpdates(private val context: Context, private val runtime: Runtime, pri
                             }.isSuccess
                             if (retryLocal) runCatching { notifyReady(context) }
                             if (!retained || !publishAttempt(channel, generation)) {
-                                runtime.updateStatus(channel, generation, "", status, false, false)
+                                runtime.updateStatus(channel, generation, "", status, false, false, "", "")
                             }
                         } else {
                             if (session != null && existing != null && existing.optInt("session", -1) == session) {
                                 runCatching { installer.record(existing, "failed", "Install request expired or changed before Android accepted it.") }
                             }
-                            runtime.updateStatus(channel, generation, "", "Update unavailable: ${error.message?.take(180)}", false, false)
+                            runtime.updateStatus(channel, generation, "", "Update unavailable: ${error.message?.take(180)}", false, false, "", "")
                         }
                     }
                 }
@@ -218,17 +219,18 @@ class ApkUpdates(private val context: Context, private val runtime: Runtime, pri
     private fun publishAttempt(channel: String, generation: Long, offer: Boolean = true): Boolean {
         val attempt = installer.attempt ?: return false
         if (installer.installed(attempt)) {
-            runtime.updateStatus(channel, generation, current, "Installed Encore $current", true, false)
+            runtime.updateStatus(channel, generation, current, "Installed Encore $current", true, false, "", "")
             return true
         }
         val busy = attempt.installBusy
         if (attempt.getString("channel") != channel || attempt.getLong("selection_generation") != generation) {
-            if (busy) runtime.updateStatus(channel, generation, current, "Android is finishing an earlier install request", false, true)
+            if (busy) runtime.updateStatus(channel, generation, current, "Android is finishing an earlier install request", false, true, "", "")
             return busy
         }
         val known = offer && preferences.contains("pending") && runCatching { validateRequest(context, attempt) }.isSuccess && updateFile(context, attempt).isFile
         runtime.updateStatus(channel, generation, if (known) attempt.getString("core_version") else current,
-            if (known || busy || attempt.optString("phase") == "failed") attempt.getString("status") else "Local approval expired or was superseded. Request the update again.", known, busy)
+            if (known || busy || attempt.optString("phase") == "failed") attempt.getString("status") else "Local approval expired or was superseded. Request the update again.", known, busy,
+            attempt.optString("url"), attempt.optString("release_summary"))
         return true
     }
 

@@ -73,6 +73,7 @@ type Runtime struct {
 	problem             string
 	updater             UpdateHost
 	updateState         *api.UpdateStateResponse
+	updateStatusText    string
 	proxy               *bluetooth.Proxy
 	radio               *androidhost.BluetoothScanner
 	bluetoothConfigured bool
@@ -533,6 +534,7 @@ func (r *Runtime) Handle(ctx context.Context, c *esphome.Conn, msg proto.Message
 		r.mu.Lock()
 		v := r.config.Dashboard
 		channel := r.config.Channel
+		updateStatus := r.updateStatusText
 		var state *api.UpdateStateResponse
 		if r.updater != nil && r.updateState != nil {
 			state = proto.Clone(r.updateState).(*api.UpdateStateResponse)
@@ -540,7 +542,7 @@ func (r *Runtime) Handle(ctx context.Context, c *esphome.Conn, msg proto.Message
 		r.mu.Unlock()
 		states := []proto.Message{&api.SelectStateResponse{Key: channelKey, State: channel}}
 		if state != nil {
-			if err := c.Send(updateDiagnostic(state)); err != nil {
+			if err := c.Send(updateDiagnostic(updateStatus)); err != nil {
 				return err
 			}
 			states = append(states, state)
@@ -601,15 +603,17 @@ func (r *Runtime) setUpdateChannel(_ *esphome.Conn, m *api.SelectCommandRequest)
 	}
 	r.config = next
 	if r.updateState != nil {
+		r.updateStatusText = "Checking selected channel"
 		r.updateState.LatestVersion = r.updateState.CurrentVersion
-		r.updateState.ReleaseSummary = "Checking selected channel"
+		r.updateState.ReleaseSummary = r.updateStatusText
+		r.updateState.ReleaseUrl = ""
 		r.updateState.MissingState = true
 		r.updateState.InProgress = false
 	}
 	host := r.updater
 	r.mu.Unlock()
 	broadcastErr := r.broadcastControl(&api.SelectStateResponse{Key: channelKey, State: m.State})
-	r.UpdateStatus(m.State, next.ChannelGeneration, "", "Checking selected channel", false, false)
+	r.UpdateStatus(m.State, next.ChannelGeneration, "", "Checking selected channel", false, false, "", "")
 	if host != nil {
 		host.RequestUpdate(m.State, next.ChannelGeneration, false)
 	}

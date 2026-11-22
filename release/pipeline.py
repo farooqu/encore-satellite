@@ -443,6 +443,18 @@ def metadata(receipt, channel, issued, expires):
     return result
 
 
+MAX_CHANGELOG_BYTES = 3072
+
+
+def inline_changelog(notes):
+    notes = notes.strip().encode("utf-8")
+    if len(notes) <= MAX_CHANGELOG_BYTES:
+        return notes.decode("utf-8")
+    tail = b"\n\n_See the release announcement for the full changelog._"
+    excerpt = notes[:MAX_CHANGELOG_BYTES - len(tail)].decode("utf-8", errors="ignore")
+    return (excerpt.rsplit("\n", 1)[0] or excerpt).rstrip() + tail.decode("utf-8")
+
+
 def core_key(version):
     # SemVer comparison, matching the existing clients (build metadata ignored).
     match = SEMVER.fullmatch(version)
@@ -457,7 +469,10 @@ def stage_feed(receipt, feed, public_key, site, channel, now=None):
     feed_type = ARM64_FEED_TYPE if arm64_starter(receipt) else ANDROID_FEED_TYPE
     signed = verify_jws(feed, feed_type, public_key)
     require(len(feed.read_bytes()) <= 32 * 1024, "feed exceeds device limit")
-    require(signed == metadata(receipt, channel, signed["issued"], signed["expires"]), "feed differs from retained artifact")
+    notes = signed.get("release_summary", "")
+    require(isinstance(notes, str) and len(notes.encode("utf-8")) <= MAX_CHANGELOG_BYTES, "invalid inline changelog")
+    require({k: v for k, v in signed.items() if k != "release_summary"} ==
+            metadata(receipt, channel, signed["issued"], signed["expires"]), "feed differs from retained artifact")
     require(signed["issued"] <= now + 300 and signed["expires"] > now, "future or expired feed")
     target = signed["target"]
     destination = site / target / "incubator" / f"{channel}.jws"
@@ -478,8 +493,9 @@ def stage_feed(receipt, feed, public_key, site, channel, now=None):
                 (target, "incubator", channel), "previous feed identity mismatch")
         require(signed["revision"] >= previous["revision"] and signed["issued"] > previous["issued"], "feed revision/issue time must not roll back")
         if signed["revision"] == previous["revision"]:
-            require({k: v for k, v in signed.items() if k not in {"issued", "expires"}} ==
-                    {k: v for k, v in previous.items() if k not in {"issued", "expires"}}, "renewal cannot replace identity/bytes")
+            mutable = {"issued", "expires", "release_summary"}
+            require({k: v for k, v in signed.items() if k not in mutable} ==
+                    {k: v for k, v in previous.items() if k not in mutable}, "renewal cannot replace identity/bytes")
         else:
             require(core_key(signed["core_version"]) >= core_key(previous["core_version"]), "feed core must not roll back")
     require(not history.exists(), "feed history is append-only")
@@ -490,15 +506,20 @@ def stage_feed(receipt, feed, public_key, site, channel, now=None):
     (site / ".nojekyll").touch()
 
 
+def planned_changelog(receipt, plan):
+    require(plan["source"] == receipt["source"] and plan["version"] == receipt["core_version"] and
+            plan["revision"] == receipt["revision"] and receipt["target"] in plan["targets"],
+            "Dev release plan differs from signed candidate")
+    return plan["changelog"]
+
+
 def publish(directory, receipt, execute, *, automatic_dev=False, dev_plan=None):
     release_tag = tag(receipt)
     changelog = f"release/changelogs/{receipt['core_version']}.md"
     notes = ""
     if dev_plan is not None:
-        require(automatic_dev and dev_plan["source"] == receipt["source"] and
-                dev_plan["version"] == receipt["core_version"] and dev_plan["revision"] == receipt["revision"] and
-                receipt["target"] in dev_plan["targets"], "Dev release plan differs from signed candidate")
-        notes = dev_plan["changelog"].rstrip() + "\n"
+        require(automatic_dev, "Dev release plan requires automatic Dev publication")
+        notes = planned_changelog(receipt, dev_plan).rstrip() + "\n"
     if arm64_starter(receipt):
         source = receipt["source"]
         guide = f"{biscuit_source_packaging(source)}/README.md"
@@ -602,6 +623,9 @@ def main():
             sub.add_argument("--expires", type=int, required=True)
             sub.add_argument("--key", type=Path, required=True)
             sub.add_argument("--output", type=Path, required=True)
+            notes = sub.add_mutually_exclusive_group()
+            notes.add_argument("--dev-plan", type=Path, help="Verified Dev release plan for this candidate")
+            notes.add_argument("--changelog", type=Path, help="Reviewed Markdown notes for this retained release")
         if name == "stage-feed":
             sub.add_argument("--feed", type=Path, required=True)
             sub.add_argument("--site", type=Path, required=True)
@@ -640,7 +664,12 @@ def main():
             if arm64_starter(receipt):
                 require(run("openssl", "pkey", "-in", str(args.key), "-pubout", "-outform", "DER") ==
                         BISCUIT_ARM64_ROOT, "wrong signing key for Biscuit ARM64")
-            sign(metadata(receipt, args.channel, args.issued, args.expires), feed_type, args.key, args.output)
+            payload = metadata(receipt, args.channel, args.issued, args.expires)
+            notes = (planned_changelog(receipt, read_json(args.dev_plan)) if args.dev_plan else
+                     args.changelog.read_text(encoding="utf-8") if args.changelog else "")
+            if summary := inline_changelog(notes):
+                payload["release_summary"] = summary
+            sign(payload, feed_type, args.key, args.output)
         elif args.command == "stage-feed":
             stage_feed(receipt, args.feed, args.public_key, args.site, args.channel)
         else:
