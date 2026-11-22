@@ -59,7 +59,7 @@ APK CI checks, an explicitly gated signed-candidate workflow, authenticated
 stable/dev feeds, a persistent ESPHome **Update channel** dropdown, available-update
 reporting and an install request. Changing channel only changes subsequent checks;
 it never installs or downgrades. Feeds/keys are not provisioned by default. On
-Android 12+, opt in under **Settings → Review downloaded update → Remote installs**
+Android 12+, opt in under **Settings → Setup → Remote install settings**
 and allow APKs from Encore in Android Settings. After setup, only an explicit
 Home Assistant **Install** request can start a native self-update. If Android
 requires confirmation or native updates are off or unavailable, use the Settings
@@ -149,10 +149,10 @@ these devices, acoustic timings or model-backed enrollment/training.
 
 1. Install the debug APK using Android's ordinary user-approved sideloading flow.
    Open Encore and choose **Allow microphone access** if prompted. Notifications
-   are optional. Encore starts its microphone/media foreground service automatically
-   once microphone access is granted. No boot receiver, root, device owner or
-   unattended kiosk privileges are required. Microphone capture, Incubator
-   and Sendspin stay off until ESPHome pairing succeeds.
+   are a separate, optional step on Android 13+. Encore starts its microphone/media
+   foreground service automatically once microphone access is granted. No boot
+   receiver, root, device owner or unattended kiosk privileges are required.
+   Microphone capture, Incubator and Sendspin stay off until ESPHome pairing succeeds.
 2. On a fresh install, tap **Pair with Home Assistant** on the Android setup screen.
    On a trusted LAN, open Home Assistant **Settings → Devices & services** and
    add the discovered satellite as **Encore Android · 0AB2** (or add ESPHome by
@@ -166,7 +166,7 @@ these devices, acoustic timings or model-backed enrollment/training.
    but controls do not appear, reload its ESPHome integration. Existing installs
    keep their key and settings and skip pairing; **Reveal ESPHome encryption key**
    in local Settings remains available for manual recovery after pairing.
-   Set the single **Dashboard URL** text entity
+   If you want a dashboard, set the single **Dashboard URL** text entity
    to a full URL, for example `https://home.example/lovelace/home`. This supplies
    both the HA origin and dashboard path; no separate tablet origin setup exists.
    Prefer HTTPS; explicitly choosing `http://` permits trusted-LAN HTTP, including
@@ -185,6 +185,10 @@ these devices, acoustic timings or model-backed enrollment/training.
    Readiness combines usable ordinary wake models with current native capture
    health; a stop-only model does not mean hands-free wake is ready. **Talk** is a
    manual fallback, not a replacement for local wake detection.
+   First-run setup then offers the Bluetooth proxy on supported hardware; it
+   defaults On but needs local access and scan approval. Dashboard, Android Home
+   and remote installs are optional. Choose **Done** to use Encore without a
+   dashboard; **Settings → Setup** reopens the checklist.
 4. Sign into HA in the dashboard itself, or use **Settings → Sign in with
    phone** on the tablet. Phone sign-in requires HA 2026.11 or later, an up-to-date
    Android System WebView, and an HTTPS HA address trusted and reachable by both
@@ -304,9 +308,9 @@ Home support on Portal.
   mute and Stop behavior. Android controls output volume; Sendspin music is separate.
   If the entity is missing on an already paired device after updating, reload
   the device's ESPHome integration in Home Assistant.
-- The optional [Android Bluetooth proxy](../../docs/bluetooth-android.md) is
-  independently default-OFF and scan-only on API 26+ with a detected BLE adapter.
-  Settings explains consent and version-specific grants. Scans pause outside a
+- The [Android Bluetooth proxy](../../docs/bluetooth-android.md) defaults On only
+  on fresh installs with a detected BLE adapter. It is scan-only on API 26+.
+  First-run setup explains consent and version-specific grants. Scans pause outside a
   visible Encore activity; GATT, remote caching and pairing are not implemented.
   Tab A7 Lite / LineageOS 21 GSI and Portal 2 still need physical qualification.
 - Dashboard JavaScript has no native command bridge, file/content access,

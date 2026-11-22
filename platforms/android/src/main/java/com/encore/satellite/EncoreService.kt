@@ -57,7 +57,7 @@ class EncoreService : Service() {
         audio = AudioIo(this)
         bluetooth = BluetoothHost(this)
         runCatching {
-            Mobile.open(filesDir.resolve("engine").absolutePath, audio).also {
+            Mobile.openWithBluetoothDefault(filesDir.resolve("engine").absolutePath, audio, bluetooth.supported).also {
                 it.configureHardware(Build.MANUFACTURER.orEmpty(), Build.MODEL.orEmpty())
                 it.configureDashboard()
             }

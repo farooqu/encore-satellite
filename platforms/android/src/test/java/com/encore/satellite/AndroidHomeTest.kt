@@ -1,11 +1,18 @@
 package com.encore.satellite
 
+import android.Manifest
+import android.app.role.RoleManager
 import android.content.ComponentName
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.pm.PackageManager.PERMISSION_DENIED
+import android.content.pm.PackageManager.PERMISSION_GRANTED
+import android.os.Process
 import android.provider.Settings
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
+import androidx.lifecycle.Lifecycle
 import androidx.test.core.app.ActivityScenario
 import com.github.takahirom.roborazzi.ExperimentalRoborazziApi
 import com.github.takahirom.roborazzi.RoborazziOptions
@@ -20,6 +27,7 @@ import org.robolectric.RuntimeEnvironment
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
+import org.robolectric.shadows.ShadowRoleManager
 import java.io.File
 
 @RunWith(RobolectricTestRunner::class)
@@ -27,6 +35,65 @@ import java.io.File
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 class AndroidHomeTest {
     @get:Rule val compose = createEmptyComposeRule()
+
+    @OptIn(ExperimentalRoborazziApi::class)
+    @Suppress("DEPRECATION") // Deliver the result Android sends to the Activity Result Registry.
+    @Test fun microphoneAndNotificationsAreSeparateAndDenialDoesNotRepeatOnRecreation() {
+        val app = RuntimeEnvironment.getApplication()
+        val android = shadowOf(app)
+        android.declareComponentUnbindable(ComponentName(app, EncoreService::class.java))
+        android.setUnbindServiceCallsOnServiceDisconnected(false)
+        app.getSharedPreferences("setup", Context.MODE_PRIVATE).edit().putString("stage", SetupStage.CORE.name).commit()
+        android.denyPermissions(Manifest.permission.RECORD_AUDIO, Manifest.permission.POST_NOTIFICATIONS)
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            val microphone = compose.onNodeWithText("Allow microphone access")
+            val appPermissions = compose.onNodeWithText("Open app permissions")
+            appPermissions.assertDoesNotExist()
+            microphone.performClick()
+            scenario.onActivity { activity ->
+                val request = shadowOf(activity).lastRequestedPermission
+                activity.onRequestPermissionsResult(request.requestCode, emptyArray(), intArrayOf())
+            }
+            appPermissions.assertDoesNotExist()
+            microphone.performClick()
+            scenario.onActivity { activity ->
+                val request = shadowOf(activity).lastRequestedPermission
+                assertArrayEquals(arrayOf(Manifest.permission.RECORD_AUDIO), request.requestedPermissions)
+                shadowOf(activity.packageManager).setShouldShowRequestPermissionRationale(Manifest.permission.RECORD_AUDIO, true)
+                activity.onRequestPermissionsResult(request.requestCode, request.requestedPermissions, intArrayOf(PERMISSION_DENIED))
+            }
+            microphone.assertIsDisplayed()
+            appPermissions.assertDoesNotExist()
+            microphone.performClick()
+            scenario.onActivity { activity ->
+                val request = shadowOf(activity).lastRequestedPermission
+                assertArrayEquals(arrayOf(Manifest.permission.RECORD_AUDIO), request.requestedPermissions)
+                shadowOf(activity.packageManager).setShouldShowRequestPermissionRationale(Manifest.permission.RECORD_AUDIO, false)
+                activity.onRequestPermissionsResult(request.requestCode, request.requestedPermissions, intArrayOf(PERMISSION_DENIED))
+            }
+            scenario.recreate()
+            microphone.assertDoesNotExist()
+            appPermissions.assertIsDisplayed()
+            val directory = File("build/reports/screenshots").also { it.mkdirs() }
+            compose.onAllNodes(isRoot()).onLast().captureRoboImage(File(directory, "android-microphone-settings-fallback.png"),
+                RoborazziOptions(taskType = RoborazziTaskType.Record))
+            appPermissions.performClick()
+            assertEquals(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, android.nextStartedActivity.action)
+            scenario.moveToState(Lifecycle.State.STARTED)
+            android.grantPermissions(Manifest.permission.RECORD_AUDIO)
+            scenario.moveToState(Lifecycle.State.RESUMED)
+            scenario.onActivity { assertEquals(PERMISSION_GRANTED, it.checkSelfPermission(Manifest.permission.RECORD_AUDIO)) }
+            compose.onNodeWithText("Allow notifications").performClick()
+            scenario.onActivity { activity ->
+                val request = shadowOf(activity).lastRequestedPermission
+                assertArrayEquals(arrayOf(Manifest.permission.POST_NOTIFICATIONS), request.requestedPermissions)
+                activity.onRequestPermissionsResult(request.requestCode, request.requestedPermissions, intArrayOf(PERMISSION_DENIED))
+            }
+            scenario.recreate()
+            compose.onNodeWithText("Home Assistant setup").assertIsDisplayed()
+            compose.onNodeWithText("Allow notifications").assertDoesNotExist()
+        }
+    }
 
     @Test fun androidCanFindTheDashboardAsHomeAndAsAnOrdinaryApp() {
         val app = RuntimeEnvironment.getApplication()
@@ -40,8 +107,27 @@ class AndroidHomeTest {
         assertTrue(candidates(Intent.CATEGORY_LAUNCHER, PackageManager.MATCH_DEFAULT_ONLY).isEmpty())
     }
 
+    @Test fun setupRechecksHomeAfterAndroidSettingsAndRetainsChecklist() {
+        val app = RuntimeEnvironment.getApplication()
+        val android = shadowOf(app)
+        android.declareComponentUnbindable(ComponentName(app, EncoreService::class.java))
+        android.setUnbindServiceCallsOnServiceDisconnected(false)
+        app.getSharedPreferences("setup", Context.MODE_PRIVATE).edit().putString("stage", SetupStage.EXTRAS.name).commit()
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            val selected = compose.onNodeWithText("Encore is your Home app", substring = true)
+            selected.assertDoesNotExist()
+            compose.onNodeWithText("Choose Home app").performScrollTo().performClick()
+            assertEquals(Settings.ACTION_HOME_SETTINGS, android.nextStartedActivity.action)
+            scenario.moveToState(Lifecycle.State.STARTED)
+            ShadowRoleManager.addRoleHolder(RoleManager.ROLE_HOME, app.packageName, Process.myUserHandle())
+            scenario.moveToState(Lifecycle.State.RESUMED)
+            compose.onNodeWithText("Finish setup").performScrollTo().assertIsDisplayed()
+            selected.performScrollTo().assertIsDisplayed()
+        }
+    }
+
     @OptIn(ExperimentalRoborazziApi::class)
-    @Test fun settingsOpensBothSystemRecoveryPathsWithoutChoosingHomeOnItsOwn() {
+    @Test fun settingsLinksDirectlyToHomeAndNotificationControls() {
         val app = RuntimeEnvironment.getApplication()
         val android = shadowOf(app)
         android.declareComponentUnbindable(ComponentName(app, EncoreService::class.java))
@@ -50,9 +136,10 @@ class AndroidHomeTest {
             val gear = compose.onNodeWithTag("open-settings")
             gear.performClick()
             val choose = compose.onNodeWithText("Choose Home app")
-            val systemSettings = compose.onNodeWithText("Open Android settings")
+            val notificationSettings = compose.onNodeWithText("Manage notifications")
             choose.assertIsDisplayed()
-            systemSettings.assertIsDisplayed()
+            notificationSettings.assertIsDisplayed()
+            compose.onNodeWithText("Open Android settings").assertDoesNotExist()
             compose.runOnIdle { assertNull("Opening Encore settings must not start the chooser", android.nextStartedActivity) }
             val directory = File("build/reports/screenshots").also { it.mkdirs() }
             compose.onAllNodes(isRoot()).onLast().captureRoboImage(File(directory, "android-home-recovery.png"),
@@ -66,8 +153,12 @@ class AndroidHomeTest {
                 assertTrue(intent.flags and Intent.FLAG_ACTIVITY_NEW_TASK != 0)
             }
             gear.performClick()
-            systemSettings.performTouchInput { click() }
-            compose.runOnIdle { assertEquals(Settings.ACTION_SETTINGS, android.nextStartedActivity.action) }
+            notificationSettings.performTouchInput { click() }
+            compose.runOnIdle {
+                val intent = android.nextStartedActivity
+                assertEquals(Settings.ACTION_APP_NOTIFICATION_SETTINGS, intent.action)
+                assertEquals(app.packageName, intent.getStringExtra(Settings.EXTRA_APP_PACKAGE))
+            }
         }
     }
 }

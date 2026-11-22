@@ -11,8 +11,10 @@ import android.os.Build
 import android.os.PowerManager
 import com.encore.engine.mobile.Bluetooth
 import com.encore.engine.mobile.Runtime
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.withContext
 
 data class BluetoothState(
     val supported: Boolean = false,
@@ -21,11 +23,15 @@ data class BluetoothState(
     val detail: String = "",
     val permitted: Boolean = false,
     val received: Long = 0,
+    val setupPending: Boolean = false,
+    val radioOn: Boolean = false,
+    val locationOn: Boolean = false,
+    val canRetry: Boolean = false,
 ) {
     companion object {
         fun evaluate(sdk: Int, supported: Boolean, enabled: Boolean, permitted: Boolean,
             radio: Boolean, location: Boolean, visible: Boolean, running: Boolean,
-            scanning: Boolean, received: Long, failure: String): BluetoothState {
+            scanning: Boolean, received: Long, failure: String, setupPending: Boolean = false): BluetoothState {
             val status = when {
                 !supported && sdk < 26 -> "Advertisement proxy unavailable on API $sdk"
                 !supported -> "Unavailable on this device"
@@ -33,6 +39,7 @@ data class BluetoothState(
                 !permitted -> "Permission needed"
                 !radio -> "Bluetooth is off"
                 !location -> "Location services needed for beacon coverage"
+                setupPending -> "Finish Bluetooth setup to start scanning"
                 !running -> "Satellite stopped"
                 !visible -> "Paused in background"
                 failure.isNotEmpty() -> failure
@@ -43,7 +50,7 @@ data class BluetoothState(
             return BluetoothState(supported, enabled, status,
                 "Scan-only raw advertisement proxy. " + (if (sdk < 35) "Address type is explicitly unknown on this Android version. " else "Public APIs supply address type when available. ") +
                 "GATT connections, remote caching and pairing are unavailable. Background scanning is paused.",
-                permitted, received)
+                permitted, received, setupPending, radio, location, failure.isNotEmpty())
         }
     }
 }
@@ -55,6 +62,7 @@ class BluetoothHost(private val context: Context) : Bluetooth {
     private val scanHost: Bluetooth? = if (Build.VERSION.SDK_INT >= 26 &&
         context.packageManager.hasSystemFeature(PackageManager.FEATURE_BLUETOOTH_LE) &&
         runCatching { adapter != null }.getOrDefault(false)) this else null
+    val supported: Boolean get() = scanHost != null
     private var engine: Runtime? = null
     private val viewers = mutableSetOf<Any>()
     private var running = false
@@ -93,11 +101,23 @@ class BluetoothHost(private val context: Context) : Bluetooth {
     fun running(value: Boolean) { synchronized(this) { running = value }; refresh() }
     fun retry() { synchronized(this) { failure = "" }; refresh() }
 
+    suspend fun approveSetup() {
+        refresh()
+        val current = state.value
+        check(current.supported && current.enabled && current.permitted && current.radioOn && current.locationOn) {
+            "Bluetooth or Location access changed. Check the settings and try again."
+        }
+        val runtime = checkNotNull(engine)
+        withContext(Dispatchers.IO) { runtime.approveBluetoothSetup() }
+        refresh()
+    }
+
     // Called on the service's main thread and on Activity resume, including
     // return from Settings. Revocation can also kill the process; restart stays
     // paused until a visible activity and all grants are present again.
     fun refresh() {
         val enabled = engine?.bluetoothEnabled() ?: false
+        val setupPending = engine?.bluetoothSetupPending() ?: false
         val permission = permitted()
         val radio = permission && runCatching { adapter?.isEnabled == true }.getOrDefault(false)
         val location = runCatching {
@@ -109,9 +129,9 @@ class BluetoothHost(private val context: Context) : Bluetooth {
         synchronized(this) {
             if (permission && retired != null) runCatching { stopScan(generation) }
             val visible = viewers.isNotEmpty() && context.getSystemService(PowerManager::class.java).isInteractive
-            val next = BluetoothState.evaluate(Build.VERSION.SDK_INT, scanHost != null, enabled, permission,
-                radio, location, visible, running, callback != null, received, failure)
-            pause = !next.supported || !enabled || !permission || !radio || !location || !visible || !running || failure.isNotEmpty()
+            val next = BluetoothState.evaluate(Build.VERSION.SDK_INT, supported, enabled, permission,
+                radio, location, visible, running, callback != null, received, failure, setupPending)
+            pause = !supported || !enabled || setupPending || !permission || !radio || !location || !visible || !running || failure.isNotEmpty()
             if (!radio || !permission || !enabled) failure = ""
             mutable.value = next
             if (allowed == !pause) return

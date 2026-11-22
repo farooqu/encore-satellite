@@ -125,15 +125,72 @@ class EncoreScreenTest {
         pair.assertIsDisplayed().performClick()
         compose.runOnIdle { assertEquals(2, taps); state.value = state.value.copy(esphome = "paired") }
         pair.assertDoesNotExist()
-        compose.onNodeWithText("Your home, at a glance.").assertIsDisplayed()
+        compose.onNodeWithText("Voice satellite").assertIsDisplayed()
         compose.runOnIdle { state.value = state.value.copy(running = false) }
         allow.assertDoesNotExist()
-        compose.onNodeWithText("Your home, at a glance.").assertIsDisplayed()
+        compose.onNodeWithText("Voice satellite").assertIsDisplayed()
         compose.onNodeWithContentDescription("Start satellite").assertDoesNotExist()
         openSettings()
         pair.assertDoesNotExist()
         compose.onNodeWithText("Reveal ESPHome encryption key").performScrollTo().assertIsDisplayed()
         capture("android-ha-existing-settings")
+    }
+
+    @Test fun setupSurvivesDeferralsAndPairedUpgradesDoNotReplayIt() {
+        val state = mutableStateOf(EncoreState(esphome = "unpaired", name = "encore-android-350ab2", espHomeFriendlyName = "Encore Android · 0AB2"))
+        val microphone = mutableStateOf(false)
+        val notificationsReviewed = mutableStateOf(false)
+        val stage = mutableStateOf(SetupStage.NEW)
+        compose.setContent {
+            val current = state.value
+            val step = setupStep(stage.value, current, microphone.value, !notificationsReviewed.value, true)
+            val content: (@androidx.compose.runtime.Composable () -> Unit)? = if (step != null) {
+                { SatelliteSetup(step, current, AndroidSetupStatus(home = false, remoteInstalls = "Off"),
+                    onMicrophone = {}, onAppPermissions = null, onNotifications = {}, onSkipNotifications = { notificationsReviewed.value = true },
+                    onPair = { state.value = current.copy(esphome = "waiting") },
+                    onVoiceContinue = { stage.value = SetupStage.BLUETOOTH }, onBluetooth = {}, onExtras = { stage.value = SetupStage.EXTRAS },
+                    onChooseHome = {}, onRemoteInstalls = {}, onDone = { stage.value = SetupStage.DONE }) }
+            } else null
+            EncoreScreen(current, {}, {}, {}, {}, { "" }, { "" }, {}, {}, {}, {}, dashboardContent = content,
+                onSetup = { stage.value = SetupStage.EXTRAS }, microphonePermissionGranted = microphone.value)
+        }
+        compose.onNodeWithText("Allow microphone access").assertIsDisplayed().performClick()
+        compose.onNodeWithText("Open app permissions").assertDoesNotExist()
+        compose.onNodeWithText("Allow notifications").assertDoesNotExist()
+        capture("android-first-run-microphone")
+        compose.runOnIdle { microphone.value = true; stage.value = SetupStage.CORE; state.value = state.value.copy(running = true) }
+        compose.onNodeWithText("Notifications (optional)").assertIsDisplayed()
+        compose.onNodeWithText("Pair with Home Assistant").assertDoesNotExist()
+        capture("android-first-run-notifications")
+        compose.onNodeWithText("Not now").performClick()
+        compose.onNodeWithText("Pair with Home Assistant").performClick()
+        compose.onNodeWithText("two minutes", substring = true).assertIsDisplayed()
+        capture("android-first-run-pairing")
+        compose.runOnIdle { state.value = state.value.copy(esphome = "paired", voiceKnown = true) }
+        compose.onNodeWithText("Voice Incubator not connected").assertIsDisplayed()
+        capture("android-first-run-voice")
+        compose.onNodeWithText("Continue setup").performClick()
+        compose.onNodeWithText("Set up Bluetooth proxy").assertIsDisplayed()
+        compose.onNodeWithText("Not now").performClick()
+        compose.onNodeWithText("Finish setup").assertIsDisplayed()
+        compose.onNodeWithText("keep Encore voice-only", substring = true).assertIsDisplayed()
+        compose.onNodeWithText("Manage notifications").assertDoesNotExist()
+        capture("android-first-run-checklist")
+        compose.onNodeWithText("Done").performScrollTo().performClick()
+        compose.onNodeWithText("Voice satellite").assertIsDisplayed()
+        openSettings()
+        compose.onNodeWithText("Setup").performClick()
+        compose.onNodeWithText("Finish setup").assertIsDisplayed()
+        compose.runOnIdle { state.value = state.value.copy(dashboard = "https://home.example/lovelace/home") }
+        compose.onNodeWithText("Dashboard URL received", substring = true).assertIsDisplayed()
+        compose.onNodeWithText("Open dashboard").assertDoesNotExist()
+        capture("android-first-run-checklist-dashboard-ready")
+
+        // An upgraded, already paired installation has no onboarding cursor.
+        compose.runOnIdle { stage.value = SetupStage.NEW; notificationsReviewed.value = false; state.value = state.value.copy(dashboard = "") }
+        compose.onNodeWithText("Voice satellite").assertIsDisplayed()
+        compose.onNodeWithText("Allow notifications").assertDoesNotExist()
+        compose.onNodeWithText("Set up Bluetooth proxy").assertDoesNotExist()
     }
 
     @Test fun remoteRequestWaitsForDrawnIndicatorAndFreshSamples() {

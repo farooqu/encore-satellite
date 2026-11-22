@@ -54,6 +54,29 @@ func (r *Runtime) BluetoothEnabled() bool {
 	return r.config.BluetoothProxy
 }
 
+func (r *Runtime) BluetoothSetupPending() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.config.BluetoothPending
+}
+
+// ApproveBluetoothSetup is called by the local Android UI, not by the ESPHome
+// switch. It does not change the desired setting or grant scan permission.
+func (r *Runtime) ApproveBluetoothSetup() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.config.BluetoothPending {
+		return nil
+	}
+	next := r.config
+	next.BluetoothPending = false
+	if err := r.save(next); err != nil {
+		return err
+	}
+	r.config = next
+	return nil
+}
+
 func (r *Runtime) SetBluetoothEnabled(enabled bool) error {
 	r.mu.Lock()
 	proxy := r.proxy
@@ -64,6 +87,7 @@ func (r *Runtime) SetBluetoothEnabled(enabled bool) error {
 func (r *Runtime) PauseBluetooth(paused bool) {
 	r.mu.Lock()
 	proxy := r.proxy
+	paused = paused || r.config.BluetoothPending
 	r.mu.Unlock()
 	proxy.SetPaused(paused)
 }

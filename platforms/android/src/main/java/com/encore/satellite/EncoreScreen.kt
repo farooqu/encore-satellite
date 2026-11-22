@@ -50,7 +50,7 @@ internal fun EncoreScreen(state: EncoreState, onStart: () -> Unit, onTalk: () ->
     microphonePermissionGranted: Boolean = true,
     dashboardAuth: DashboardAuth? = null,
     dashboardContent: (@Composable () -> Unit)? = null,
-    onChooseHome: () -> Unit = {}, onAndroidSettings: () -> Unit = {}) {
+    onChooseHome: () -> Unit = {}, onNotificationSettings: () -> Unit = {}, onSetup: () -> Unit = {}) {
     val voiceVisible = state.interactionVisible || state.microphoneVisible
     // Only local Assist invocations use the transcript. Unclassified and remote
     // sessions keep the existing indicator, including its monitor admission hook.
@@ -138,7 +138,7 @@ internal fun EncoreScreen(state: EncoreState, onStart: () -> Unit, onTalk: () ->
                 BackHandler(onBack = ::closeSettings)
                 Surface(Modifier.fillMaxSize().testTag("settings-screen").semantics { paneTitle = "Satellite settings" }) {
                     SettingsContent(state, noiseKey, musicToken, onMusicConnect, onMusicDisconnect, onMusicCommand, onUpdate, onBluetooth,
-                        dashboardAuth, onChooseHome, onAndroidSettings, ::closeSettings)
+                        dashboardAuth, onChooseHome, onNotificationSettings, { closeSettings(); onSetup() }, ::closeSettings)
                 }
             } else if (cue) VoiceWakeCue(Modifier.align(Alignment.BottomCenter).navigationBarsPadding()
                 .padding(bottom = if (landscape) 8.dp else 82.dp))
@@ -220,7 +220,7 @@ internal fun trustedNavigation(origin: String, value: String): Boolean {
                 Text(if (needsPermission) "Set up Encore" else "Home Assistant setup",
                     style = MaterialTheme.typography.headlineMedium, color = Color.White)
                 Text(when {
-                    needsPermission -> "Allow microphone access for local wake-word detection. If Android asks to allow notifications, that's optional."
+                    needsPermission -> "Allow microphone access for voice and local wake-word detection."
                     !state.running -> if (state.problem.isEmpty()) "Starting Encore…" else "Reopen Encore to try again."
                     state.esphome == "waiting" -> "In Home Assistant, go to Settings → Devices & services and add ${state.espHomeFriendlyName} under Discovered. You won't need to enter a key. The pairing window closes after two minutes."
                     state.esphome == "expired" -> "The pairing window expired. Start pairing again, then add the satellite in Home Assistant."
@@ -235,9 +235,9 @@ internal fun trustedNavigation(origin: String, value: String): Boolean {
         }
     } else if (state.dashboard.isEmpty()) {
         Column(Modifier.fillMaxSize().background(Color(0xff101d28)).padding(32.dp), verticalArrangement = Arrangement.Center) {
-            Text("Your home, at a glance.", color = Color.White, fontSize = 30.sp)
+            Text("Voice satellite", color = Color.White, fontSize = 30.sp)
             Spacer(Modifier.height(16.dp))
-            Text("Set the full Dashboard URL in the device's ESPHome integration. One URL includes your HA address and dashboard path.", color = Muted, fontSize = 17.sp)
+            Text(state.voiceReadiness, color = Muted, fontSize = 17.sp, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
         }
     } else if (auth != null && auth.lostOrigin == state.origin) {
         DashboardSignInNeeded(onPhone = if (supportsDashboardBridge()) ({ auth.start(state.origin) }) else null,
@@ -288,11 +288,10 @@ internal fun DashboardSignInNeeded(onPhone: (() -> Unit)?, onTablet: () -> Unit)
     }
 }
 
-@OptIn(ExperimentalLayoutApi::class)
 @Composable private fun SettingsContent(state: EncoreState, noiseKey: () -> String,
     musicToken: () -> String, onMusicConnect: (String) -> Unit, onMusicDisconnect: () -> Unit,
     onMusicCommand: (String) -> Unit, onUpdate: () -> Unit, onBluetooth: () -> Unit, auth: DashboardAuth?,
-    onChooseHome: () -> Unit, onAndroidSettings: () -> Unit, close: () -> Unit) {
+    onChooseHome: () -> Unit, onNotificationSettings: () -> Unit, onSetup: () -> Unit, close: () -> Unit) {
     var sendspin by remember { mutableStateOf("") }
     var secret by remember { mutableStateOf("") }
     Column(Modifier.fillMaxSize().systemBarsPadding().imePadding(), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -304,12 +303,11 @@ internal fun DashboardSignInNeeded(onPhone: (() -> Unit)?, onTablet: () -> Unit)
             verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("${state.name} · Incubator only", color = Mint)
             Text(state.status, Modifier.semantics { liveRegion = LiveRegionMode.Polite }, color = Muted)
+            TextButton(onClick = onSetup) { Text("Setup") }
+            TextButton(onClick = { close(); onNotificationSettings() }) { Text("Manage notifications") }
             Text("Android Home", Modifier.semantics { heading() }, style = MaterialTheme.typography.titleMedium)
-            Text("Choose Encore Incubator in Android to open this dashboard when you press Home. To switch back, choose your previous launcher in the same screen.")
-            FlowRow {
-                TextButton(onClick = { close(); onChooseHome() }) { Text("Choose Home app") }
-                TextButton(onClick = { close(); onAndroidSettings() }) { Text("Open Android settings") }
-            }
+            Text("Choose Encore Incubator in Android to open Encore when you press Home. To switch back, choose your previous launcher in the same screen.")
+            TextButton(onClick = { close(); onChooseHome() }) { Text("Choose Home app") }
             HorizontalDivider()
             if (state.music.enabled) MusicControls(state.music, onMusicCommand, state.audioInterrupted)
             Text("Incubator voice uses trusted-LAN TCP 6055. ESPHome controls use encrypted TCP 6053. Bluetooth capabilities depend on the running Android APIs; no Assist backend.", fontSize = 12.sp)

@@ -297,6 +297,7 @@ internal fun notifyReady(context: Context) {
 /** Local enrollment and installer review; remote requests never open this Activity. */
 @Suppress("DEPRECATION")
 class UpdateActivity : Activity() {
+    companion object { internal const val REMOTE_SETTINGS = "remote_settings" }
     private val installer by lazy { ApkInstall(this) }
     private val preferences get() = installer.preferences
     private var prompt: String? = null
@@ -306,6 +307,10 @@ class UpdateActivity : Activity() {
         prompt = savedInstanceState?.getString("prompt")
         if (prompt != null || savedInstanceState?.getBoolean("enrolling") == true) {
             enrolling = savedInstanceState?.getBoolean("enrolling") == true
+            return
+        }
+        if (intent.getBooleanExtra(REMOTE_SETTINGS, false) && installer.supported) {
+            showRemoteSettings()
             return
         }
         val request = preferences.getString("pending", null)
@@ -360,16 +365,30 @@ class UpdateActivity : Activity() {
 
     private fun showRemoteSettings() {
         val enabled = installer.optedIn
-        AlertDialog.Builder(this).setTitle("Install from Home Assistant")
-            .setMessage(if (enabled) "Enabled. Encore can install verified APK updates when you choose Install in Home Assistant. Android may still require confirmation. Checking for updates never installs them."
-                else "Allow explicit Home Assistant Install requests to install verified APK updates without a second tap when Android permits. Enable Allow from this source in Android if asked. Checking never installs updates. After an update, open Encore to restore microphone access.")
-            .setPositiveButton(if (enabled) "Disable" else "Enable") { _, _ ->
-                if (!enabled && !packageManager.canRequestPackageInstalls()) {
-                    enrolling = true
-                    runCatching { startActivityForResult(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName")), 1) }
-                        .onFailure { enrollmentResult(false) }
-                } else enrollmentResult(!enabled)
-            }.setNegativeButton("Close") { _, _ -> finish() }.setOnCancelListener { finish() }.show()
+        val paused = enabled && !packageManager.canRequestPackageInstalls()
+        val dialog = AlertDialog.Builder(this).setTitle("Install from Home Assistant")
+            .setMessage(when {
+                paused -> "Remote installs are paused. Restore Android’s Allow from this source setting, or turn remote installs off. Checking for updates never installs them."
+                enabled -> "Enabled. Encore can install verified APK updates when you choose Install in Home Assistant. Android may still require confirmation. Checking for updates never installs them."
+                else -> "Allow explicit Home Assistant Install requests to install verified APK updates without a second tap when Android permits. Enable Allow from this source in Android if asked. Checking never installs updates. After an update, open Encore to restore microphone access."
+            })
+            .setPositiveButton(if (paused) "Restore Android access" else if (enabled) "Disable" else "Enable") { _, _ ->
+                when {
+                    enabled && !paused -> enrollmentResult(false)
+                    packageManager.canRequestPackageInstalls() -> enrollmentResult(true)
+                    else -> {
+                        enrolling = true
+                        runCatching { startActivityForResult(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName")), 1) }
+                            .onFailure { finishEnrollment() }
+                    }
+                }
+            }.setNegativeButton("Close") { _, _ -> finish() }.setOnCancelListener { finish() }
+        if (paused) dialog.setNeutralButton("Disable") { _, _ -> enrollmentResult(false) }
+        dialog.show()
+    }
+
+    private fun finishEnrollment() {
+        enrollmentResult(installer.optedIn || packageManager.canRequestPackageInstalls())
     }
 
     private fun enrollmentResult(enabled: Boolean) {
@@ -377,7 +396,8 @@ class UpdateActivity : Activity() {
         val saved = synchronized(ApkInstall.lock) { preferences.edit().putBoolean("remote_install", enabled).commit() }
         val message = when {
             !saved -> "Could not save remote install preference."
-            enabled -> "Enabled. Choose Install in Home Assistant when you want to update."
+            installer.canInstall -> "Enabled. Choose Install in Home Assistant when you want to update."
+            enabled -> "Remote installs are paused. Updates still need local approval."
             else -> "Remote installs are off. Updates still need local approval."
         }
         AlertDialog.Builder(this).setTitle("Install from Home Assistant").setMessage(message)
@@ -400,9 +420,14 @@ class UpdateActivity : Activity() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        if (enrolling) finishEnrollment()
+    }
+
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode == 1 && enrolling) enrollmentResult(packageManager.canRequestPackageInstalls())
+        if (requestCode == 1 && enrolling) finishEnrollment()
         if (requestCode == 2) {
             synchronized(ApkInstall.lock) {
                 val attempt = installer.attempt

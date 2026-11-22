@@ -187,7 +187,7 @@ func TestHomeAssistantPairingPreservesExistingInstallation(t *testing.T) {
 	if err := os.WriteFile(path, stored, 0600); err != nil {
 		t.Fatal(err)
 	}
-	r, err := Open(dir, silentOutput{})
+	r, err := OpenWithBluetoothDefault(dir, silentOutput{}, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,6 +202,51 @@ func TestHomeAssistantPairingPreservesExistingInstallation(t *testing.T) {
 	after, err := os.ReadFile(path)
 	if err != nil || string(after) != string(stored) {
 		t.Fatal("startup or rejected pairing changed existing settings", err)
+	}
+}
+
+type bluetoothScanStarts chan int64
+
+func (starts bluetoothScanStarts) StartScan(generation int64) error { starts <- generation; return nil }
+func (bluetoothScanStarts) StopScan(int64) error                    { return nil }
+
+func TestFreshBluetoothNeedsLocalApprovalEvenWithSubscribedController(t *testing.T) {
+	r, err := OpenWithBluetoothDefault(t.TempDir(), silentOutput{}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	starts := make(bluetoothScanStarts, 1)
+	if err := r.ConfigureBluetooth(starts); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(r.Close)
+	if err := r.PairHomeAssistant(); err != nil {
+		t.Fatal(err)
+	}
+	key := esphome.PSK{19, 23}
+	response := &api.NoiseEncryptionSetKeyResponse{}
+	pairingNoisePeer(t, esphome.PSK{})(&api.NoiseEncryptionSetKeyRequest{Key: []byte(key.String())}, response)
+	if !response.Success {
+		t.Fatal("pairing failed")
+	}
+	waitForESPHomeState(t, r, "paired")
+	send, receive := noisePeer(t, "127.0.0.1:6053", key)
+	r.PauseBluetooth(false) // Simulate every OS prerequisite already being satisfied.
+	send(&api.SubscribeBluetoothLEAdvertisementsRequest{Flags: 1})
+	if status, ok := receive().(*api.BluetoothScannerStateResponse); !ok || status.State != esphome.ScannerStopped {
+		t.Fatalf("controller did not see stopped while setup was pending: %v", status)
+	}
+	if err := r.ApproveBluetoothSetup(); err != nil {
+		t.Fatal(err)
+	}
+	r.PauseBluetooth(false)
+	select {
+	case <-starts:
+	case <-time.After(time.Second):
+		t.Fatal("scanner did not start after local approval")
 	}
 }
 

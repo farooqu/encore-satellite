@@ -29,10 +29,13 @@ Known address types and existing Linux behavior are unchanged.
 
 ## Consent and lifetime
 
-- One `bluetooth_proxy` preference lives in the existing private `encore.json`.
-  It defaults OFF and is shared by the local setup screen and the one encrypted
-  ESPHome switch. Save failure leaves both live and saved values unchanged.
-- Open **Settings → Bluetooth proxy setup** for consent. Nearby addresses,
+- The `bluetooth_proxy` preference in private `encore.json` is shared by the
+  local setup screen and the encrypted ESPHome switch. It defaults ON on fresh
+  installs with detected BLE support. Existing installs keep their saved choice.
+  The fresh default does not grant permission or let the controller start a scan.
+- First-run setup offers Bluetooth after ESPHome pairing. **Not now** keeps the
+  preference on while scanning stays blocked; **Turn off proxy** saves Off.
+  Revisit at **Settings → Bluetooth proxy setup**. Nearby addresses,
   raw advertisement payloads and RSSI can disclose device presence. Encore does
   not save a beacon history. Neither voice mute nor music controls imply BLE
   consent; Bluetooth does not start or unmute the microphone.
@@ -51,6 +54,7 @@ Known address types and existing Linux behavior are unchanged.
 - Scanning requires the resumed main/setup activity, interactive screen,
   running satellite, saved ON, granted permissions, enabled location services
   and enabled radio, plus an authenticated subscribing ESPHome controller.
+  A fresh install also requires explicit **Allow scanning** in local setup.
   It pauses in the background/screen-off. There is **no background-location
   request, background scan guarantee, boot restart or automatic process restart**.
 - Recheck grants/radio/location on resume and every 500 ms while the service
@@ -74,8 +78,8 @@ promise of passive on-air operation, and mode switching is not advertised.
 GATT path exists.** Do not develop a Home Assistant-side compatibility fork for
 this implementation. Active connections, connected-device notifications,
 pairing and remote caching remain unimplemented and unadvertised. The independent
-proxy preference remains default-OFF; this decision does not change Linux GATT
-or make Android Bluetooth a first Dot bring-up gate.
+proxy setup does not change Linux GATT or make Android Bluetooth a first Dot
+bring-up gate.
 
 This is not the full originally requested Android GATT bridge. The existing
 `core/ble` service contract explicitly requires real, stable ATT handles,

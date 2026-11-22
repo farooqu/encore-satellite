@@ -48,6 +48,7 @@ type settings struct {
 	Channel           string `json:"channel"`
 	ChannelGeneration int64  `json:"channel_generation"`
 	BluetoothProxy    bool   `json:"bluetooth_proxy"`
+	BluetoothPending  bool   `json:"bluetooth_setup_pending,omitempty"`
 }
 
 type Runtime struct {
@@ -83,6 +84,12 @@ type Runtime struct {
 }
 
 func Open(directory string, output Audio) (*Runtime, error) {
+	return OpenWithBluetoothDefault(directory, output, false)
+}
+
+// OpenWithBluetoothDefault applies the device capability only to a new installation.
+// Existing configurations retain their choice, including the legacy zero value.
+func OpenWithBluetoothDefault(directory string, output Audio, supported bool) (*Runtime, error) {
 	if output == nil {
 		return nil, errors.New("native audio required")
 	}
@@ -103,6 +110,8 @@ func Open(directory string, output Audio) (*Runtime, error) {
 		id[0] = (id[0] | 2) & 0xfe
 		r.config.MAC = net.HardwareAddr(id[:]).String()
 		r.config.Channel = "dev"
+		r.config.BluetoothProxy = supported
+		r.config.BluetoothPending = supported
 		if err = r.save(r.config); err != nil {
 			return nil, err
 		}

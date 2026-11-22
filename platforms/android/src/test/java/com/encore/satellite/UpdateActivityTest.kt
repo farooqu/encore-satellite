@@ -38,9 +38,19 @@ class UpdateActivityTest {
         val install = ApkInstall(context)
         install.preferences.edit().clear().commit()
         pm.setCanRequestPackageInstalls(false)
-        val controller = Robolectric.buildActivity(UpdateActivity::class.java).setup()
+        val direct = Intent(context, UpdateActivity::class.java).putExtra(UpdateActivity.REMOTE_SETTINGS, true)
+        val denied = Robolectric.buildActivity(UpdateActivity::class.java, direct).setup()
+        val deniedShadow = shadowOf(denied.get())
+        ShadowAlertDialog.getLatestAlertDialog().getButton(AlertDialog.BUTTON_POSITIVE).performClick()
+        ShadowLooper.idleMainLooper()
+        val deniedSettings = deniedShadow.nextStartedActivityForResult.intent
+        assertEquals(deniedSettings, deniedShadow.nextStartedActivity)
+        deniedShadow.receiveResult(deniedSettings, Activity.RESULT_OK, null) // A positive result does not grant access.
+        assertFalse(install.optedIn)
+        denied.pause().stop().destroy()
+
+        val controller = Robolectric.buildActivity(UpdateActivity::class.java, direct).setup()
         val activity = shadowOf(controller.get())
-        ShadowAlertDialog.getLatestAlertDialog().getButton(AlertDialog.BUTTON_NEUTRAL).performClick()
         ShadowLooper.idleMainLooper()
         capture("android-update-remote-opt-in")
         assertFalse(install.optedIn)

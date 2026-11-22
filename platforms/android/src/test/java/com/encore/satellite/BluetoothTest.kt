@@ -1,6 +1,7 @@
 package com.encore.satellite
 
 import android.Manifest
+import android.app.Application
 import android.content.Context
 import android.content.pm.PackageManager
 import androidx.compose.runtime.mutableStateOf
@@ -30,9 +31,19 @@ class BluetoothTest {
             true, visible, true, scanning, received, failure)
 
     @Test @Config(sdk = [34]) fun api34SupportsScanOnlyAndRequestsNearbyDevicesAndLocation() {
-        val context = ApplicationProvider.getApplicationContext<Context>()
+        val context = ApplicationProvider.getApplicationContext<Application>()
         shadowOf(context.packageManager).setSystemFeature(PackageManager.FEATURE_BLUETOOTH_LE, true)
-        assertTrue(BluetoothHost(context).permissions().toSet().containsAll(listOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.ACCESS_FINE_LOCATION)))
+        val host = BluetoothHost(context)
+        assertEquals(setOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT,
+            Manifest.permission.ACCESS_COARSE_LOCATION, Manifest.permission.ACCESS_FINE_LOCATION), host.permissions().toSet())
+        val android = shadowOf(context)
+        android.denyPermissions(Manifest.permission.ACCESS_FINE_LOCATION)
+        android.grantPermissions(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.ACCESS_COARSE_LOCATION)
+        host.refresh()
+        assertFalse("Approximate location must not satisfy scan permission", host.state.value.permitted)
+        android.grantPermissions(Manifest.permission.ACCESS_FINE_LOCATION)
+        host.refresh()
+        assertTrue(host.state.value.permitted)
         val tablet = state(sdk = 34, enabled = true, scanning = true, received = 12)
         assertTrue(tablet.supported)
         assertEquals("Receiving advertisements", tablet.status)
@@ -76,11 +87,68 @@ class BluetoothTest {
     }
 
     @OptIn(ExperimentalRoborazziApi::class)
+    @Test @Config(sdk = [34]) fun firstRunDenialDefersWithoutTurningOffAndReentryCanApprove() {
+        val sample = mutableStateOf(BluetoothState.evaluate(34, true, true, false,
+            false, false, true, true, false, 0, "", setupPending = true))
+        var requests = 0
+        val promptBlocked = mutableStateOf(false)
+        var settingsOpened = false
+        var approved = false
+        var deferred = false
+        compose.setContent {
+            BluetoothFirstRun(sample.value, "", onRequest = { requests++ },
+                onPermissionRecovery = if (promptBlocked.value) { { settingsOpened = true } } else null, onRadio = {}, onLocation = {},
+                onApprove = { approved = true }, onBack = { deferred = true },
+                onEnabled = { sample.value = sample.value.copy(enabled = it) })
+        }
+        compose.onNodeWithText("encrypted Home Assistant ESPHome controller", substring = true).assertIsDisplayed()
+        val request = compose.onNodeWithText("Allow Bluetooth and location access")
+        val recovery = compose.onNodeWithText("Open app permissions")
+        recovery.assertDoesNotExist()
+        request.performClick()
+        compose.onNodeWithText("On · Permission needed").assertIsDisplayed()
+        compose.onNodeWithText("Allow scanning").assertDoesNotExist()
+        val directory = File("build/reports/screenshots").also { it.mkdirs() }
+        compose.onAllNodes(isRoot()).onLast().captureRoboImage(File(directory, "android-first-run-bluetooth-denied.png"),
+            RoborazziOptions(taskType = RoborazziTaskType.Record))
+        compose.runOnIdle { promptBlocked.value = true }
+        request.assertDoesNotExist()
+        recovery.assertIsDisplayed().performClick()
+        compose.runOnIdle { assertTrue(settingsOpened) }
+        compose.onAllNodes(isRoot()).onLast().captureRoboImage(File(directory, "android-first-run-bluetooth-settings-fallback.png"),
+            RoborazziOptions(taskType = RoborazziTaskType.Record))
+        compose.onNodeWithText("Not now").performClick()
+        compose.runOnIdle {
+            assertTrue(deferred)
+            assertTrue(sample.value.enabled)
+            assertFalse(approved)
+            sample.value = sample.value.copy(permitted = true)
+        }
+        compose.onNodeWithText("Turn on Bluetooth in Android").assertIsDisplayed()
+        compose.onNodeWithText("Turn on Location services in Android").assertDoesNotExist()
+        compose.runOnIdle { sample.value = sample.value.copy(radioOn = true, status = "Location services needed for beacon coverage") }
+        compose.onNodeWithText("Turn on Bluetooth in Android").assertDoesNotExist()
+        compose.onNodeWithText("Turn on Location services in Android").assertIsDisplayed()
+        compose.onNodeWithText("Allow scanning").assertDoesNotExist()
+        compose.onAllNodes(isRoot()).onLast().captureRoboImage(File(directory, "android-first-run-bluetooth-location-off.png"),
+            RoborazziOptions(taskType = RoborazziTaskType.Record))
+        compose.runOnIdle { sample.value = sample.value.copy(radioOn = true, locationOn = true, status = "Finish Bluetooth setup to start scanning") }
+        compose.onNodeWithText("Allow scanning").assertIsDisplayed()
+        compose.onAllNodes(isRoot()).onLast().captureRoboImage(File(directory, "android-first-run-bluetooth-ready.png"),
+            RoborazziOptions(taskType = RoborazziTaskType.Record))
+        compose.runOnIdle { assertFalse(approved); assertEquals(1, requests) }
+        compose.onNodeWithText("Allow scanning").performClick()
+        compose.runOnIdle { assertTrue(approved) }
+        compose.onNodeWithText("Turn off proxy").performClick()
+        compose.onNodeWithText("Off · Not scanning").assertIsDisplayed()
+    }
+
+    @OptIn(ExperimentalRoborazziApi::class)
     @Test fun renderCapabilitiesAndKeepUnsupportedEnableDisabled() {
         val sample = mutableStateOf(state(sdk = 34))
         var enabled = false
         compose.setContent { BluetoothSettings(sample.value, onEnabled = { enabled = it }, onRetry = {},
-            onPermissions = {}, onRadio = {}, onLocation = {}, onBack = {}) }
+            onRequest = {}, onPermissionRecovery = null, onRadio = {}, onLocation = {}, onBack = {}) }
         val samples = listOf(
             "android-bluetooth-api34" to state(sdk = 34),
             "android-bluetooth-api29" to state(sdk = 29, enabled = true, permission = false),
@@ -95,7 +163,8 @@ class BluetoothTest {
             compose.onNodeWithText(value.status).assertIsDisplayed()
             if (!value.supported) {
                 compose.onNode(isToggleable()).assertIsNotEnabled()
-                compose.onNodeWithText("App permissions").assertDoesNotExist()
+                compose.onNodeWithText("Open app permissions").assertDoesNotExist()
+                compose.onNodeWithText("Allow Bluetooth and location access").assertDoesNotExist()
             }
             compose.waitForIdle()
             val directory = File("build/reports/screenshots").also { it.mkdirs() }
