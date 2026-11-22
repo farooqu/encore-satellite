@@ -399,8 +399,8 @@ func TestPrivacyAndBackendSwitchFenceStaleReader(t *testing.T) {
 	if err := e.Wake(wake.Detection{Word: "another-model"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.StopFor(g); !errors.Is(err, session.ErrStale) || e.Snapshot().Phase != "tentative" {
-		t.Fatal("stale model clear cancelled current turn", err)
+	if retry := e.UpdateWakeModelsWhenIdle(g, func() { t.Error("stale model update ran") }); retry != nil {
+		t.Fatal("stale model update received an idle notification")
 	}
 	if newLink.commands[0].PreRollBytes != 0 || e.Snapshot().Alert || ng == g {
 		t.Fatal("state/audio survived reconnect")

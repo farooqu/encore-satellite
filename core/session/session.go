@@ -89,6 +89,7 @@ type Engine struct {
 	output                          context.Context
 	cancelOutput                    context.CancelCauseFunc
 	localOutput                     context.Context
+	wakeModelWait                   chan struct{}
 	activityHandler                 func(bool)
 	voiceActive                     bool
 }
@@ -160,6 +161,10 @@ func (e *Engine) SetActivityHandler(handler func(bool)) {
 }
 
 func (e *Engine) publishActivity() {
+	if e.wakeModelWait != nil && (e.link == nil || e.wakeModelsIdle()) {
+		close(e.wakeModelWait)
+		e.wakeModelWait = nil
+	}
 	active := e.active || e.outputOpen || e.announcing || e.state.Alert || e.intercom
 	if active != e.voiceActive {
 		e.voiceActive = active
@@ -480,14 +485,28 @@ func (e *Engine) WakeState(generation uint64) (listen, stop bool) {
 	return
 }
 
-// IdleFor permits connection-local configuration storage even while muted.
-// Unlike presentation phase, it includes outstanding output/cancellation owners.
-// It grants no permission to capture or execute wake models.
-func (e *Engine) IdleFor(generation uint64) bool {
+// UpdateWakeModelsWhenIdle swaps connection-local model storage between turns,
+// including while muted. The update runs under the session lock and must not
+// block or call the engine. A busy owner returns a channel to retry on; a stale
+// connection returns nil without running the update.
+func (e *Engine) UpdateWakeModelsWhenIdle(generation uint64, update func()) <-chan struct{} {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return generation == e.generation && e.link != nil && !e.active && !e.outputOpen &&
-		!e.announcing && !e.state.Alert && !e.discard && !e.cancelling
+	if generation != e.generation || e.link == nil {
+		return nil
+	}
+	if e.wakeModelsIdle() {
+		update()
+		return nil
+	}
+	if e.wakeModelWait == nil {
+		e.wakeModelWait = make(chan struct{})
+	}
+	return e.wakeModelWait
+}
+
+func (e *Engine) wakeModelsIdle() bool {
+	return !e.active && !e.outputOpen && !e.announcing && !e.state.Alert && !e.discard && !e.cancelling && !e.intercom && e.state.MonitorID == 0
 }
 
 // WakeFor accepts a model result only for the connection that supplied its
@@ -563,16 +582,6 @@ func (e *Engine) Stop() error {
 	return e.stop()
 }
 
-// StopFor prevents a stale model-control reader from cancelling a newer peer.
-func (e *Engine) StopFor(generation uint64) error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if generation != e.generation || e.link == nil {
-		return ErrStale
-	}
-	return e.stop()
-}
-
 func (e *Engine) stop() error {
 	if e.intercom {
 		if e.state.MonitorID == 0 { // local Stop already notified the peer
@@ -621,7 +630,7 @@ func (e *Engine) stop() error {
 	if e.cancelling {
 		e.finishCancellation()
 	} else if !e.discard {
-		// Idle Stop (including MODEL_CLEAR) has no cancelled owner to await.
+		// Idle Stop has no cancelled owner to await.
 		e.resetOutput()
 	}
 	e.publishActivity()

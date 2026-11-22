@@ -101,6 +101,32 @@ func connect(t *testing.T, address string) net.Conn {
 	t.Cleanup(func() { _ = c.Close() })
 	return c
 }
+
+// Serve can still refuse clients after the engine has detached the old peer.
+func reconnect(t *testing.T, address string) net.Conn {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for {
+		c := connect(t, address)
+		var head [3]byte
+		_ = c.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+		if _, err := io.ReadFull(c, head[:]); err == nil {
+			if head[0] != 0x01 {
+				t.Fatalf("frame = %#x, want HELLO", head[0])
+			}
+			if _, err := io.CopyN(io.Discard, c, int64(binary.BigEndian.Uint16(head[1:]))); err != nil {
+				t.Fatal(err)
+			}
+			return c
+		}
+		_ = c.Close()
+		if time.Now().After(deadline) {
+			t.Fatal("listener did not recover")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 func send(t *testing.T, c net.Conn, kind byte, data []byte) {
 	t.Helper()
 	h := []byte{kind, byte(len(data) >> 8), byte(len(data))}
@@ -520,38 +546,20 @@ func TestNativeCancelFencesLateOutputAndReconnect(t *testing.T) {
 	if _, err := c.Read(b[:]); err != io.EOF {
 		t.Fatal(err)
 	}
-	// The listener may still be finishing the old reader. Wait for its slot
-	// to clear by reconnecting, bounded by a deadline rather than sleeping once.
-	deadline := time.Now().Add(time.Second)
-	for {
-		next := connect(t, address)
-		var head [3]byte
-		_ = next.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
-		if _, err := io.ReadFull(next, head[:]); err == nil && head[0] == 0x01 {
-			body := make([]byte, binary.BigEndian.Uint16(head[1:]))
-			if _, err := io.ReadFull(next, body); err != nil {
-				t.Fatal(err)
-			}
-			if err := e.StartManual(); err != nil {
-				t.Fatal(err)
-			}
-			receive(t, next, 0x02)
-			send(t, next, 0x12, []byte(`{"type":"listening"}`))
-			send(t, next, 0x10, []byte{17, 0, 173, 255})
-			send(t, next, 0x11, nil)
-			receive(t, next, 0x06)
-			p.mu.Lock()
-			got := slices.Clone(p.pcm)
-			p.mu.Unlock()
-			if !slices.Equal(got, []int16{17, -83}) {
-				t.Fatal("fresh native connection lost playback", got)
-			}
-			break
-		}
-		_ = next.Close()
-		if time.Now().After(deadline) {
-			t.Fatal("listener did not recover")
-		}
+	next := reconnect(t, address)
+	if err := e.StartManual(); err != nil {
+		t.Fatal(err)
+	}
+	receive(t, next, 0x02)
+	send(t, next, 0x12, []byte(`{"type":"listening"}`))
+	send(t, next, 0x10, []byte{17, 0, 173, 255})
+	send(t, next, 0x11, nil)
+	receive(t, next, 0x06)
+	p.mu.Lock()
+	got := slices.Clone(p.pcm)
+	p.mu.Unlock()
+	if !slices.Equal(got, []int16{17, -83}) {
+		t.Fatal("fresh native connection lost playback", got)
 	}
 }
 
@@ -719,7 +727,7 @@ func TestStartupModelUploadPreservesIdlePlaybackAndMute(t *testing.T) {
 	}
 }
 
-func TestPushedModelsRejectActiveOwnership(t *testing.T) {
+func TestPushedModelsDeferActiveOwnership(t *testing.T) {
 	blob, err := os.ReadFile("../../core/wake/mixednet/testdata/pooled.mnb")
 	if err != nil {
 		t.Fatal(err)
@@ -735,7 +743,7 @@ func TestPushedModelsRejectActiveOwnership(t *testing.T) {
 				for off := 0; off < len(blob); off += 4096 {
 					send(t, c, 0x21, blob[off:min(off+4096, len(blob))])
 				}
-				// Reject a valid transfer that became busy before END as well
+				// Defer a valid transfer that became busy before END as well
 				// as one that was already busy when START arrived.
 				send(t, c, 0x12, []byte(`{"type":"night","data":{"on":true}}`))
 				deadline := time.Now().Add(time.Second)
@@ -767,8 +775,30 @@ func TestPushedModelsRejectActiveOwnership(t *testing.T) {
 			} else {
 				got = pushModel(t, c, "nabu", blob, nil, "nabu")
 			}
-			if got["ok"] != false || got["models"] != float64(0) {
-				t.Fatal("active owner admitted model upload", got)
+			if got["ok"] != true || got["deferred"] != true || got["models"] != float64(1) || s.ModelCount() != 0 {
+				t.Fatal("upload was not staged behind active owner", got, s.ModelCount())
+			}
+			switch kind {
+			case "call", "call_during_upload":
+				send(t, c, 0x13, []byte(`{"reason":"done","listen":true}`))
+				if got := object(t, receive(t, c, 0x02)); got["wake_word"] != "follow_up" || s.ModelCount() != 0 {
+					t.Fatal("refresh did not wait for follow-up", got, s.ModelCount())
+				}
+				send(t, c, 0x13, []byte(`{"reason":"done"}`))
+			case "hung_up_output":
+				send(t, c, 0x11, nil)
+				receive(t, c, 0x06)
+			case "announcement":
+				send(t, c, 0x12, []byte(`{"type":"announcement","data":{"active":false}}`))
+			case "timer_ringing":
+				send(t, c, 0x12, []byte(`{"type":"timer_stopped"}`))
+			}
+			deadline := time.Now().Add(time.Second)
+			for s.ModelCount() != 1 {
+				if time.Now().After(deadline) {
+					t.Fatal("staged model was not activated at idle without capture", s.Snapshot(true))
+				}
+				time.Sleep(time.Millisecond)
 			}
 		})
 	}
@@ -823,37 +853,135 @@ func TestPushedModelsValidateBeforeAckAndPreserveReplacement(t *testing.T) {
 	}
 	receive(t, c, 0x02)
 	send(t, c, 0x23, nil)
+	if got := pushModel(t, c, "replacement", blob, nil, "replacement"); got["ok"] != true || got["deferred"] != true || got["models"] != float64(1) || s.ModelCount() != 6 {
+		t.Fatal("busy refresh changed the running model set", got, s.ModelCount())
+	}
+	check(pushModel(t, c, "replacement-stop", blob, func(h map[string]any) { h["wake_word"] = "stop" }, "replacement-stop"), true, 2)
+	check(pushModel(t, c, "replacement", []byte("invalid executable"), nil, "replacement"), false, 2)
+
+	// Finish the turn and drain its response on this same connection before
+	// activating the replacement set.
+	send(t, c, 0x12, []byte(`{"type":"listening"}`))
+	send(t, c, 0x10, []byte{17, 0, 173, 255})
+	send(t, c, 0x13, []byte(`{"reason":"done"}`))
+	send(t, c, 0x12, []byte(`{"type":"night","data":{"on":true}}`))
+	deadline := time.Now().Add(time.Second)
+	for s.Snapshot(true).Night != "on" {
+		if time.Now().After(deadline) {
+			t.Fatal("hangup did not arrive")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if s.ModelCount() != 6 {
+		t.Fatal("refresh activated before the output drained")
+	}
+	send(t, c, 0x11, nil)
+	receive(t, c, 0x06)
+	deadline = time.Now().Add(time.Second)
+	for s.ModelCount() != 2 {
+		if time.Now().After(deadline) {
+			t.Fatal("idle did not apply the replacement set")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if err := s.Engine.StartManual(); err != nil {
+		t.Fatal(err)
+	}
+	receive(t, c, 0x02)
+	send(t, c, 0x23, nil)
+	if got := pushModel(t, c, "discard-on-close", blob, nil, "discard-on-close"); got["ok"] != true || got["deferred"] != true {
+		t.Fatal(got)
+	}
+	if err := s.Engine.Stop(); err != nil {
+		t.Fatal(err)
+	}
 	if result := object(t, receive(t, c, 0x04)); result["reason"] != "cancelled" {
-		t.Fatal("model clear did not cancel active voice", result)
+		t.Fatal("deliberate Stop did not cancel active voice", result)
 	}
 	var b [1]byte
 	_ = c.SetReadDeadline(time.Now().Add(time.Second))
 	if _, err := c.Read(b[:]); err != io.EOF {
-		t.Fatal("active model clear did not retire voice connection", err)
+		t.Fatal("deliberate Stop did not retire voice connection", err)
 	}
 	_ = c.Close()
 	// Models are volatile per connection; a new connection starts with no
 	// residents even when the same server and engine survive.
-	deadline := time.Now().Add(time.Second)
-	for {
-		next := connect(t, address)
-		var head [3]byte
-		_ = next.SetReadDeadline(deadline)
-		if _, err := io.ReadFull(next, head[:]); err == nil {
-			body := make([]byte, binary.BigEndian.Uint16(head[1:]))
-			if _, err := io.ReadFull(next, body); err != nil || head[0] != 1 {
-				t.Fatal("invalid reconnect HELLO", err)
-			}
-			if state := s.Snapshot(true); state.WakeModels != 0 || state.WakeArmed || state.WakeReady {
-				t.Fatal("replacement connection inherited model readiness", state)
-			}
-			check(pushModel(t, next, "fresh", blob, nil, "fresh"), true, 1)
-			break
+	next := reconnect(t, address)
+	if state := s.Snapshot(true); s.ModelCount() != 0 || state.WakeModels != 0 || state.WakeArmed || state.WakeReady {
+		t.Fatal("replacement connection inherited model readiness", state)
+	}
+	check(pushModel(t, next, "fresh", blob, nil, "fresh"), true, 1)
+}
+
+func TestModelReloadOnReconnectPreservesLocalAnnouncement(t *testing.T) {
+	blob, err := os.ReadFile("../../core/wake/mixednet/testdata/pooled.mnb")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &speaker{}
+	s, address := startServer(t, p, true)
+	previous := connect(t, address)
+	receive(t, previous, 0x01)
+	if err := previous.Close(); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	for s.Engine.Snapshot().Connected {
+		if ctx.Err() != nil {
+			t.Fatal("previous connection did not detach")
 		}
-		_ = next.Close()
-		if time.Now().After(deadline) {
-			t.Fatal("model worker prevented reconnect")
+		time.Sleep(time.Millisecond)
+	}
+	started, resume := make(chan struct{}), make(chan struct{})
+	finished := make(chan session.AnnouncementResult, 1)
+	go func() {
+		result, _ := s.Engine.Announce(ctx, func(output context.Context, write func([]int16) error) error {
+			if err := write([]int16{17, -83}); err != nil {
+				return err
+			}
+			close(started)
+			select {
+			case <-resume:
+				return write([]int16{-201})
+			case <-output.Done():
+				return output.Err()
+			}
+		})
+		finished <- result
+	}()
+	select {
+	case <-started:
+	case result := <-finished:
+		t.Fatal("announcement did not start", result)
+	case <-ctx.Done():
+		t.Fatal("announcement did not start", ctx.Err())
+	}
+
+	c := reconnect(t, address)
+	send(t, c, 0x23, nil)
+	if ack := pushModel(t, c, "nabu", blob, nil, "nabu"); ack["ok"] != true || ack["deferred"] != true || ack["models"] != float64(1) || s.ModelCount() != 0 {
+		t.Fatal("reconnect could not reload its wake model", ack)
+	}
+	close(resume)
+	select {
+	case result := <-finished:
+		if result.Outcome != "completed" || result.Drain != "ok" || result.AcceptedSamples != 3 {
+			t.Fatal("announcement did not drain both blocks", result)
 		}
+	case <-ctx.Done():
+		t.Fatal("announcement did not finish", ctx.Err())
+	}
+	for s.ModelCount() != 1 {
+		if ctx.Err() != nil {
+			t.Fatal("staged model did not activate after the announcement")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !slices.Equal(p.pcm, []int16{17, -83, -201}) {
+		t.Fatal("reconnect changed announcement audio", p.pcm)
 	}
 }
 
@@ -922,7 +1050,8 @@ func TestPushedModelRunsPCMAndStopCancelsInsteadOfCalling(t *testing.T) {
 		t.Fatal(call)
 	}
 	// Flush all pre-roll and live samples before checking Stop's notification.
-	// The reader barrier makes timer arming observable without private hooks.
+	// The timer event is also a reader barrier after the deferred clear.
+	send(t, c, 0x23, nil)
 	send(t, c, 0x12, []byte(`{"type":"timer_ringing"}`))
 	deadline := time.Now().Add(time.Second)
 	for !s.Engine.Snapshot().Alert {
@@ -930,6 +1059,9 @@ func TestPushedModelRunsPCMAndStopCancelsInsteadOfCalling(t *testing.T) {
 			t.Fatal("timer did not arm")
 		}
 		time.Sleep(time.Millisecond)
+	}
+	if s.ModelCount() != 2 {
+		t.Fatal("refresh removed the spoken Stop model during the call")
 	}
 	feed(false, 100)
 	feed(true, 5)
