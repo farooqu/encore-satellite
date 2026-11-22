@@ -175,11 +175,7 @@ async def main():
             entries = await ha.command("config_entries/get")
             entry = next(e for e in entries if e["domain"] == "esphome" and e["title"] == "Encore virtual satellite")
             entities = [e for e in await ha.command("config/entity_registry/list") if e["config_entry_id"] == entry["entry_id"]]
-            selector = next(e["entity_id"] for e in entities if e["original_name"] == "Voice mode (restart required)")
-            apply = next(e["entity_id"] for e in entities if e["original_name"] == "Apply and restart")
-            running = next(e["entity_id"] for e in entities if e["original_name"] == "Running voice mode")
             bluetooth = next(e["entity_id"] for e in entities if e["original_name"] == "Bluetooth proxy")
-            common = [e for e in entities if e["entity_id"] in {selector, apply, running, bluetooth}]
             ble_ws = await http.ws_connect("http://127.0.0.1:8123/api/websocket")
             await ble_ws.receive_json()
             await ble_ws.send_json({"type": "auth", "access_token": ha.token})
@@ -211,49 +207,12 @@ async def main():
 
             await ble_alive()
 
-            async def activate(mode):
-                label = "Home Assistant Assist" if mode == "assist" else "Voice Incubator"
-                before = await state()
-                await ha.api("POST", "/api/services/select/select_option", {"entity_id": selector, "option": label})
-
-                async def saved():
-                    s = await state()
-                    return s if s["mode"]["configured"] == mode else None
-
-                pending = await until(saved, "HA saved mode selection")
-                assert pending["started_at"] == before["started_at"]
-                assert pending["mode"]["running"] == before["mode"]["running"]
-                assert pending["ble"] == before["ble"]
-                await ble_alive(before["ble"])
-                await ha.api("POST", "/api/services/button/press", {"entity_id": apply})
-
-                async def applied():
-                    try:
-                        s = await state()
-                    except aiohttp.ClientError:
-                        return None
-                    if s["mode"]["running"] != mode:
-                        return None
-                    assert s["ble"]["enabled"] == before["ble"]["enabled"]
-                    if before["mode"]["running"] != mode:
-                        assert s["started_at"] != before["started_at"]
-                    reported = await ha.api("GET", "/api/states/" + running)
-                    return s if reported["state"] == label else None
-
-                result = await until(applied, "HA Apply and running-mode diagnostic")
-                await ble_alive()
-                restored = await ha.command("config/entity_registry/list")
-                for old in common:
-                    new = next(e for e in restored if e["entity_id"] == old["entity_id"])
-                    assert (new["id"], new["device_id"], new["unique_id"]) == (old["id"], old["device_id"], old["unique_id"])
-                return result
-
             await command("mute", value=False)
-            await activate("incubator")
             await zc.async_register_service(info)
             await until(connected, "real upstream native handshake")
             hello = json.loads(wire.bodies("encore", 1)[-1])
             assert hello["protocol"] == 2 and hello["mac"] == "02:00:00:ec:00:01"
+            assert hello["preroll_ms"] == 1500
             assert not hello["aec"] and "wake_format" not in hello
             await request("PUT", APP + "/api/settings", {"keep_audio": True, "sounds": False})
             await request("PUT", APP + "/api/commands/encore_lamp", {"spec": {
@@ -304,7 +263,6 @@ async def main():
             native_entities = [e["entity_id"] for e in entities if e.get("device_id") == link["device_id"]]
             assert native_entities == [link["timer_list"]], native_entities
             assert not any(e.startswith("assist_satellite.") for e in native_entities)
-            timer_before = await ha.api("GET", "/api/states/" + link["timer_list"])
 
             # A short held reply distinguishes receipt from actual consumption.
             before = (await state())["playback"]
@@ -416,21 +374,6 @@ async def main():
             assert (await ha.api("GET", "/api/states/input_boolean.encore_lamp"))["state"] == "on"
             print("PASS real Kaldi rejection → quiet idle → immediate successful next turn, same native transport", flush=True)
 
-            # Selection applies only after the host replaces the runtime.
-            await activate("assist")
-            async def native_offline():
-                satellites = (await request("GET", APP + "/api/satellites"))["satellites"]
-                return any(s["key"] == KEY and not s["connected"] for s in satellites)
-            await until(native_offline, "Incubator notices switched-away transport")
-            timer_after = await ha.api("GET", "/api/states/" + link["timer_list"])
-            assert timer_after["state"] == timer_before["state"] != "unavailable"
-            assert next(s for s in (await ha.command("voice_incubator/satellites/list"))["satellites"]
-                        if s["id"] == KEY)["device_id"] == link["device_id"]
-            await activate("incubator")
-            await until(connected, "real app reconnect after selection", seconds=90)
-            await until(idle, "idle after selection")
-            print("PASS HA saved selector/apply both directions: stable common entities, BLE retained/recovered, real native reconnect; persistent timer is not voice availability", flush=True)
-
             wire.frames.clear()
             await start()
             await send(bytes(6400) + (FIXTURES / "unknown.pcm").read_bytes() + bytes(64000))
@@ -447,17 +390,20 @@ async def main():
                 async def peer_connected():
                     return candidate.writer is not None
                 await until(peer_connected, "real app discovers second satellite fixture")
+                # Fill the ring so prior turns cannot change Encore's clarity
+                # score and override the probability tie-break.
+                election_pre = bytes(48000 - len(pre)) + pre
                 for probability, winner in ((241, "fixture"), (17, "encore")):
                     wire.frames.clear()
                     candidate.frames.clear()
-                    await candidate.frame(2, {"wake_word": "okay_nabu", "preroll_bytes": 32000,
+                    await candidate.frame(2, {"wake_word": "okay_nabu", "preroll_bytes": len(election_pre),
                                               "probability": probability, "max_probability": 249,
                                               "cutoff": 51})
-                    await start()
+                    await start(election_pre)
                     # Both calls exist before either verifier can choose; the
                     # identical PCM makes probability the upstream tie-break.
-                    for offset in range(0, len(pre + audio), 2048):
-                        await candidate.frame(3, (pre + audio)[offset:offset + 2048])
+                    for offset in range(0, len(election_pre + audio), 2048):
+                        await candidate.frame(3, (election_pre + audio)[offset:offset + 2048])
                     await send(audio)
                     await until(idle, "real upstream arbitration finishes Encore candidate", seconds=90)
                     async def peer_hangup():

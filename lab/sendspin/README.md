@@ -1,7 +1,7 @@
 # Sendspin playback and voice-ducking lab
 
 Real Music Assistant queues audio through the official C++ Sendspin client into
-Encore's clocked **virtual** mixer. Real Assist and native Incubator voice turns
+Encore's clocked **virtual** mixer. Native Voice Incubator turns
 drive local music ducking. This is Linux x86-64 integration tooling, not Echo or
 Android music support, physical speaker playback, or acoustic synchronization.
 
@@ -24,15 +24,15 @@ amp orb service start incubator --command '.amp/in/orb-backup/voice-incubator/.v
 amp orb service stop encore
 amp orb service start sendspin-satellite --command 'ENCORE_SENDSPIN_LAB_CLIENT="$PWD/.amp/in/orb-backup/sendspin-receiver-build/encore-sendspin" go run -race ./cmd/encore-lab' --port 8099
 lab/.venv/bin/python lab/sendspin/test.py
+amp orb service stop sendspin-satellite  # Free ports 6053 and 6055 for the Go tests.
 make check
 ```
 
 For an already defined service use `amp orb service restart <name>`. Wait for HA
 and Incubator startup before the test. Only one suite may own the voice backend
 at a time. Do not run `amp orb services ensure` while `sendspin-satellite` owns
-8099: the declared default `encore` service uses the same port. The existing
-`lab/test_assist.py` also restarts `encore`; stop `sendspin-satellite` before
-running that standalone regression suite.
+8099: the declared default `encore` service uses the same port. Do not run
+`make lab-test` concurrently; both suites use the same native voice fixture.
 
 No Sendspin endpoints exist without `ENCORE_SENDSPIN_LAB_CLIENT`. Even with this
 host opt-in, the independent persisted switch defaults to **off**. Private
@@ -60,8 +60,7 @@ pairing policy or suitable for an untrusted network.
   voice route. It records mixed PCM but sends nothing to an audio device. Voice
   resampling is deliberately sample repetition ×3 and stereo duplication, with
   saturating addition; it is not a production-quality resampler/mixer.
-- Assist uses real HA/Noise/Assist/intent handling with the existing synthetic
-  capture and deterministic STT/TTS fixture. Incubator uses actual mDNS discovery,
+- Incubator uses actual mDNS discovery,
   Kaldi wake verification, CTC/TDT recognition, HA intents and Piper with synthetic
   spoken capture. Wake detections are injected at the host boundary, not detected
   acoustically from music.
@@ -76,7 +75,7 @@ silent input and checks concurrent voice samples during response playback.
 - Music gain is current user gain × **0.2 while voice is active** (about −14 dB),
   with a bounded 20 ms linear ramp. Privacy, user mute, Stop and feature-off
   override that gain immediately. Voice samples retain their separate gain.
-- Listening, processing, held response, concurrent response, physical virtual
+- Listening, held response, concurrent response, virtual speaker
   drain and Incubator follow-up are exercised. A user-volume change from 100%
   to 35% produces gain 0.07 during voice and restores 0.35, not the old 1.0.
 - MA mute survives volume changes. Stop/privacy latch local music silent;
@@ -84,14 +83,14 @@ silent input and checks concurrent voice samples during response playback.
 - Disabling invalidates PCM generations before killing the receiver. Old PCM is
   rejected both while off and after re-enabling. MA may send a **fresh** stream
   when the receiver rejoins a still-playing queue; that is not cached replay.
-- Backend switching cancels old voice without pausing the MA queue. A real timer
-  ducks music. Disabling Sendspin during listening still lets Assist consume
-  capture, execute the HA intent and drain all 16,000 fixture response samples.
+- Native turns do not pause the MA queue. A real timer ducks music. Disabling
+  Sendspin during listening still lets Incubator execute the HA intent and drain
+  the complete Piper response.
 - After timer Stop and upstream `timer_stopped`, the next real wake, HA intent
   and Piper response complete on the same native connection. Explicit music
   play releases Stop's silence latch; that next voice turn ducks/restores music.
 
-The test writes `measurements.json`, `assist-ducking.wav` and
+The test writes `measurements.json` and
 `incubator-ducking.wav` under `.amp/in/orb-backup/sendspin-proof` by default;
 `--output` selects another directory. Captures are limited to 60 seconds per
 recording. Final cleanup stops the MA queue and leaves Sendspin disabled. Voice,
@@ -128,7 +127,7 @@ encrypted common-control entity or Android setting.
   announcement. Regression checks keep late PCM fenced, preserve repeated Stop,
   and reject an old timer acknowledgement as a cancelled voice call's completion.
   Both this lab and the standalone native suite test a real next voice turn on
-  the same connection instead of relying on cleanup's backend switch to recover.
+  the same connection.
 
 No target builds, physical Echo/Android audio, wake reliability over music,
 AEC/render-reference correctness, music-quality resampling, two-player timing,

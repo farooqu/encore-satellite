@@ -1,4 +1,4 @@
-.PHONY: check test boundaries lab-up lab-provision lab-test lab-test-modes biscuit-build biscuit-check biscuit-base biscuit-package biscuit-kernel
+.PHONY: check test boundaries lab-up lab-provision lab-test biscuit-build biscuit-check biscuit-base biscuit-package biscuit-kernel
 
 BISCUIT_KERNEL_ROOT ?= build/biscuit/kernel
 BISCUIT_KERNEL_JOBS ?= 2
@@ -20,10 +20,7 @@ lab-provision:
 	lab/.venv/bin/python lab/provision.py
 
 lab-test:
-	lab/.venv/bin/python lab/test_assist.py
-
-lab-test-modes:
-	lab/.venv/bin/python lab/test_modes.py
+	.amp/in/orb-backup/voice-incubator/.venv/bin/python lab/incubator/test_native.py
 
 # Local development builds, not release publication or hardware qualification.
 biscuit-build:

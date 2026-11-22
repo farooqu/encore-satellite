@@ -107,6 +107,23 @@ func TestGuardCountsFeaturesAndOnlyFreshStridesDetect(t *testing.T) {
 	}
 }
 
+func TestMonitorScoreMaximaDoNotResetSlidingWindow(t *testing.T) {
+	d := newTestDetector(t, 1, 2, 1)
+	var frame [40]int8
+	frame[0] = 127
+	d.feedFeature(frame[:]) // inference 255, window [0, 255]
+	frame[0] = 126
+	d.feedFeature(frame[:]) // inference 254, window [255, 254]
+	if peak, window := d.TakeReport(); peak != 255 || window != 254 {
+		t.Fatalf("report peak/window = %d/%d, want 255/254", peak, window)
+	}
+	frame[0] = -128
+	d.feedFeature(frame[:]) // inference 0, window [254, 0]
+	if peak, window := d.TakeReport(); peak != 0 || window != 127 {
+		t.Fatalf("next report peak/window = %d/%d, want 0/127", peak, window)
+	}
+}
+
 func TestCutoffEndpointsMatchFirmware(t *testing.T) {
 	for _, cutoff := range []float64{0, 1} {
 		d := newTestDetector(t, 1, 1, cutoff)

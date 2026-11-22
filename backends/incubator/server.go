@@ -28,8 +28,11 @@ type Server struct {
 	// CallAEC requires the host's Capture stream to come from its AEC path.
 	// Both call routes use those same samples.
 	CallAEC bool
-	// MonitorAEC requires CallAEC and a host that confirms the local recording
-	// indicator via Engine.ConfirmMonitor. It sends no unprocessed mic stream.
+	// Monitor enables primary Live Monitor. Hosts must confirm the local
+	// recording indicator via Engine.ConfirmMonitor before any capture is sent.
+	Monitor bool
+	// MonitorAEC adds the AEC monitor route and intercom and requires CallAEC.
+	// Like Monitor, it requires a host that confirms the recording indicator.
 	MonitorAEC bool
 	captureMu  sync.RWMutex
 	models     *modelSession
@@ -41,8 +44,6 @@ type link struct {
 	revoked   uint64
 	writing   bool
 }
-
-func (*link) Backend() session.Backend { return session.Incubator }
 
 func (l *link) Send(c session.Command) error {
 	if c.Kind != "monitor_off" {
@@ -66,12 +67,12 @@ func (l *link) Send(c session.Command) error {
 func (s *Server) Capture(frame audio.Frame) error {
 	s.captureMu.RLock()
 	defer s.captureMu.RUnlock()
-	modelInput, err := s.Engine.CaptureForModels(frame)
+	modelInput, monitorID, err := s.Engine.CaptureForModels(frame)
 	if err != nil {
 		return err
 	}
 	if modelInput && s.models != nil {
-		s.models.feed(frame)
+		s.models.feed(frame, monitorID)
 	}
 	return nil
 }
@@ -181,12 +182,13 @@ func (s *Server) serveConn(ctx context.Context, conn net.Conn) error {
 		}
 		return write(kind, b)
 	}
-	monitor := s.CallAEC && s.MonitorAEC
+	monitorAEC := s.CallAEC && s.MonitorAEC
+	monitor := s.Monitor || monitorAEC
 	hello := map[string]any{
 		"protocol": 2, "name": s.Name, "mac": s.MAC, "model": "encore-core", "firmware": s.Version,
 		"sample_rate": 16000, "channels": 1, "bits_per_sample": 16,
 		"preroll_ms": audio.PreRollSamples * 1000 / audio.SampleRate,
-		"listen":     true, "aec": s.CallAEC, "monitor": monitor, "monitor_aec": monitor, "intercom": monitor,
+		"listen":     true, "aec": s.CallAEC, "monitor": monitor, "monitor_aec": monitorAEC, "intercom": monitorAEC,
 	}
 	if monitor {
 		hello["monitor_result"] = true
@@ -206,7 +208,24 @@ func (s *Server) serveConn(ctx context.Context, conn net.Conn) error {
 	go func() {
 		defer close(done)
 		_ = l.Run(func(c session.Command) error {
+			if c.Kind == "monitor_audio" || c.Kind == "wake_report" {
+				defer clear(c.Samples)
+				l.monitorMu.Lock()
+				if c.MonitorID <= l.revoked {
+					l.monitorMu.Unlock()
+					return nil
+				}
+				l.writing = true
+				l.monitorMu.Unlock()
+				defer func() {
+					l.monitorMu.Lock()
+					l.writing = false
+					l.monitorMu.Unlock()
+				}()
+			}
 			switch c.Kind {
+			case "wake_report":
+				return send(0x0B, c.WakeReport)
 			case "start":
 				aecPreRoll := 0
 				if s.CallAEC {
@@ -219,22 +238,11 @@ func (s *Server) serveConn(ctx context.Context, conn net.Conn) error {
 					binary.LittleEndian.PutUint16(b[i*2:], uint16(v))
 				}
 				if c.Kind == "monitor_audio" {
-					defer clear(c.Samples)
 					defer clear(b)
-					l.monitorMu.Lock()
-					if c.MonitorID <= l.revoked {
-						l.monitorMu.Unlock()
-						return nil
-					}
-					l.writing = true
-					l.monitorMu.Unlock()
-					defer func() {
-						l.monitorMu.Lock()
-						l.writing = false
-						l.monitorMu.Unlock()
-					}()
-					if err := write(0x0C, b); err != nil {
-						return err
+					if monitorAEC && !c.Intercom {
+						if err := write(0x0C, b); err != nil {
+							return err
+						}
 					}
 					return write(0x0A, b)
 				}
@@ -253,8 +261,6 @@ func (s *Server) serveConn(ctx context.Context, conn net.Conn) error {
 					return err
 				}
 				return io.EOF
-			case "end":
-				return send(0x04, map[string]string{"reason": c.Reason})
 			case "drained":
 				return send(0x06, map[string]any{})
 			case "announcing", "announced", "intercom_end":
@@ -389,6 +395,12 @@ func (s *Server) serveConn(ctx context.Context, conn net.Conn) error {
 				}
 				if err = json.Unmarshal(data, &request); err != nil {
 					return err
+				}
+				if request.Active && request.Intercom && !monitorAEC {
+					if request.RequestID != 0 {
+						err = l.Send(session.Command{Kind: "monitor_result", RequestID: request.RequestID})
+					}
+					break
 				}
 				var id uint64
 				id, err = s.Engine.SetMonitor(generation, request.Active, request.Intercom, request.RequestID)

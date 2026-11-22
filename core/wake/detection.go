@@ -19,3 +19,16 @@ func (d Detection) Validate() error {
 	}
 	return nil
 }
+
+// Report is the protocol-2 Live Monitor score and detection summary.
+type Report struct {
+	Models   []ModelScore `json:"models"`
+	Detected []string     `json:"detected"`
+}
+
+type ModelScore struct {
+	ID     string `json:"id"`
+	Cutoff uint8  `json:"cutoff"`
+	Peak   uint8  `json:"peak"`
+	Window uint8  `json:"window"`
+}

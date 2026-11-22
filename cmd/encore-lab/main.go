@@ -19,7 +19,6 @@ import (
 	esphome "github.com/ygelfand/go-esphome-device"
 	"github.com/ygelfand/go-esphome-device/mdns"
 
-	"github.com/farooqu/encore-satellite/backends/assist"
 	"github.com/farooqu/encore-satellite/backends/bluetooth"
 	"github.com/farooqu/encore-satellite/backends/incubator"
 	"github.com/farooqu/encore-satellite/core/audio"
@@ -30,8 +29,6 @@ import (
 
 const name = "encore-lab"
 const mac = "02:00:00:ec:00:01" // Locally administered virtual identity, not a hardware MAC.
-
-var errRestart = errors.New("apply saved voice mode")
 
 func main() {
 	if err := run(); err != nil {
@@ -75,8 +72,6 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	// Music belongs to the process, not the replaceable voice runtime. Keep
-	// its receiver, stream generation and controls across lab mode Apply.
 	var music *lab.Music
 	var musicControls *http.ServeMux
 	if binary := os.Getenv("ENCORE_SENDSPIN_LAB_CLIENT"); binary != "" {
@@ -91,20 +86,12 @@ func run() error {
 			return err
 		}
 	}
-	for ctx.Err() == nil {
-		if err := serve(ctx, key, settings, music, musicControls); !errors.Is(err, errRestart) {
-			return err
-		}
-	}
-	return nil
+	return serve(ctx, key, settings, music, musicControls)
 }
 
-// serve owns one complete runtime. Apply tears it down before constructing its
-// replacement; ordinary setting changes and microphone mute do not restart BLE.
 func serve(parent context.Context, key esphome.PSK, settings *settings, music *lab.Music, musicControls *http.ServeMux) error {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
-	started := time.Now().UTC()
 	initial := settings.snapshot()
 	player := lab.NewSpeaker(ctx)
 	engine := session.New(player)
@@ -112,50 +99,22 @@ func serve(parent context.Context, key esphome.PSK, settings *settings, music *l
 		player.AttachMusic(music)
 		engine.SetActivityHandler(music.SetVoiceActive)
 	}
-	if err := engine.Select(initial.VoiceMode); err != nil {
-		return err
-	}
 	engine.SetMuted(initial.Muted)
-	restart := make(chan struct{}, 1)
-	requestRestart := func() {
-		if settings.snapshot().VoiceMode != initial.VoiceMode {
-			select {
-			case restart <- struct{}{}:
-			default:
-			}
-		}
-	}
 	radio := &lab.VirtualRadio{}
 	proxy := bluetooth.New(radio, bluetooth.Options{Enabled: initial.BluetoothProxy, SaveEnabled: func(on bool) error {
 		return settings.update(func(c *configuration) { c.BluetoothProxy = on })
 	}})
-	control := &voiceControls{RunningMode: initial.VoiceMode,
-		Mode: func() session.Backend { return settings.snapshot().VoiceMode },
-		SaveMode: func(mode session.Backend) error {
-			return settings.update(func(c *configuration) { c.VoiceMode = mode })
-		}, Restart: requestRestart, Bluetooth: proxy}
-	var traceMu sync.Mutex
-	traces := make([]map[string]any, 0)
-	trace := func(kind string, data map[string]string) {
-		traceMu.Lock()
-		defer traceMu.Unlock()
-		traces = append(traces, map[string]any{"time": time.Now().UTC(), "kind": kind, "data": data})
-		if len(traces) > 512 {
-			traces = traces[len(traces)-512:]
-		}
-	}
 	errCh := make(chan error, 3)
 	var workers sync.WaitGroup
-	// Wait for listeners, connections and the radio worker to finish before
-	// a replacement runtime can reuse their ports or controller.
+	// Wait for listeners, connections and the radio worker to stop.
 	defer workers.Wait()
 	defer cancel()
-	assistListener, err := net.Listen("tcp", ":6053")
+	management, err := net.Listen("tcp", ":6053")
 	if err != nil {
 		return err
 	}
-	assistListener = newManagementListener(ctx, assistListener)
-	defer assistListener.Close()
+	management = newManagementListener(ctx, management)
+	defer management.Close()
 	advert, err := mdns.Advertise(mdns.Config{Name: name, FriendlyName: "Encore virtual satellite", Port: 6053, MACAddress: mac, Version: "2026.10.1", Platform: "encore", Board: "virtual", Encrypted: true})
 	if err != nil {
 		return err
@@ -165,34 +124,26 @@ func serve(parent context.Context, key esphome.PSK, settings *settings, music *l
 	workers.Add(1)
 	go func() {
 		defer workers.Done()
-		if initial.VoiceMode == session.Assist {
-			s := assist.Server{Engine: engine, Trace: trace, Controls: control}
-			errCh <- s.Serve(ctx, assistListener, info, key)
-		} else {
-			errCh <- control.Serve(ctx, assistListener, info, key)
-		}
+		errCh <- proxy.Serve(ctx, management, info, key)
 	}()
 	var backendError string
-	if initial.VoiceMode == session.Incubator {
-		incubatorListener, err := net.Listen("tcp", "127.0.0.1:6055")
-		if err != nil {
-			// Voice startup failure must not remove BLE or the way back to
-			// Assist. Keep management alive without silently falling back.
-			backendError = err.Error()
-			trace("backend_unavailable", map[string]string{"error": backendError})
-		} else {
-			defer incubatorListener.Close()
-			workers.Add(1)
-			go func() {
-				defer workers.Done()
-				s := incubator.Server{Engine: engine, Name: name, MAC: mac, Version: "0.1.0-dev.0"}
-				errCh <- s.Serve(ctx, incubatorListener)
-			}()
-		}
+	incubatorListener, voiceErr := net.Listen("tcp", "127.0.0.1:6055")
+	if voiceErr != nil {
+		// Voice startup failure must not remove encrypted management or BLE.
+		backendError = voiceErr.Error()
+		log.Printf("Incubator unavailable: %v", voiceErr)
+	} else {
+		defer incubatorListener.Close()
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			s := incubator.Server{Engine: engine, Name: name, MAC: mac, Version: "0.1.0-dev.0"}
+			errCh <- s.Serve(ctx, incubatorListener)
+		}()
 	}
 
 	// Admission, mutations and retirement share one fence. Never hold it
-	// during body reads: an incomplete command must not prevent Apply.
+	// during body reads: an incomplete command must not block shutdown.
 	var commandMu sync.Mutex
 	var retiring bool
 	var handlers sync.WaitGroup
@@ -212,22 +163,15 @@ func serve(parent context.Context, key esphome.PSK, settings *settings, music *l
 	}
 	mux.HandleFunc("GET /state", func(w http.ResponseWriter, r *http.Request) {
 		configured := settings.snapshot()
-		respond(w, map[string]any{"session": engine.Snapshot(), "playback": player.Snapshot(), "started_at": started,
-			"mode": map[string]any{"configured": configured.VoiceMode, "running": initial.VoiceMode, "restart_required": configured.VoiceMode != initial.VoiceMode, "backend_error": backendError},
-			"ble":  map[string]any{"enabled": configured.BluetoothProxy, "starts": radio.Starts.Load(), "stops": radio.Stops.Load()}})
-	})
-	mux.HandleFunc("GET /trace", func(w http.ResponseWriter, r *http.Request) {
-		traceMu.Lock()
-		defer traceMu.Unlock()
-		respond(w, traces)
+		respond(w, map[string]any{"session": engine.Snapshot(), "playback": player.Snapshot(), "backend_error": backendError,
+			"ble": map[string]any{"enabled": configured.BluetoothProxy, "starts": radio.Starts.Load(), "stops": radio.Stops.Load()}})
 	})
 	mux.HandleFunc("POST /command", func(w http.ResponseWriter, r *http.Request) {
 		var c struct {
-			Type      string          `json:"type"`
-			Value     bool            `json:"value"`
-			Backend   session.Backend `json:"backend"`
-			Samples   []int16         `json:"samples"`
-			Detection wake.Detection  `json:"detection"`
+			Type      string         `json:"type"`
+			Value     bool           `json:"value"`
+			Samples   []int16        `json:"samples"`
+			Detection wake.Detection `json:"detection"`
 		}
 		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16384))
 		decoder.DisallowUnknownFields()
@@ -236,8 +180,7 @@ func serve(parent context.Context, key esphome.PSK, settings *settings, music *l
 			return
 		}
 		commandMu.Lock()
-		// Decode can finish after Apply or a client cancellation. No old
-		// command may touch the retired engine or host-owned settings.
+		// Decode can finish after shutdown or a client cancellation.
 		if retiring || ctx.Err() != nil || r.Context().Err() != nil {
 			commandMu.Unlock()
 			http.Error(w, "runtime is shutting down", http.StatusServiceUnavailable)
@@ -249,8 +192,6 @@ func serve(parent context.Context, key esphome.PSK, settings *settings, music *l
 			err = engine.StartManual()
 		case "wake":
 			err = engine.Wake(c.Detection)
-		case "end":
-			err = engine.FinishInput()
 		case "stop":
 			if music != nil {
 				music.Stop()
@@ -270,10 +211,6 @@ func serve(parent context.Context, key esphome.PSK, settings *settings, music *l
 				}
 				engine.SetMuted(false)
 			}
-		case "mode":
-			err = control.SaveMode(c.Backend)
-		case "restart":
-			requestRestart()
 		case "hold_playback":
 			player.Hold(c.Value)
 		case "capture":
@@ -308,11 +245,9 @@ func serve(parent context.Context, key esphome.PSK, settings *settings, music *l
 		})}
 	workers.Add(1)
 	go func() { defer workers.Done(); errCh <- httpServer.ListenAndServe() }()
-	log.Printf("Virtual satellite ready; mode=%s; controls loopback-only", initial.VoiceMode)
+	log.Print("Virtual Incubator satellite ready; fixture controls loopback-only")
 	select {
 	case <-ctx.Done():
-	case <-restart:
-		err = errRestart
 	case err = <-errCh:
 	}
 	commandMu.Lock()

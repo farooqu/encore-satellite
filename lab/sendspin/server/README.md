@@ -216,5 +216,5 @@ WebSocket-style `result` envelope.
 
 These are server-only checks. The combined [Sendspin lab](../README.md) also
 exercises real C++ receiver registration, encrypted guest playback and voice
-ducking with Assist and Incubator. No explicit-consent pairing claim follows
+ducking with Incubator. No explicit-consent pairing claim follows
 from automatic guest approval. No production services or credentials were used.

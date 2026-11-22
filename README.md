@@ -5,26 +5,8 @@
 Encore Satellite aims to turn existing speakers and displays into satellites
 that expose their useful hardware to Home Assistant and provide voice input and
 output for [Voice Incubator](https://github.com/OHF-Voice/voice-incubator).
-[Home Assistant Assist](https://www.home-assistant.io/voice_control/) remains a
-possible later option through separate device packages.
 
 I'm building it for my own home and sharing it in case it's useful to yours.
-
-**Voice Incubator is my focus for now.** It's the setup I'd prefer to use at
-home, so I'm concentrating on getting that working on real devices first. The
-Assist code will stay in the repo, but further Assist development and device
-packages are deferred for now. **The default Encore package will use Incubator.**
-If a package for the **Home Assistant Assist pipeline** is offered later, it will
-be a separate opt-in package rather than another default.
-
-I'm keeping the Assist code so I can reevaluate it from time to time as Incubator
-features reach the Home Assistant Assist pipeline. Before I'd move over, I'd want the behaviors
-I value: wake-word detection and verification, identifying who's speaking,
-stopping a response when someone says "stop", and keeping the microphone listening
-throughout an active conversation so it can catch interruptions and follow-ups
-without another wake word. That listening must still respect mute and privacy
-controls. These are my evaluation criteria, not features already proven on Encore
-hardware or a claim about what Assist currently lacks.
 
 ## Why Encore?
 
@@ -55,11 +37,13 @@ That's a choice for my home, not a judgment on projects with different goals.
 
 ## With or without a screen
 
-The goal is a voice experience like
-[Home Assistant Voice Preview Edition](https://www.home-assistant.io/voice-pe/)
-on more hardware. On displays, that also means your Home Assistant dashboard
-with a small conversation overlay. Timers, alarms, and household automations
-stay with Home Assistant or Voice Incubator.
+The goal is to bring the voice experience of Home Assistant Voice Preview
+Edition running [OHF Voice Incubator firmware](https://github.com/OHF-Voice/firmware-voice-incubator)
+to more hardware. When Encore differs from that reference, it should be a
+[documented decision that solves a concrete problem](AGENTS.md#voice-incubator-session-parity),
+not an accident. On displays, the goal also includes your Home Assistant
+dashboard with a small conversation overlay. Timers, alarms, and household
+automations stay with Home Assistant or Voice Incubator.
 
 **Early implementation has started; no device is release-supported.** An
 [Incubator-only Android development APK](devices/android-generic/README.md)
@@ -84,18 +68,12 @@ The shared Go protocol core has a
 [reproducible Home Assistant lab](lab/README.md) pinned to a 2026.12 development
 build. [Native Incubator](docs/incubator-validation.md) is tested with its real
 upstream wake verification, recognition, HA actions and speech output.
-[Experimental Assist wake verification](docs/assist-wake-validation.md) is an
-explicit opt-in. Capture and playback are virtual; these are protocol checks,
-not hardware or acoustic-quality results. The lab includes a test-only Assist/native
-Incubator selector applied after restart, with independent BLE controls. Production
-packages must link one voice backend: Incubator by default, with a possible
-separate Home Assistant Assist pipeline package later. Changing backend requires
-application-package replacement, not a runtime switch. See the
-[foundation scope](docs/foundation.md) for what works and what remains.
-Android starts with Incubator and shared dashboard controls.
-Dot packages contain only native Incubator. The encrypted common-control endpoint
-handles the optional Bluetooth proxy independently of voice. The current ARM64
-starter does not ship the experimental Sendspin companion.
+Capture and playback are virtual; these are protocol checks, not hardware or
+acoustic-quality results. Voice Incubator is the only voice backend in the lab
+and in device packages. Android also includes dashboard controls. The encrypted
+ESPHome common-control endpoint handles the optional Bluetooth proxy
+independently of voice. The current ARM64 starter does not ship the experimental
+Sendspin companion.
 
 ## Devices
 

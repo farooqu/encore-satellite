@@ -3,18 +3,14 @@ package main
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
-
-	"github.com/farooqu/encore-satellite/core/session"
 )
 
 type configuration struct {
-	VoiceMode      session.Backend `json:"voice_mode"`
-	BluetoothProxy bool            `json:"bluetooth_proxy"`
-	Muted          bool            `json:"muted"`
+	BluetoothProxy bool `json:"bluetooth_proxy"`
+	Muted          bool `json:"muted"`
 }
 
 // settings belongs to the virtual host, not the session engine or device package
@@ -27,7 +23,7 @@ type settings struct {
 }
 
 func loadSettings(path string) (*settings, error) {
-	s := &settings{path: path, data: configuration{VoiceMode: session.Assist}}
+	s := &settings{path: path}
 	b, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return s, nil
@@ -37,9 +33,6 @@ func loadSettings(path string) (*settings, error) {
 	}
 	if err := json.Unmarshal(b, &s.data); err != nil {
 		return nil, err
-	}
-	if s.data.VoiceMode != session.Assist && s.data.VoiceMode != session.Incubator {
-		return nil, fmt.Errorf("invalid saved voice mode %q", s.data.VoiceMode)
 	}
 	s.muted = s.data.Muted
 	return s, nil
@@ -76,9 +69,6 @@ func (s *settings) save(change func(*configuration)) error {
 	next := s.data
 	next.Muted = s.muted
 	change(&next)
-	if next.VoiceMode != session.Assist && next.VoiceMode != session.Incubator {
-		return fmt.Errorf("invalid voice mode %q", next.VoiceMode)
-	}
 	if next == s.data {
 		return nil
 	}

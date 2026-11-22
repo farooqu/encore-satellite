@@ -10,8 +10,8 @@ import (
 
 const (
 	SampleRate     = 16000
-	MaxSamples     = 1024           // At most 64 ms per mono PCM16 block.
-	PreRollSamples = 2 * SampleRate // Retain the whole wake phrase for upstream verification.
+	MaxSamples     = 1024 // At most 64 ms per mono PCM16 block.
+	PreRollSamples = 3 * SampleRate / 2
 )
 
 // Frame is a host-owned capture block. Samples are copied before retention.
@@ -64,8 +64,8 @@ type PreRoll struct {
 func (p *PreRoll) Add(samples []int16) {
 	for _, s := range samples {
 		p.samples[p.next] = s
-		p.next = (p.next + 1) % len(p.samples)
-		if p.n < len(p.samples) {
+		p.next = (p.next + 1) % PreRollSamples
+		if p.n < PreRollSamples {
 			p.n++
 		}
 	}
@@ -73,9 +73,9 @@ func (p *PreRoll) Add(samples []int16) {
 
 func (p *PreRoll) Snapshot() []int16 {
 	out := make([]int16, p.n)
-	start := (p.next - p.n + len(p.samples)) % len(p.samples)
+	start := (p.next - p.n + PreRollSamples) % PreRollSamples
 	for i := range out {
-		out[i] = p.samples[(start+i)%len(p.samples)]
+		out[i] = p.samples[(start+i)%PreRollSamples]
 	}
 	return out
 }

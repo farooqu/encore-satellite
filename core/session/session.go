@@ -13,13 +13,6 @@ import (
 	"github.com/farooqu/encore-satellite/core/wake"
 )
 
-type Backend string
-
-const (
-	Assist    Backend = "assist"
-	Incubator Backend = "incubator"
-)
-
 // Command is a satellite-to-backend action, independent of wire encodings.
 type Command struct {
 	Kind         string
@@ -28,17 +21,18 @@ type Command struct {
 	Samples      []int16
 	Reason       string
 	MonitorID    uint64
+	Intercom     bool // monitor_audio belongs to an intercom request
 	RequestID    uint64
+	WakeReport   wake.Report
 }
 
 // Link.Send must copy/enqueue without blocking on I/O, using a bounded queue.
-// discard_audio and monitor_off synchronously revoke their queued capture.
+// cancel and monitor_off synchronously revoke their queued capture.
 // Native cancel sends cancellation then closes its voice connection; the reader
-// reports Disconnect before a replacement may attach. Assist cancel stays open.
+// reports Disconnect before a replacement may attach.
 // Overflow fails the connection, not silently drops audio. Close invalidates
 // queued and in-flight network audio and promptly unblocks all transport I/O.
 type Link interface {
-	Backend() Backend
 	Send(Command) error
 	Close() error
 }
@@ -60,44 +54,44 @@ var (
 )
 
 type Engine struct {
-	mu                              sync.Mutex
-	player                          audio.Playback
-	state                           presentation.State
-	link                            Link
-	generation                      uint64
-	turn                            uint64
-	monitorSerial                   uint64
-	monitorVisible                  bool
-	intercom                        bool
-	invocation                      string
-	responsePending                 bool
-	outputOwner                     string
-	outputAccepted, outputDraining  bool
-	outputFailed                    bool
-	active, discard                 bool
-	outputTimer                     bool
-	inputOpen, outputOpen, runEnded bool
-	outputReceived                  bool
-	announcing                      bool
-	cancelling                      bool
-	runStarted                      bool
-	streamExpected, streamEnded     bool
-	pre                             audio.PreRoll
-	lastSequence                    uint64
-	lastTime                        time.Duration
-	haveFrame                       bool
-	output                          context.Context
-	cancelOutput                    context.CancelCauseFunc
-	localOutput                     context.Context
-	wakeModelWait                   chan struct{}
-	activityHandler                 func(bool)
-	voiceActive                     bool
-	presentationChanged             func(presentation.State)
-	lastPresentation                presentation.State
+	mu                             sync.Mutex
+	player                         audio.Playback
+	state                          presentation.State
+	link                           Link
+	generation                     uint64
+	turn                           uint64
+	callTimer                      *time.Timer
+	monitorSerial                  uint64
+	monitorVisible                 bool
+	intercom                       bool
+	invocation                     string
+	responsePending                bool
+	outputOwner                    string
+	outputAccepted, outputDraining bool
+	outputFailed                   bool
+	active, discard                bool
+	outputTimer                    bool
+	inputOpen, outputOpen          bool
+	outputReceived                 bool
+	announcing                     bool
+	cancelling                     bool
+	runStarted                     bool
+	pre                            audio.PreRoll
+	lastSequence                   uint64
+	lastTime                       time.Duration
+	haveFrame                      bool
+	output                         context.Context
+	cancelOutput                   context.CancelCauseFunc
+	localOutput                    context.Context
+	wakeModelWait                  chan struct{}
+	activityHandler                func(bool)
+	voiceActive                    bool
+	presentationChanged            func(presentation.State)
+	lastPresentation               presentation.State
 }
 
 func New(player audio.Playback) *Engine {
-	e := &Engine{player: player, state: presentation.State{Backend: string(Incubator), Phase: "disconnected"}}
+	e := &Engine{player: player, state: presentation.State{Backend: "incubator", Phase: "disconnected"}}
 	e.resetOutput()
 	return e
 }
@@ -196,27 +190,12 @@ func (e *Engine) publishActivity() {
 	}
 }
 
-// Select explicitly changes ownership, even when the requested adapter is not
-// installed. It never falls back silently. Settings/pairing belong to adapters.
-func (e *Engine) Select(backend Backend) error {
-	if backend != Assist && backend != Incubator {
-		return errors.New("session: unknown backend")
-	}
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if string(backend) != e.state.Backend {
-		e.disconnect("backend_changed")
-		e.state.Backend = string(backend)
-	}
-	return nil
-}
-
 // Attach returns a connection generation required on every incoming operation.
 // A stale reader cannot update presentation or restart audio after replacement.
 func (e *Engine) Attach(link Link) (uint64, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if string(link.Backend()) != e.state.Backend || e.link != nil {
+	if e.link != nil {
 		return 0, ErrUnavailable
 	}
 	e.generation++
@@ -243,6 +222,7 @@ func (e *Engine) Disconnect(generation uint64, reason string) {
 }
 
 func (e *Engine) disconnect(reason string) {
+	e.stopCallTimer()
 	e.generation++
 	if e.link != nil {
 		_ = e.link.Close()
@@ -254,8 +234,7 @@ func (e *Engine) disconnect(reason string) {
 	e.pre.Clear()
 	e.active, e.discard, e.haveFrame = false, false, false
 	e.outputTimer = false
-	e.inputOpen, e.outputOpen, e.runEnded = false, false, false
-	e.cancelling, e.streamExpected, e.streamEnded = false, false, false
+	e.inputOpen, e.outputOpen, e.cancelling = false, false, false
 	e.runStarted = false
 	e.outputReceived = false
 	e.announcing = false
@@ -269,10 +248,9 @@ func (e *Engine) disconnect(reason string) {
 	e.publishActivity()
 }
 
-// SetMuted silences locally and cancels the current pipeline without revoking
-// the shared Assist/BLE transport. Native cancellation retires its voice-only
-// connection: ordinary and cancellation stream ends are indistinguishable.
-// A new turn waits for Assist completion or a fresh native connection.
+// SetMuted silences locally and cancels the current call. Cancellation retires
+// the voice-only connection: ordinary and cancellation stream ends are
+// indistinguishable. A new turn waits for a fresh connection.
 // The host must ALSO gate/stop capture immediately at its OS boundary.
 func (e *Engine) SetMuted(muted bool) {
 	e.mu.Lock()
@@ -283,6 +261,7 @@ func (e *Engine) SetMuted(muted bool) {
 	}
 	e.state.Muted = muted
 	if muted {
+		e.stopCallTimer()
 		if e.state.MonitorID != 0 {
 			// Hard fence for off-call recording, including blocked writes.
 			e.disconnect("monitor_privacy")
@@ -302,37 +281,20 @@ func (e *Engine) SetMuted(muted bool) {
 		if alert {
 			_ = e.send(Command{Kind: "stop_alert"})
 		}
-		if e.cancelling && e.state.Backend == string(Incubator) {
+		if e.cancelling && !wasCancelling {
 			// Also retire interrupted output whose Stop/drain already cleared
 			// active ownership. Never wait for a terminal that cannot arrive.
-			if !wasCancelling {
-				_ = e.send(Command{Kind: "cancel", Reason: "cancelled"})
-			}
-		} else if active && e.runStarted {
 			_ = e.send(Command{Kind: "cancel", Reason: "cancelled"})
-		} else if active {
-			// Purge capture now; HA must establish RUN_START before wire abort.
-			_ = e.send(Command{Kind: "discard_audio"})
 		}
 	} else if !e.cancelling {
 		// Idle mute also cancelled playback; timers/announcements have no start.
 		e.resetOutput()
 	}
-	e.finishCancellation()
+	e.updatePrivacyPhase()
 }
 
-// Assist RUN_END can precede streamed TTS. No native stream end can prove that
-// an old HANGUP is not still buffered; its adapter closes after sending cancel.
-// Only the ensuing disconnect may release native cancellation ownership.
-func (e *Engine) finishCancellation() {
-	finished := false
-	if e.state.Backend == string(Assist) {
-		finished = e.runEnded && (!e.streamExpected || e.streamEnded)
-	}
-	if e.cancelling && finished {
-		e.cancelling, e.discard = false, false
-		e.resetOutput()
-	}
+// Only disconnect can release cancellation ownership.
+func (e *Engine) updatePrivacyPhase() {
 	if e.state.Muted {
 		e.state.Phase = "muted"
 	} else if e.link == nil {
@@ -345,42 +307,41 @@ func (e *Engine) finishCancellation() {
 }
 
 func (e *Engine) Capture(frame audio.Frame) error {
-	_, err := e.CaptureForModels(frame)
+	_, _, err := e.CaptureForModels(frame)
 	return err
 }
 
-// CaptureForModels reports whether the same frame may enter local inference.
-// Monitor audio never becomes call pre-roll or a later wake-model input.
-func (e *Engine) CaptureForModels(frame audio.Frame) (bool, error) {
+// CaptureForModels labels frames at capture time. A nonzero monitorID allows
+// scoring only for that Live Monitor request, never wake actions or pre-roll.
+func (e *Engine) CaptureForModels(frame audio.Frame) (modelInput bool, monitorID uint64, err error) {
 	if err := frame.Validate(); err != nil {
-		return false, err
+		return false, 0, err
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.state.Muted || e.cancelling || e.link == nil {
-		// Preserve local-model delivery policy for non-monitoring hosts;
-		// the model worker separately checks arming and generation.
-		return true, nil
+		return false, 0, nil
 	}
 	if frame.Discontinuity || (e.haveFrame && (frame.Sequence != e.lastSequence+1 || frame.CapturedAt <= e.lastTime)) {
 		e.disconnect("capture_discontinuity")
-		return false, errors.New("session: capture discontinuity; reconnect required")
+		return false, 0, errors.New("session: capture discontinuity; reconnect required")
 	}
 	e.lastSequence, e.lastTime, e.haveFrame = frame.Sequence, frame.CapturedAt, true
 	if id := e.state.MonitorID; id != 0 {
 		if e.monitorVisible {
-			return false, e.send(Command{Kind: "monitor_audio", Samples: frame.Samples, MonitorID: id})
+			err := e.send(Command{Kind: "monitor_audio", Samples: frame.Samples, MonitorID: id, Intercom: e.intercom})
+			return err == nil && !e.intercom, id, err
 		}
-		return false, nil
+		return false, 0, nil
 	}
 	if e.inputOpen {
 		err := e.send(Command{Kind: "audio", Samples: frame.Samples})
-		return err == nil, err
+		return err == nil, 0, err
 	}
 	if !e.active && !e.discard {
 		e.pre.Add(frame.Samples)
 	}
-	return true, nil
+	return true, 0, nil
 }
 
 // SetMonitor changes off-call recording for the requesting connection only.
@@ -467,18 +428,6 @@ func (e *Engine) HideMonitor(id uint64) {
 	}
 }
 
-// FinishInput is an explicit host endpoint, not local speech recognition.
-// Incubator owns endpointing upstream and has no equivalent half-close message.
-func (e *Engine) FinishInput() error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if e.state.Backend != string(Assist) || !e.inputOpen {
-		return ErrUnavailable
-	}
-	e.inputOpen = false
-	return e.send(Command{Kind: "input_end"})
-}
-
 func (e *Engine) StartManual() error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -495,17 +444,43 @@ func (e *Engine) Wake(detection wake.Detection) error {
 }
 
 // WakeState scopes local model execution to its owning backend connection.
-// Stop models are armed only for response output, announcements and alerts;
-// ordinary models run only while genuinely idle. Inference runs outside this lock.
-func (e *Engine) WakeState(generation uint64) (listen, stop bool) {
+// Stop models are armed for the current response, announcements and alerts;
+// ordinary models dispatch only while genuinely idle. Confirmed Live Monitor
+// owns a separate score-only route. Inference runs outside this lock.
+func (e *Engine) WakeState(generation uint64) (listen, stop bool, monitorID uint64) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if generation != e.generation || e.link == nil || e.state.Muted {
-		return false, false
+	if generation != e.generation || e.link == nil || e.state.Muted || e.cancelling {
+		return false, false, 0
 	}
-	stop = !e.discard && (e.outputOpen || e.announcing || e.state.Alert)
-	listen = !e.active && !e.outputOpen && !e.discard && !e.announcing && !e.state.Alert && e.state.MonitorID == 0
+	stop = e.stopModelArmed()
+	if e.state.MonitorID != 0 {
+		if e.monitorVisible && !e.intercom {
+			return false, stop, e.state.MonitorID
+		}
+		return false, false, 0
+	}
+	listen = e.wakeModelsIdle()
 	return
+}
+
+func (e *Engine) stopModelArmed() bool {
+	// Responding is call-owned and outlives the PCM stream: the app may still
+	// be preparing speech or waiting to hang up after the speaker drains.
+	return !e.discard && (e.active && e.state.Phase == "speaking" || e.outputOpen || e.announcing || e.state.Alert)
+}
+
+// ReportWake rechecks the exact monitor request after asynchronous inference.
+func (e *Engine) ReportWake(generation, monitorID uint64, report wake.Report) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if generation != e.generation || e.link == nil || monitorID != e.state.MonitorID {
+		return ErrStale
+	}
+	if monitorID == 0 || e.state.Muted || !e.monitorVisible || e.intercom {
+		return ErrUnavailable
+	}
+	return e.send(Command{Kind: "wake_report", MonitorID: monitorID, WakeReport: report})
 }
 
 // UpdateWakeModelsWhenIdle swaps connection-local model storage between turns,
@@ -541,11 +516,11 @@ func (e *Engine) WakeFor(generation uint64, detection wake.Detection) error {
 	if generation != e.generation || e.link == nil {
 		return ErrStale
 	}
-	if e.state.Muted || e.discard {
+	if e.state.Muted || e.discard || e.state.MonitorID != 0 {
 		return ErrUnavailable
 	}
 	if detection.Word == "stop" {
-		if !e.outputOpen && !e.announcing && !e.state.Alert {
+		if !e.stopModelArmed() {
 			return ErrUnavailable
 		}
 		return e.stop()
@@ -577,12 +552,21 @@ func (e *Engine) start(detection wake.Detection, pre []int16) error {
 		e.state.Phase = "listening"
 	}
 	e.active = true
-	e.inputOpen, e.runEnded = true, false
+	e.inputOpen = true
 	e.runStarted = false
-	e.streamExpected, e.streamEnded = false, false
 	e.outputReceived = false
 	e.pre.Clear()
 	e.publishActivity() // Duck before the backend can begin capture or respond.
+	turn := e.turn
+	e.callTimer = time.AfterFunc(30*time.Second, func() {
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		// Stop may race with an already-started timer callback. It must not
+		// end a different call, including an immediate follow-up.
+		if e.active && e.turn == turn {
+			_ = e.stopOutput("timeout")
+		}
+	})
 	if err := e.send(Command{Kind: "start", Detection: detection, PreRollBytes: len(pre) * 2}); err != nil {
 		return err
 	}
@@ -594,6 +578,13 @@ func (e *Engine) start(detection wake.Detection, pre []int16) error {
 		pre = pre[n:]
 	}
 	return nil
+}
+
+func (e *Engine) stopCallTimer() {
+	if e.callTimer != nil {
+		e.callTimer.Stop()
+		e.callTimer = nil
+	}
 }
 
 // Stop silences locally before notifying the peer; late output and presentation
@@ -630,20 +621,22 @@ func (e *Engine) stop() error {
 		e.disconnect("monitor_stopped")
 		return nil
 	}
-	active, alert := e.active, e.state.Alert
+	return e.stopOutput("cancelled")
+}
+
+func (e *Engine) stopOutput(reason string) error {
+	e.stopCallTimer()
+	alert := e.state.Alert
 	localOnly := e.localOutput != nil && !e.active && !e.announcing
 	// A timer-only stream has an unambiguous dismissal. Calls and announcements
 	// do not: an ordinary end/HANGUP may already be buffered before Stop.
-	retire := e.state.Backend == string(Incubator) && !e.cancelling &&
+	retire := !e.cancelling &&
 		(e.active || e.announcing || (e.outputOpen && !e.outputTimer && !localOnly))
 	e.cancelOutput(outputFence("session_stop"))
 	e.localOutput = nil
 	e.player.Flush()
 	e.pre.Clear()
-	e.discard = e.discard || e.active || (e.outputOpen && !localOnly)
-	if e.state.Backend == string(Incubator) {
-		e.discard = e.discard || e.announcing
-	}
+	e.discard = e.discard || e.active || e.announcing || (e.outputOpen && !localOnly)
 	e.cancelling = e.cancelling || retire
 	e.active = false
 	e.announcing = false
@@ -651,7 +644,7 @@ func (e *Engine) stop() error {
 	e.state.Heard, e.state.Reply, e.state.Alert = "", "", false
 	e.state.Speaker = presentation.Speaker{}
 	e.responsePending = false
-	e.state.Reason = "cancelled"
+	e.state.Reason = reason
 	e.state.Phase = "idle"
 	if e.link == nil {
 		e.state.Phase = "disconnected"
@@ -660,33 +653,20 @@ func (e *Engine) stop() error {
 		e.state.Phase = "muted"
 	}
 	if e.cancelling {
-		e.finishCancellation()
+		e.updatePrivacyPhase()
 	} else if !e.discard {
 		// Idle Stop has no cancelled owner to await.
 		e.resetOutput()
 	}
 	e.publishActivity()
-	if e.state.Backend == string(Incubator) {
-		// Dismiss timers before cancellation closes this voice connection.
-		if alert {
-			if err := e.send(Command{Kind: "stop_alert"}); err != nil {
-				return err
-			}
-		}
-		if retire {
-			return e.send(Command{Kind: "cancel", Reason: "cancelled"})
-		}
-		return nil
-	}
-	// End discards unsent capture in the transport queue. Send it first so
-	// it cannot discard the timer dismissal when both owners are active.
-	if active {
-		if err := e.send(Command{Kind: "end", Reason: "cancelled"}); err != nil {
+	// Only an explicit Stop dismisses timers, not a call deadline.
+	if alert && reason == "cancelled" {
+		if err := e.send(Command{Kind: "stop_alert"}); err != nil {
 			return err
 		}
 	}
-	if alert {
-		return e.send(Command{Kind: "stop_alert"})
+	if retire {
+		return e.send(Command{Kind: "cancel", Reason: reason})
 	}
 	return nil
 }
@@ -709,43 +689,24 @@ func (e *Engine) Handle(generation uint64, event Event) error {
 		}
 		return nil
 	}
-	if event.Kind == "run_start" && !e.runStarted {
-		e.runStarted = true
-		if e.cancelling {
-			// HA can cancel an unscheduled task without emitting RUN_END.
-			// Local mute is immediate; defer abort until the run can finish.
-			return e.send(Command{Kind: "cancel", Reason: "cancelled"})
-		}
-	}
-	if e.cancelling {
-		switch event.Kind {
-		case "run_end":
-			e.runEnded = true
-		case "output_expected":
-			e.streamExpected = true
-		case "output_start":
-			e.streamExpected, e.streamEnded = true, false
-		}
-		e.finishCancellation()
-		return nil
-	}
-	if e.state.Muted {
+	if e.cancelling || e.state.Muted {
 		return nil
 	}
 	if event.Kind == "error" {
 		e.disconnect(event.Reason)
 		return nil
 	}
-	if event.Kind == "run_end" {
-		e.inputOpen, e.runEnded = false, true
-		e.state.Speaker = presentation.Speaker{}
-		if !e.outputOpen && e.state.Phase != "speaking" && !e.discard {
-			e.active = false
-			e.state.Phase = "idle"
-		}
-		return nil
-	}
 	if event.Kind == "hangup" {
+		rejected := event.Reason == "answered_elsewhere" || event.Reason == "wake_rejected"
+		if event.Listen {
+			// HANGUP has no turn ID. A listen handoff belongs only to the
+			// current accepted response, never to idle or a new answer turn.
+			ready := e.runStarted && e.state.Phase == "speaking" && !e.outputOpen && !e.discard
+			if !e.active || (!rejected && !ready) {
+				return nil
+			}
+		}
+		e.stopCallTimer()
 		e.active = false
 		e.inputOpen = false
 		e.responsePending = false
@@ -753,7 +714,7 @@ func (e *Engine) Handle(generation uint64, event Event) error {
 		e.state.Phase, e.state.Reason = "idle", event.Reason
 		// Incubator owns election. A losing candidate returns quietly; its
 		// evidence was already sent without any local peer pre-election.
-		if event.Reason == "answered_elsewhere" || event.Reason == "wake_rejected" {
+		if rejected {
 			e.state.Speaker = presentation.Speaker{}
 			// HANGUP ends the call, not the healthy native connection. Closing
 			// it here makes ordinary wake rejection trigger upstream backoff.
@@ -767,7 +728,7 @@ func (e *Engine) Handle(generation uint64, event Event) error {
 			e.resetOutput()
 			return nil
 		}
-		if event.Listen && !e.discard {
+		if event.Listen {
 			return e.start(wake.Detection{Word: "follow_up"}, nil)
 		}
 		return nil
@@ -782,10 +743,6 @@ func (e *Engine) Handle(generation uint64, event Event) error {
 		return nil
 	}
 	switch event.Kind {
-	case "output_expected":
-		if e.active {
-			e.streamExpected = true
-		}
 	case "announcement":
 		e.announcing = event.Active
 	case "timer_ringing":
@@ -804,21 +761,11 @@ func (e *Engine) Handle(generation uint64, event Event) error {
 		if !e.active {
 			break
 		}
-		if e.state.Backend == string(Incubator) && (e.outputOpen || e.state.Phase == "speaking" || e.state.Phase == "error") {
+		if e.outputOpen || e.state.Phase == "speaking" || e.state.Phase == "error" {
 			break
 		}
 		e.state.Phase = "working"
 		e.state.Speaker = event.Speaker
-		if e.state.Backend == string(Assist) {
-			e.inputOpen = false
-		}
-	case "output_start":
-		if e.localOutput == nil && (e.active || e.state.Backend == string(Incubator)) {
-			e.streamExpected, e.streamEnded = true, false
-			e.openOutput()
-			e.outputReceived = false
-			e.outputAccepted = false
-		}
 	case "recognized":
 		if e.active {
 			e.state.Heard = event.Text
@@ -872,22 +819,11 @@ func (e *Engine) outputSamples(generation, monitorID uint64, samples []int16) er
 		e.mu.Unlock()
 		return nil
 	}
-	// Assist announcements are not advertised. A stream cannot appear before
-	// a local turn and its TTS_STREAM_START. HA can send a cancelled task's
-	// final STREAM_END on its freshly reconnected client.
-	if e.state.Backend == string(Assist) && (!e.active || !e.outputOpen) {
+	// A local CALL_START does not authorize PCM from an old upstream task.
+	// Outside an accepted call, only explicitly owned native streams may play.
+	if (e.active && !e.runStarted) || (!e.active && !e.state.Alert && !e.announcing && !(e.intercom && e.state.MonitorID != 0)) {
 		e.mu.Unlock()
 		return nil
-	}
-	// Outside an accepted call, only explicitly owned native streams may play.
-	if e.state.Backend == string(Incubator) {
-		// Upstream can retain an announcement task across socket reconnect.
-		// CALL_START cancels it before listening: local start alone is not
-		// authority to play PCM that arrived before upstream accepted the call.
-		if (e.active && !e.runStarted) || (!e.active && !e.state.Alert && !e.announcing && !(e.intercom && e.state.MonitorID != 0)) {
-			e.mu.Unlock()
-			return nil
-		}
 	}
 	ctx, discard := e.output, e.discard
 	if !discard {
@@ -905,9 +841,12 @@ func (e *Engine) outputSamples(generation, monitorID uint64, samples []int16) er
 	if monitorID != 0 && (ctx != e.output || e.state.MonitorID != monitorID) {
 		return nil // A retired relay write cannot fail the new stream or link.
 	}
+	if generation == e.generation && e.cancelling {
+		return nil // Let the cancellation writer send CALL_END before closing.
+	}
 	// A blocked Write can finish after Stop, mute or connection replacement.
 	// It must not reassert playback in the newer presentation.
-	if generation == e.generation && ctx == e.output && e.outputOpen && !e.discard && !e.cancelling && !e.state.Muted {
+	if generation == e.generation && ctx == e.output && e.outputOpen && !e.discard && !e.state.Muted {
 		if err == nil {
 			e.outputAccepted = true
 		} else {
@@ -928,30 +867,12 @@ func (e *Engine) EndOutput(generation uint64) error {
 		e.mu.Unlock()
 		return nil
 	}
-	if e.streamExpected || e.state.Backend == string(Incubator) {
-		e.streamEnded = true
-	}
 	if e.cancelling || e.state.Muted {
-		e.finishCancellation()
 		e.mu.Unlock()
 		return nil
 	}
 	e.responsePending = false
 	if !e.outputOpen && !e.discard {
-		e.mu.Unlock()
-		return nil
-	}
-	if e.state.Backend == string(Assist) && !e.outputReceived && !e.discard {
-		// This HA version can end an empty stream after TTS fails without
-		// sending an ERROR event. No received audio means no playback claim.
-		e.outputOpen, e.outputTimer = false, false
-		if e.runEnded {
-			e.active = false
-			e.state.Phase = "idle"
-		} else {
-			e.state.Phase = "working"
-		}
-		e.publishActivity()
 		e.mu.Unlock()
 		return nil
 	}
@@ -981,12 +902,6 @@ func (e *Engine) EndOutput(generation uint64) error {
 		e.disconnect("playback_failed")
 		return err
 	}
-	if e.runEnded {
-		e.active = false
-		e.state.Phase = "idle"
-	} else if e.state.Backend == string(Assist) {
-		e.state.Phase = "working"
-	}
 	return e.send(Command{Kind: "drained"})
 }
 
@@ -994,7 +909,7 @@ func (e *Engine) openOutput() {
 	if !e.outputOpen {
 		// Ownership lasts through cancellation until the stream's boundary;
 		// HANGUP or a later timer event cannot relabel an open voice stream.
-		e.outputTimer = e.state.Backend == string(Incubator) && e.state.Alert && !e.active && !e.announcing
+		e.outputTimer = e.state.Alert && !e.active && !e.announcing
 		e.outputOwner = "voice"
 		if e.outputTimer {
 			e.outputOwner = "alert"

@@ -44,10 +44,6 @@ func SpeakerVolume(max, step float32) Entity[*api.NumberCommandRequest] {
 	return Entity[*api.NumberCommandRequest]{&api.ListEntitiesNumberResponse{ObjectId: "speaker_volume", Key: key("speaker_volume"), Name: "Speaker volume", Icon: "mdi:volume-high", MaxValue: max, Step: step, UnitOfMeasurement: "%"}}
 }
 
-func VoiceMode(options ...string) Entity[*api.SelectCommandRequest] {
-	return Entity[*api.SelectCommandRequest]{&api.ListEntitiesSelectResponse{ObjectId: "voice_mode", Key: key("voice_mode"), Name: "Voice mode (restart required)", Options: options, EntityCategory: esphome.CategoryConfig}}
-}
-
 const (
 	DashboardKey      uint32 = 0x454e4301
 	AndroidUpdateKey  uint32 = 0x454e4303
@@ -70,7 +66,6 @@ var (
 	SendspinStop    = button("sendspin_stop", "Stop music", "mdi:stop", key("sendspin_stop"), 0)
 	RingBrightness  = Entity[*api.NumberCommandRequest]{&api.ListEntitiesNumberResponse{ObjectId: "ring_brightness", Key: key("ring_brightness"), Name: "Ring brightness", Icon: "mdi:brightness-6", EntityCategory: esphome.CategoryConfig, MinValue: 1, MaxValue: 100, Step: 1, UnitOfMeasurement: "%"}}
 	RingMotion      = Entity[*api.SwitchCommandRequest]{&api.ListEntitiesSwitchResponse{ObjectId: "ring_reduced_motion", Key: key("ring_reduced_motion"), Name: "Ring reduced motion", Icon: "mdi:animation-outline", EntityCategory: esphome.CategoryConfig}}
-	ApplyVoiceMode  = button("apply_voice_mode", "Apply and restart", "mdi:restart", key("apply_voice_mode"), esphome.CategoryConfig)
 	Announcements   = Entity[*api.MediaPlayerCommandRequest]{&api.ListEntitiesMediaPlayerResponse{
 		ObjectId: "announcements", Key: key("announcements"), Name: "Announcements", Icon: "mdi:speaker-message",
 		FeatureFlags: uint32(esphome.MediaPlayerFeaturePlayMedia | esphome.MediaPlayerFeatureAnnounce | esphome.MediaPlayerFeatureStop),

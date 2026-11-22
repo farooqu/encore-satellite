@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/farooqu/encore-satellite/backends/assist"
-	"github.com/farooqu/encore-satellite/core/session"
+	"github.com/farooqu/encore-satellite/backends/bluetooth"
+	"github.com/farooqu/encore-satellite/internal/lab"
 	esphome "github.com/ygelfand/go-esphome-device"
 )
 
@@ -48,54 +48,45 @@ func (l *singleManagementListener) Close() error {
 func (l *singleManagementListener) Addr() net.Addr { return l.conn.LocalAddr() }
 
 func TestManagementRetiresAcceptedPeerBeforeHandshake(t *testing.T) {
-	for _, mode := range []session.Backend{session.Assist, session.Incubator} {
-		t.Run(string(mode), func(t *testing.T) {
-			device, peer := net.Pipe()
-			defer device.Close()
-			defer peer.Close()
-			conn := &pausedManagementConn{Conn: device, entered: make(chan struct{}), release: make(chan struct{})}
-			raw := &singleManagementListener{conn: conn, closed: make(chan struct{})}
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			listener := newManagementListener(ctx, raw)
-			defer listener.Close()
-			key, err := esphome.GeneratePSK()
-			if err != nil {
-				t.Fatal(err)
-			}
-			done := make(chan error, 1)
-			go func() {
-				info := esphome.Info{Name: "retirement-fixture"}
-				controls := &voiceControls{}
-				if mode == session.Assist {
-					s := &assist.Server{Engine: session.New(nil), Controls: controls}
-					done <- s.Serve(ctx, listener, info, key)
-				} else {
-					done <- controls.Serve(ctx, listener, info, key)
-				}
-			}()
-			select {
-			case <-conn.entered:
-			case <-time.After(2 * time.Second):
-				close(conn.release)
-				t.Fatal("server never received accepted peer")
-			}
-			cancel()
-			<-raw.closed
-			// Let upstream's one-shot registered-peer cleanup finish while the
-			// accepted peer is still absent from that registry.
-			time.Sleep(100 * time.Millisecond)
-			close(conn.release)
-			select {
-			case err := <-done:
-				if err != nil {
-					t.Fatal(err)
-				}
-			case <-time.After(time.Second):
-				peer.Close()
-				<-done
-				t.Fatal("silent accepted peer stranded runtime retirement")
-			}
-		})
+	device, peer := net.Pipe()
+	defer device.Close()
+	defer peer.Close()
+	conn := &pausedManagementConn{Conn: device, entered: make(chan struct{}), release: make(chan struct{})}
+	raw := &singleManagementListener{conn: conn, closed: make(chan struct{})}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	listener := newManagementListener(ctx, raw)
+	defer listener.Close()
+	key, err := esphome.GeneratePSK()
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		info := esphome.Info{Name: "retirement-fixture"}
+		proxy := bluetooth.New(&lab.VirtualRadio{}, bluetooth.Options{})
+		done <- proxy.Serve(ctx, listener, info, key)
+	}()
+	select {
+	case <-conn.entered:
+	case <-time.After(2 * time.Second):
+		close(conn.release)
+		t.Fatal("server never received accepted peer")
+	}
+	cancel()
+	<-raw.closed
+	// Let upstream's one-shot registered-peer cleanup finish while the
+	// accepted peer is still absent from that registry.
+	time.Sleep(100 * time.Millisecond)
+	close(conn.release)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		peer.Close()
+		<-done
+		t.Fatal("silent accepted peer stranded runtime retirement")
 	}
 }

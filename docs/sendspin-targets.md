@@ -8,7 +8,7 @@ checklist is a handoff, not a device-support claim.
 ## What is already available
 
 - [Reproducible lab](../lab/sendspin/README.md): pinned real MA queue/streaming,
-  official C++ receiver, Assist and native Incubator, with synthetic capture and
+  official C++ receiver and native Incubator, with synthetic capture and
   a virtual mixer. No Music Assistant server belongs on the satellite itself.
 - `core/session.Engine.SetActivityHandler(func(bool))`: reports aggregate local
   voice activity from accepted wake/manual invocation through listening,
@@ -19,7 +19,7 @@ checklist is a handoff, not a device-support claim.
   omits AUDIO_OUT_END, without releasing unrelated cancelled voice/announcement
   output. The next native voice turn works without reconnecting.
 - Executed on Linux x86-64, November 16, 2026: 31 rendered music-gain checks over
-  385,854 music frames; full Assist/native suites; boundary, vet and race checks.
+  385,854 music frames on the former dual-backend lab; boundary, vet and race checks.
   The regression covers repeated Stop, late PCM and overlapping cancellations.
 
 The lab uses `internal/lab/{music,sendspin,virtual}.go` and
@@ -57,9 +57,7 @@ See the lab README and [dependency notices](../lab/sendspin/NOTICES.md).
   voice. The lab's PCM16/48 kHz/stereo negotiation is not a physical stereo or
   format-support claim for either device. Report real consumed-frame/presentation
   timing, bound buffers, fence replaced streams and handle output/network failure.
-- [ ] Verify voice and timer responses with the package's sole backend, native
-  Incubator by default; repeat qualification for any later package for the Home
-  Assistant Assist pipeline, not runtime switching. Cover feature-off during
+- [ ] Verify native Incubator voice and timer responses. Cover feature-off during
   voice/playback, user-volume changes
   while ducked, late audio, reconnect and restart. MA absence must not disable voice.
   Test MA-managed announcements separately; Sendspin does not supply Encore's

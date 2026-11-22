@@ -20,7 +20,8 @@ amp orb service restart home-assistant
 make lab-provision
 .amp/in/orb-backup/voice-incubator/.venv/bin/python lab/incubator/fixtures.py
 amp orb service start incubator --command '.amp/in/orb-backup/voice-incubator/.venv/bin/python lab/incubator/run.py' --port 8100
-.amp/in/orb-backup/voice-incubator/.venv/bin/python lab/incubator/test_native.py
+make lab-test
+amp orb service stop encore  # Free ports 6053 and 6055 for the Go tests.
 make check
 ```
 
@@ -28,18 +29,15 @@ Wait for HA to finish starting before provisioning; rerun provisioning if it
 reports startup discovery unavailable. Run the Incubator suite only after both
 `GET http://127.0.0.1:8099/state` and
 `GET http://127.0.0.1:8100/api/settings` succeed. These URLs are loopback checks
-inside the orb, not user-facing portals. Do not run other suites that select a
-backend concurrently. On subsequent runs restart `incubator` to reset upstream
+inside the orb, not user-facing portals. Do not run the Sendspin suite concurrently.
+On subsequent runs restart `incubator` to reset upstream
 reconnect backoff. Restart `encore` after Go edits. The source is run through
 the foundation's `go run ./cmd/encore-lab` supervised service, not a stale binary.
-The suite now saves the requested voice mode and applies a runtime restart at
-each mode transition through HA's actual encrypted selector/button controls;
-it no longer uses the old live `backend` fixture command. The isolated native
-environment runs the suite without importing Assist test dependencies.
-It enables the virtual BLE proxy for the run, observes advertisements inside HA
-and restores the previous BLE setting afterwards.
+The lab always starts in native Incubator mode. The suite enables the virtual
+BLE proxy through HA's encrypted ESPHome switch, observes advertisements inside
+HA and restores the previous BLE setting afterwards.
 
-Setup is separate from shared `.agents/setup`, `.amp/services.yaml`, Makefile and
+Native setup is separate from shared `.agents/setup`, `.amp/services.yaml` and
 the foundation lockfile. It installs native system libraries/build tools, clones
 the two exact revisions below, installs Python 3.13.5 with hash-locked packages,
 downloads model assets, builds the Kaldi verifier and upstream native C extensions,
@@ -104,10 +102,9 @@ existing public `/command` interface, not private core methods.
   real recognition of the synthetic “Yes” triggers the action. A duration timer
   is created through HA's real service, rings the idle satellite, then device
   Stop reaches upstream as `stop_timer` and upstream reports `timer_stopped`.
-- Switching away/back inspects app connection state and actual HA registry/entity
-  state. Saving leaves the running mode and BLE scan unchanged; Apply preserves
-  common entity identities and BLE enablement, then advertisements resume. The
-  timer entity is persistent, **not** per-satellite availability.
+- HA registry discovery verifies that the native integration registers its timer
+  entity, not an ESPHome voice satellite. The timer entity is persistent, **not**
+  per-satellite availability.
 - Voice-only mute sends CALL_END before retiring the native connection, without
   false playback drain. The replacement connection retains mute; after unmute a
   fresh recognized HA turn succeeds. Neither old ordinary AUDIO_OUT_END nor the

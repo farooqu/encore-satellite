@@ -1,5 +1,9 @@
 # Executed protocol proof
 
+Historical evidence from the earlier dual-backend lab. The Assist adapter, its
+fixtures and the selector have been removed. Commands and results below refer
+to the checkout tested at the time; use the [current lab guide](README.md).
+
 The shared Go core passed a real local Home Assistant Assist stack with virtual
 audio and deterministic speech fixtures. This verifies protocol behavior on the
 pinned development baseline, not hardware support or recognition quality.
@@ -108,9 +112,8 @@ to upstream's expected model symlinks before successful native setup.
 The native before/after suite independently failed on the original negative
 HANGUP disconnect and passed with the shared lifecycle fix. The native adapter
 now retains explicit announcement Active state rather than accepting arbitrary
-idle output. See [native evidence](../docs/incubator-validation.md) and
-[wake evidence](../docs/assist-wake-validation.md) for exact upstream pins,
-earlier fault-sensitivity runs, setup, provenance and limitations.
+idle output. See [native evidence](../docs/incubator-validation.md) for upstream
+pins, earlier fault-sensitivity runs, setup, provenance and limitations.
 
 HTTP provisioning now confirms only a healthy pending configuration that HA is
 actually running. A fresh private HA state promoted to stable with no rollback

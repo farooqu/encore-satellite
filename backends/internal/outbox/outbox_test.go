@@ -1,56 +1,13 @@
 package outbox_test
 
 import (
-	"context"
 	"errors"
 	"slices"
 	"testing"
 
 	"github.com/farooqu/encore-satellite/backends/internal/outbox"
-	"github.com/farooqu/encore-satellite/core/audio"
 	"github.com/farooqu/encore-satellite/core/session"
 )
-
-type assistLink struct{ *outbox.Queue }
-
-func (*assistLink) Backend() session.Backend { return session.Assist }
-
-type speaker struct{}
-
-func (*speaker) Write(context.Context, []int16) error { return nil }
-func (*speaker) Drain(context.Context) error          { return nil }
-func (*speaker) Flush()                               {}
-
-func TestMuteBeforeRunStartDropsQueuedCaptureWithoutAbortingEarly(t *testing.T) {
-	l := &assistLink{outbox.New(func() error { return nil })}
-	defer l.Close()
-	e := session.New(&speaker{})
-	_ = e.Select(session.Assist)
-	g, _ := e.Attach(l)
-	_ = e.StartManual()
-	_ = e.Capture(audio.Frame{Samples: []int16{17, -83}})
-	e.SetMuted(true)
-	_ = l.Send(session.Command{Kind: "drained"}) // End the delayed writer probe.
-	finished := errors.New("probe complete")
-	var kinds []string
-	_ = l.Run(func(c session.Command) error {
-		kinds = append(kinds, c.Kind)
-		if c.Kind == "drained" {
-			return finished
-		}
-		return nil
-	})
-	if !slices.Equal(kinds, []string{"start", "drained"}) {
-		t.Fatal("sent muted capture or aborted before RUN_START", kinds)
-	}
-	_ = e.Handle(g, session.Event{Kind: "run_start"})
-	_ = l.Run(func(c session.Command) error {
-		if c.Kind != "cancel" {
-			t.Fatal("missing deferred abort", c.Kind)
-		}
-		return finished
-	})
-}
 
 func TestCancelDropsQueuedCaptureButRetainsStartAndControls(t *testing.T) {
 	q := outbox.New(func() error { return nil })
@@ -88,8 +45,10 @@ func TestMonitorOffPurgesQueuedMonitorBeforeRearm(t *testing.T) {
 	for _, c := range []session.Command{
 		{Kind: "announced"},
 		{Kind: "monitor_audio", MonitorID: 1, Samples: []int16{100}},
+		{Kind: "wake_report", MonitorID: 1},
 		{Kind: "monitor_off", MonitorID: 1},
 		{Kind: "monitor_audio", MonitorID: 2, Samples: []int16{-200}},
+		{Kind: "wake_report", MonitorID: 2},
 		{Kind: "drained"},
 	} {
 		if err := q.Send(c); err != nil {
@@ -102,12 +61,15 @@ func TestMonitorOffPurgesQueuedMonitorBeforeRearm(t *testing.T) {
 		if c.Kind == "monitor_audio" && (c.MonitorID != 2 || !slices.Equal(c.Samples, []int16{-200})) {
 			t.Fatal("revoked monitor data reached writer", c)
 		}
+		if c.Kind == "wake_report" && c.MonitorID != 2 {
+			t.Fatal("revoked monitor report reached writer", c)
+		}
 		if c.Kind == "drained" {
 			return errors.New("finished")
 		}
 		return nil
 	})
-	if !slices.Equal(kinds, []string{"announced", "monitor_audio", "drained"}) {
+	if !slices.Equal(kinds, []string{"announced", "monitor_audio", "wake_report", "drained"}) {
 		t.Fatal("monitor off lost unrelated commands", kinds)
 	}
 }

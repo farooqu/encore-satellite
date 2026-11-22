@@ -65,10 +65,7 @@ does not need this rename for physical preflight; no device migration is perform
 - Authoritative hardware privacy-state reads around acquisition/delivery, buffer
   invalidation on mute, Action start/stop, volume buttons and a full-ring renderer.
   Driver-first mute is not toggled a second time. Never read `power_button_state`.
-- Incubator is the default Dot package. A possible future package for the
-  **Home Assistant Assist pipeline** would be opt-in and separately qualified.
-  There is no runtime voice-backend
-  selector or fallback, and the binary excludes the Assist adapter.
+- Incubator is the Dot's only voice backend, with no runtime selector or fallback.
   The configured name is used for hostname, discovery and backend identity;
   the real wlan0 MAC identifies the device. No lab HTTP controls are packaged.
 - Clean application state, first-boot Improv BLE, optional custom name, recovery
@@ -98,19 +95,30 @@ Incubator live listening uses `monitor` (`0x0A`); Enroll Voice and Teach Wake
 Word use `monitor_aec` (`0x0C`). Both use the same processed stream, only in
 response to an idle-session request from the existing trusted Incubator peer.
 The recording ring must be displayed before audio is sent. Monitoring does not
-send pre-roll or trigger calls. App stop, physical mute, Action, capture loss,
-or disconnect ends capture delivery. The native Incubator transport is not
-authenticated or encrypted; run it on a trusted network only.
+send pre-roll or dispatch wake actions. Live Monitor and Teach Wake Word receive
+`WAKE_REPORT` (`0x0B`) about every 100 ms of capture, with per-model 8-bit scores
+and detections. Intercom does not receive wake reports. App stop, physical mute,
+Action, capture loss, or disconnect ends capture and scoring. The native Incubator
+transport is not authenticated or encrypted; run it on a trusted network only.
 
-Intercom uses the same recording indicator and AEC capture. For prompt connect
-and end tones, pair with an Incubator app that marks those tones with its
-existing `announcement` event. The `MONITOR` intercom request owns only relayed
+[Voice PE at `8ba314e`](https://github.com/OHF-Voice/firmware-voice-incubator/blob/8ba314e68ff4a23b5c08b78fa21926104bbabba2/components/voice_incubator/voice_incubator.cpp)
+also reports detections without acting on them. Encore resets detector history
+when entering or leaving Live Monitor so no monitored speech becomes part of an
+idle wake decision, and waits for the local recording indicator before scoring.
+`go test ./backends/incubator -run 'TestLiveMonitor|TestMonitorOff'` checks the
+wire reports, action suppression, and revocation without hardware.
+
+Intercom uses the same recording indicator and echo-cancelled capture. Like
+Voice PE at `8ba314e`, it sends only `0x0A` during relay; `0x0C` remains available
+for Live Monitor and training. For prompt connect and end tones, pair with an
+Incubator app that marks those tones with its existing `announcement` event.
+The `MONITOR` intercom request owns only relayed
 speech. Ending the monitor flushes that speech without a playback-drained
 acknowledgment; an explicitly marked end tone can play afterward.
 
 Lane mapping, causal delay and tail, reference behavior at playback recovery,
 single-core cost, wake/Stop during playback, and the recording indicator are
-not qualified on hardware. The live audio stream does not report model scores.
+not qualified on hardware.
 
 ## Home Assistant TTS announcements
 
@@ -161,7 +169,7 @@ Privacy-gated 16 kHz averaged-microphone PCM feeds a bounded asynchronous detect
 worker. Inference never runs under the capture/privacy or session lock. Reported
 capture gaps reset detector history; mute/disconnect revoke the connection generation,
 clear audio and discard its models. Idle wakes carry their model identity,
-0..255 scores and two seconds of pre-roll to upstream verification. Spoken Stop
+0..255 scores and up to 1.5 seconds of pre-roll to upstream verification. Spoken Stop
 is armed only during voice output, announcements and ringing alerts; it cancels
 those instead of starting a new call. It is not a music transport command.
 

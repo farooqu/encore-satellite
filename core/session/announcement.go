@@ -97,7 +97,7 @@ func (e *Engine) Announce(parent context.Context, stream func(context.Context, f
 		}
 		e.outputReceived, e.outputAccepted = true, true
 		if result.AcceptedBlocks == 1 {
-			if e.link != nil && e.generation == generation && e.state.Backend == string(Incubator) {
+			if e.link != nil && e.generation == generation {
 				return e.send(Command{Kind: "announcing"})
 			}
 		}
@@ -150,7 +150,7 @@ func (e *Engine) Announce(parent context.Context, stream func(context.Context, f
 	e.outputOpen, e.outputTimer = false, false
 	e.resetOutput()
 	e.publishActivity()
-	if err == nil && e.link != nil && e.generation == generation && e.state.Backend == string(Incubator) {
+	if err == nil && e.link != nil && e.generation == generation {
 		if err = e.send(Command{Kind: "announced"}); err != nil {
 			result.Outcome = "completion_notification_failed"
 		}

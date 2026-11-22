@@ -11,21 +11,32 @@ import (
 
 	"github.com/farooqu/encore-satellite/core/audio"
 	"github.com/farooqu/encore-satellite/core/session"
+	"github.com/farooqu/encore-satellite/core/wake"
 )
 
 type observedMonitorConn struct {
 	net.Conn
+	kind         byte
 	wroteMonitor chan struct{}
 }
 
 func (c observedMonitorConn) Write(b []byte) (int, error) {
-	if b[0] == 0x0C {
+	if b[0] == c.kind {
 		c.wroteMonitor <- struct{}{}
 	}
 	return c.Conn.Write(b)
 }
 
 func TestMonitorOffRevokesBlockedWrite(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		kind byte
+	}{{"audio", 0x0C}, {"wake-report", 0x0B}} {
+		t.Run(test.name, func(t *testing.T) { testMonitorOffRevokesBlockedWrite(t, test.kind) })
+	}
+}
+
+func testMonitorOffRevokesBlockedWrite(t *testing.T, frameType byte) {
 	engine := session.New(monitorSilentPlayback{})
 	s := &Server{Engine: engine, CallAEC: true, MonitorAEC: true}
 	conn, peer := net.Pipe()
@@ -34,7 +45,7 @@ func TestMonitorOffRevokesBlockedWrite(t *testing.T) {
 	_ = peer.SetDeadline(time.Now().Add(time.Second))
 	started := make(chan struct{}, 1)
 	done := make(chan error, 1)
-	go func() { done <- s.serveConn(context.Background(), observedMonitorConn{conn, started}) }()
+	go func() { done <- s.serveConn(context.Background(), observedMonitorConn{conn, frameType, started}) }()
 	if kind, _, err := readFrame(peer); err != nil || kind != 0x01 {
 		t.Fatalf("HELLO = %#x, %v", kind, err)
 	}
@@ -46,7 +57,13 @@ func TestMonitorOffRevokesBlockedWrite(t *testing.T) {
 		id = engine.Snapshot().MonitorID
 	}
 	engine.ConfirmMonitor(id)
-	if err := s.Capture(audio.Frame{Samples: []int16{71}}); err != nil {
+	var err error
+	if frameType == 0x0B {
+		err = engine.ReportWake(engine.Snapshot().Generation, id, wake.Report{Detected: []string{"fixture"}})
+	} else {
+		err = s.Capture(audio.Frame{Samples: []int16{71}})
+	}
+	if err != nil {
 		t.Fatal(err)
 	}
 	select {

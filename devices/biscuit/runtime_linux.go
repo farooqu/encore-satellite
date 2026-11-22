@@ -201,9 +201,6 @@ func Run(parent context.Context, c Config, probeReference bool) error {
 	}
 	engine := session.New(player)
 	engine.SetActivityHandler(player.SetVoiceActive)
-	if err = engine.Select(session.Incubator); err != nil {
-		return err
-	}
 	// An unreadable state is muted; the capture worker keeps checking it.
 	muted, _ := gate.Check(nil)
 	player.SetMusicPrivacy(muted)

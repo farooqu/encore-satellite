@@ -6,6 +6,10 @@ native TCP adapter. Synthetic capture, injected host wake detections and a
 clocked virtual speaker replace device boundaries only. No physical device,
 acoustic quality, household deployment or release claim is made.
 
+This page records historical runs, including the removed Assist lab and backend
+selector. For current setup and the Incubator-only `make lab-test` entry point,
+see the [native lab guide](../lab/incubator/README.md).
+
 ## Independent commit-review follow-up
 
 The three additional review findings are fixed. Native mute now sends cancellation

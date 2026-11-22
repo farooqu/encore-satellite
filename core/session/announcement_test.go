@@ -14,7 +14,7 @@ func TestLocalAnnouncementOwnsOutputUntilPhysicalDrain(t *testing.T) {
 	for _, connected := range []bool{false, true} {
 		p := &player{entered: make(chan struct{}), release: make(chan struct{})}
 		e := session.New(p)
-		l := &link{backend: session.Incubator}
+		l := &link{}
 		var generation uint64
 		if connected {
 			var err error
@@ -43,7 +43,6 @@ func TestLocalAnnouncementOwnsOutputUntilPhysicalDrain(t *testing.T) {
 			if len(l.commands) != 1 || l.commands[0].Kind != "announcing" {
 				t.Fatal("start was missing or completion preceded drain", l.commands)
 			}
-			_ = e.Handle(generation, session.Event{Kind: "output_start"})
 			_ = e.Output(generation, []int16{17, 29, -41, 53, 67})
 			_ = e.EndOutput(generation) // Wire audio cannot steal/end HTTP output.
 		}

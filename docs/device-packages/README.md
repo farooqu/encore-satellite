@@ -95,25 +95,10 @@ readiness and persisted user intent.
 
 ## Incubator-first, single-backend packages
 
-The default device package uses native Voice Incubator, not just for the first
-release. An unqualified Encore package or default build/install choice must mean
-Incubator. Assist remains in the repository with its own protocol/lab coverage.
-If offered later, its separately qualified, opt-in package must be explicitly
-labeled for the **Home Assistant Assist pipeline**; it is deferred, not a
-co-default or a prerequisite for an Incubator package.
-
-Keep the Assist source available for periodic evaluation as Incubator features
-reach the Home Assistant Assist pipeline. The owner's decision to move to it depends
-on demonstrated wake-word detection/verification, speaker identification, spoken
-"stop" interruption, and continued microphone listening throughout an active
-conversation for interruptions and follow-ups without another wake word, always
-subject to mute/privacy controls. These are reevaluation criteria, not claims of
-current Assist limitations or implemented/validated Encore hardware capabilities.
-They do not require an Assist package now or authorize automatic migration.
+Encore device packages use native Voice Incubator. There is no Assist adapter.
 
 - Each production package must link and start exactly one voice backend:
-  `incubator` by default, or `assist` only in a future package for the Home
-  Assistant Assist pipeline.
+  `incubator`.
   Do not bundle both adapters and disable one through configuration. Audit the
   built dependency closure and package contents, not just the selected setting.
 - There is no runtime backend selector, fallback to the other backend, or live
@@ -129,14 +114,10 @@ They do not require an Assist package now or authorize automatic migration.
   selection alone never installs or permits a downgrade; ordinary OTA requires a
   strictly newer shared-core SemVer and the platform's revision/base safety gates.
   See the [shared update contract](update-contract.md). Backend is not a dev/stable channel.
-- Qualify the installed backend on each supported device/base/ABI. Incubator
-  acceptance must not depend on Assist hardware qualification or switching tests;
-  a later Assist variant needs its own acceptance evidence.
+- Qualify voice on each supported device/base/ABI.
 
-The dual-backend virtual lab may retain switching as test instrumentation; it is
-not a production composition root or a package to ship. Common device controls
-must not require a second voice backend. The Dot uses a separate encrypted
-ESPHome common-control endpoint without advertising an Assist voice satellite.
+The virtual lab is not a package to ship. Common device controls are independent
+of voice and use a separate encrypted ESPHome endpoint.
 
 These requirements do not add runtime fields to `profile.json` or enable release
 support. Schema 1 remains identity and planning/experimental status only until an implemented

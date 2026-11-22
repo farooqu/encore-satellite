@@ -211,6 +211,19 @@ func TestNativeMonitoringRequiresIndicatorAndDoesNotReuseAudio(t *testing.T) {
 		}
 	}
 	noAudio()
+	send(t, c, 0x13, []byte(`{"reason":"done","listen":true}`))
+	// A second monitor request acknowledges that the reader passed the stray
+	// HANGUP. It must keep the same owner and continue streaming.
+	send(t, c, 0x14, []byte(`{"active":true,"request_id":1}`))
+	if got := object(t, receive(t, c, 0x09)); got["accepted"] != true || e.Snapshot().MonitorID != first {
+		t.Fatal("stray follow-up interrupted monitoring", got, e.Snapshot())
+	}
+	capture(42)
+	for _, kind := range []byte{0x0C, 0x0A} {
+		if got := receive(t, c, kind); !slices.Equal(got, []byte{42, 0}) {
+			t.Fatalf("monitor PCM after stray follow-up on %#x: %v", kind, got)
+		}
+	}
 	send(t, c, 0x14, []byte(`{"active":false}`))
 	waitMonitor(false)
 	noAudio()
@@ -263,6 +276,16 @@ func TestNativeIntercomSeparatesCuesAndRelay(t *testing.T) {
 			st := e.Snapshot()
 			if st.Output.Owner != "intercom" || st.MonitorID == 0 || st.WakeAllowed {
 				t.Fatalf("intercom did not own playback: %+v", st)
+			}
+			if err := s.Capture(audio.Frame{Samples: []int16{123}}); err != nil {
+				t.Fatal(err)
+			}
+			e.ConfirmMonitor(st.MonitorID)
+			if err := s.Capture(audio.Frame{Samples: []int16{-513}, Sequence: 1, CapturedAt: time.Millisecond}); err != nil {
+				t.Fatal(err)
+			}
+			if got := receive(t, c, 0x0A); !slices.Equal(got, []byte{255, 253}) {
+				t.Fatalf("intercom PCM: %v; want only capture after indicator confirmation", got)
 			}
 			if end == "mute" {
 				e.SetMuted(true)
@@ -330,6 +353,8 @@ func TestNativeCallAECAdvertisesAndPairsCapture(t *testing.T) {
 		}
 	}
 
+	send(t, c, 0x12, []byte(`{"type":"listening"}`))
+	send(t, c, 0x12, []byte(`{"type":"responding"}`)) // External reply, no native PCM.
 	send(t, c, 0x13, []byte(`{"reason":"complete","listen":true}`))
 	follow := object(t, receive(t, c, 0x02))
 	if follow["wake_word"] != "follow_up" || follow["preroll_bytes"] != float64(0) || follow["aec_preroll_bytes"] != float64(0) {
@@ -359,7 +384,7 @@ func TestNativeWireEvidenceEndpointingDrainAndFollowUp(t *testing.T) {
 	e, address := start(t, p)
 	c := connect(t, address)
 	hello := object(t, receive(t, c, 0x01))
-	if hello["protocol"] != float64(2) || hello["aec"] != false || hello["monitor"] != false || hello["intercom"] != false {
+	if hello["protocol"] != float64(2) || hello["preroll_ms"] != float64(1500) || hello["aec"] != false || hello["monitor"] != false || hello["intercom"] != false {
 		t.Fatal(hello)
 	}
 	if hello["wake_format"] != nil || hello["model_slots"] != nil {
@@ -394,9 +419,6 @@ func TestNativeWireEvidenceEndpointingDrainAndFollowUp(t *testing.T) {
 	}
 	if got := receive(t, c, 0x03); !slices.Equal(got, []byte{0, 128, 255, 127}) {
 		t.Fatal(got)
-	}
-	if err := e.FinishInput(); err != session.ErrUnavailable {
-		t.Fatal("invented native half-close", err)
 	}
 	waitFor := func(ready func(presentation.State) bool) presentation.State {
 		t.Helper()
@@ -780,12 +802,17 @@ func TestPushedModelsDeferActiveOwnership(t *testing.T) {
 			}
 			switch kind {
 			case "call", "call_during_upload":
+				send(t, c, 0x12, []byte(`{"type":"listening"}`))
+				send(t, c, 0x12, []byte(`{"type":"responding"}`))
 				send(t, c, 0x13, []byte(`{"reason":"done","listen":true}`))
 				if got := object(t, receive(t, c, 0x02)); got["wake_word"] != "follow_up" || s.ModelCount() != 0 {
 					t.Fatal("refresh did not wait for follow-up", got, s.ModelCount())
 				}
 				send(t, c, 0x13, []byte(`{"reason":"done"}`))
 			case "hung_up_output":
+				if st := s.Engine.Snapshot(); st.InputOpen || st.Output.State != "playing" {
+					t.Fatal("ordinary HANGUP did not close input independently of playback", st)
+				}
 				send(t, c, 0x11, nil)
 				receive(t, c, 0x06)
 			case "announcement":
@@ -985,7 +1012,7 @@ func TestModelReloadOnReconnectPreservesLocalAnnouncement(t *testing.T) {
 	}
 }
 
-func TestPushedModelRunsPCMAndStopCancelsInsteadOfCalling(t *testing.T) {
+func energyModel() []byte {
 	// A tiny valid MNB1 model copies the first microWakeWord feature into the
 	// logit. Silence (-128) maps to 0; energy maps to 255. This tests the real
 	// frontend/executor/transport without asserting trained-model accuracy.
@@ -1008,6 +1035,75 @@ func TestPushedModelRunsPCMAndStopCancelsInsteadOfCalling(t *testing.T) {
 		blob[i] = 255
 	}
 	blob[len(blob)-256+128] = 0
+	return blob
+}
+
+func TestLiveMonitorReportsScoresWithoutWakeActions(t *testing.T) {
+	e := session.New(&speaker{})
+	s := &incubator.Server{Engine: e, Name: "test", MAC: "02:00:00:00:00:01", CallAEC: true, MonitorAEC: true, EnableModels: true}
+	c := connect(t, serveTest(t, s))
+	receive(t, c, 0x01)
+	for _, model := range []struct{ id, word string }{{"test-model", "okay_test"}, {"stop", "stop"}} {
+		if got := pushModel(t, c, model.id, energyModel(), func(h map[string]any) { h["wake_word"] = model.word }, model.id); got["ok"] != true {
+			t.Fatal(got)
+		}
+	}
+	send(t, c, 0x14, []byte(`{"active":true,"request_id":1}`))
+	if got := object(t, receive(t, c, 0x09)); got["accepted"] != true {
+		t.Fatal(got)
+	}
+	e.ConfirmMonitor(e.Snapshot().MonitorID)
+	// Keep a ringing alert active: a spoken Stop must not cancel it during
+	// monitoring, even though the same model would be armed outside monitoring.
+	send(t, c, 0x12, []byte(`{"type":"timer_ringing"}`))
+	for deadline := time.Now().Add(time.Second); !e.Snapshot().Alert; time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("timer did not ring")
+		}
+	}
+	for i := range 111 {
+		pcm := make([]int16, 320)
+		if i >= 101 && i <= 105 {
+			for j := range pcm {
+				pcm[j] = int16(20000 * math.Sin(2*math.Pi*200*float64(j)/16000))
+			}
+		}
+		if err := s.Capture(audio.Frame{Samples: pcm, Sequence: uint64(i), CapturedAt: time.Duration(i) * 20 * time.Millisecond}); err != nil {
+			t.Fatal(err)
+		}
+		receive(t, c, 0x0C)
+		receive(t, c, 0x0A)
+		if i != 0 && i%5 == 0 {
+			var report wake.Report
+			if err := json.Unmarshal(receive(t, c, 0x0B), &report); err != nil {
+				t.Fatal(err)
+			}
+			if len(report.Models) != 2 || report.Models[0].ID != "test-model" || report.Models[1].ID != "stop" || report.Models[0].Cutoff != 217 || report.Detected == nil {
+				t.Fatalf("block %d: malformed report %+v", i, report)
+			}
+			score := report.Models[0]
+			switch {
+			case i < 105 && (len(report.Detected) != 0 || score.Peak != 0 || score.Window != 0):
+				t.Fatalf("silence reported as wake: %+v", report)
+			case i == 105 && (!slices.Equal(report.Detected, []string{"test-model", "stop"}) || score.Peak != 255 || score.Window <= score.Cutoff):
+				t.Fatalf("monitor did not retain the hit and 8-bit scores: %+v", report)
+			case i > 105 && len(report.Detected) != 0:
+				t.Fatalf("hit leaked into next report: %+v", report)
+			}
+		}
+		time.Sleep(10 * time.Millisecond) // Let the bounded DSP queue consume the block.
+	}
+	if state := s.Snapshot(true); state.Turn != 0 || state.InputOpen || state.WakeArmed || !state.Alert || state.MonitorID == 0 {
+		t.Fatalf("monitored detection dispatched an action: %+v", state)
+	}
+	e.SetMuted(true)
+	if _, err := c.Read(make([]byte, 1)); err != io.EOF {
+		t.Fatalf("monitor remained open after mute: %v", err)
+	}
+}
+
+func TestPushedModelRunsPCMAndStopCancelsInsteadOfCalling(t *testing.T) {
+	blob := energyModel()
 	s, address := startServer(t, &speaker{}, true)
 	s.Engine.SetMuted(true)
 	c := connect(t, address)
@@ -1046,7 +1142,7 @@ func TestPushedModelRunsPCMAndStopCancelsInsteadOfCalling(t *testing.T) {
 	feed(false, 100)
 	feed(true, 5)
 	call := object(t, receive(t, c, 2))
-	if call["wake_word"] != "energy-fixture" || call["max_probability"] != float64(255) || call["cutoff"] != float64(217) || call["preroll_bytes"] != float64(64000) {
+	if call["wake_word"] != "energy-fixture" || call["max_probability"] != float64(255) || call["cutoff"] != float64(217) || call["preroll_bytes"] != float64(48000) {
 		t.Fatal(call)
 	}
 	// Flush all pre-roll and live samples before checking Stop's notification.

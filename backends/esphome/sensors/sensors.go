@@ -12,10 +12,9 @@ import (
 // model or form factor. A missing capability is omitted from discovery and
 // state; a failed read of a supported capability is not absence.
 type Sources struct {
-	MicrophoneMuted  func() bool
-	Illuminance      *illuminance.Monitor
-	WiFi             func() (ssid, changeStatus string, err error)
-	RunningVoiceMode func() string
+	MicrophoneMuted func() bool
+	Illuminance     *illuminance.Monitor
+	WiFi            func() (ssid, changeStatus string, err error)
 }
 
 func key(id string) uint32 { return (&esphome.Base{ObjectID: id}).Key() }
@@ -25,7 +24,6 @@ const (
 	illuminanceID     = "illuminance"
 	wifiSSIDID        = "wifi_ssid"
 	wifiStatusID      = "wifi_change_status"
-	runningVoiceID    = "running_voice_mode"
 )
 
 // List never emits ListEntitiesDone; the composing endpoint owns that boundary.
@@ -51,9 +49,6 @@ func (s Sources) catalog() []proto.Message {
 			&api.ListEntitiesTextSensorResponse{Key: key(wifiSSIDID), ObjectId: wifiSSIDID, Name: "Wi-Fi SSID", EntityCategory: esphome.CategoryDiagnostic},
 			&api.ListEntitiesTextSensorResponse{Key: key(wifiStatusID), ObjectId: wifiStatusID, Name: "Wi-Fi change status", EntityCategory: esphome.CategoryDiagnostic},
 		)
-	}
-	if s.RunningVoiceMode != nil {
-		entities = append(entities, &api.ListEntitiesTextSensorResponse{Key: key(runningVoiceID), ObjectId: runningVoiceID, Name: "Running voice mode", EntityCategory: esphome.CategoryDiagnostic})
 	}
 	return entities
 }
@@ -90,9 +85,6 @@ func (s Sources) States() []proto.Message {
 			&api.TextSensorStateResponse{Key: key(wifiSSIDID), State: ssid, MissingState: err != nil},
 			&api.TextSensorStateResponse{Key: key(wifiStatusID), State: status},
 		)
-	}
-	if s.RunningVoiceMode != nil {
-		states = append(states, &api.TextSensorStateResponse{Key: key(runningVoiceID), State: s.RunningVoiceMode()})
 	}
 	return states
 }

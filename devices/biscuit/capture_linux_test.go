@@ -27,8 +27,7 @@ type recordingLink struct {
 	closed   bool
 }
 
-func (*recordingLink) Backend() session.Backend { return session.Incubator }
-func (l *recordingLink) Close() error           { l.closed = true; return nil }
+func (l *recordingLink) Close() error { l.closed = true; return nil }
 func (l *recordingLink) Send(c session.Command) error {
 	c.Samples = append([]int16(nil), c.Samples...)
 	l.commands = append(l.commands, c)

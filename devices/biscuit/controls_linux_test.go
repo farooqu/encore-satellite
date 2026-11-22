@@ -218,8 +218,7 @@ func TestButtonsVolumeTapHoldReleaseAndLimits(t *testing.T) {
 
 type buttonLink struct{ commands chan string }
 
-func (*buttonLink) Backend() session.Backend { return session.Incubator }
-func (*buttonLink) Close() error             { return nil }
+func (*buttonLink) Close() error { return nil }
 func (l *buttonLink) Send(c session.Command) error {
 	select {
 	case l.commands <- c.Kind:

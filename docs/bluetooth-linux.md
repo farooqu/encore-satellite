@@ -159,10 +159,8 @@ and saved state unchanged. It is called before applying a switch change.
 
 `(*Proxy).Serve(ctx context.Context, listener net.Listener, info esphome.Info,
 key esphome.PSK) error` runs the voice-independent control endpoint and rejects
-a zero Noise key. For Assist, assign the same proxy to `assist.Server.Controls`
-instead; that server composes one worker lifecycle/listener. Do not call `Run`
-twice. Keep encrypted ESPHome controls available in **both** voice modes, not
-only while Assist is selected. Capability bits remain stable while OFF, but
+a zero Noise key. Do not call `Run` twice. Keep encrypted ESPHome controls
+available even when the voice connection is offline. Capability bits remain stable while OFF, but
 slots are zero and radio operations refused. No unauthenticated/plaintext proxy
 or automatic PSK provisioning is enabled here.
 
@@ -241,7 +239,7 @@ qualifies BlueZ/RF bonding or changed-service cache invalidation on a real peer.
 Before supported-device release, test the exact kernel/base on a physical Dot:
 phone/browser first-boot Improv with proxy OFF (physical authorization, expired
 auth, rejected credentials, association/address/persistence, reconnect and
-cleanup); HA discovery/encrypted control in both voice modes; known and unseen
+cleanup); HA discovery/encrypted control during voice reconnects; known and unseen
 random/public-address GATT devices; reads/writes/notifications/descriptors;
 Just Works bond persistence and unpair; PIN/numeric-confirmation rejection;
 simultaneous links; OFF/pause/disconnect/daemon restart cleanup; no stale results;

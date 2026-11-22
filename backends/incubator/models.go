@@ -13,6 +13,7 @@ import (
 	"slices"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/farooqu/encore-satellite/core/audio"
 	"github.com/farooqu/encore-satellite/core/session"
@@ -49,7 +50,7 @@ type wakeModel struct {
 
 type modelFrame struct {
 	audio.Frame
-	epoch uint64
+	epoch, monitorID uint64
 }
 
 // modelSession is deliberately connection-local and volatile. Its worker owns
@@ -79,6 +80,10 @@ func newModelSession(parent context.Context, engine *session.Engine, generation 
 		var last audio.Frame
 		var haveFrame bool
 		var retry <-chan struct{}
+		var lastMonitorID uint64
+		var reportAt time.Duration
+		var scores [modelSlots]wake.ModelScore
+		var detected [modelSlots]bool
 		for {
 			select {
 			case <-ctx.Done():
@@ -88,23 +93,32 @@ func newModelSession(parent context.Context, engine *session.Engine, generation 
 			case frame := <-m.frames:
 				m.mu.Lock()
 				if ctx.Err() == nil && frame.epoch == m.epoch.Load() {
-					listen, stop := engine.WakeState(generation)
+					listen, stop, monitorID := engine.WakeState(generation)
+					if frame.monitorID != monitorID {
+						m.mu.Unlock()
+						clear(frame.Samples)
+						continue // The owner changed while this block was queued.
+					}
 					// Never start a new turn from the old ordinary models while
 					// the worker is waiting to activate their replacement set.
 					listen = listen && m.pending == nil
-					if !haveFrame || frame.Discontinuity || frame.Sequence != last.Sequence+1 || frame.CapturedAt <= last.CapturedAt {
+					if monitorID != lastMonitorID {
+						scores, detected = [modelSlots]wake.ModelScore{}, [modelSlots]bool{}
+						reportAt = frame.CapturedAt + 100*time.Millisecond
+					}
+					if monitorID != lastMonitorID || !haveFrame || frame.Discontinuity || frame.Sequence != last.Sequence+1 || frame.CapturedAt <= last.CapturedAt {
 						m.reset()
 					}
 					ordinaryArmed := false
-					for _, model := range m.models {
+					for i, model := range m.models {
 						if model == nil {
 							continue
 						}
 						isStop := model.header.ID == "stop" || model.header.WakeWord == "stop"
-						armed := listen
+						armed := listen || monitorID != 0
 						if isStop {
 							armed = stop
-						} else if armed {
+						} else if listen {
 							ordinaryArmed = true
 						}
 						if model.armed != armed {
@@ -115,15 +129,39 @@ func newModelSession(parent context.Context, engine *session.Engine, generation 
 							continue
 						}
 						mean, peak, hit := model.detector.Feed(frame.Samples)
+						cutoff := uint8(float32(float32(model.header.Cutoff)*255) + .5)
+						if monitorID != 0 {
+							peak, window := model.detector.TakeReport()
+							score := &scores[i]
+							score.ID, score.Cutoff = model.header.ID, cutoff
+							score.Peak, score.Window = max(score.Peak, peak), max(score.Window, window)
+							detected[i] = detected[i] || hit
+							continue // Monitored detections are telemetry, never actions.
+						}
 						if hit && ctx.Err() == nil {
 							word := model.header.WakeWord
 							if isStop {
 								word = "stop"
 							}
-							_ = engine.WakeFor(generation, wake.Detection{Word: word, Probability: mean, MaxProbability: peak, Cutoff: uint8(float32(float32(model.header.Cutoff)*255) + .5)})
+							_ = engine.WakeFor(generation, wake.Detection{Word: word, Probability: mean, MaxProbability: peak, Cutoff: cutoff})
 						}
 					}
 					m.armed.Store(ordinaryArmed)
+					if monitorID != 0 && frame.CapturedAt >= reportAt {
+						report := wake.Report{Models: []wake.ModelScore{}, Detected: []string{}}
+						for i, score := range scores {
+							if score.ID != "" {
+								report.Models = append(report.Models, score)
+								if detected[i] {
+									report.Detected = append(report.Detected, score.ID)
+								}
+							}
+						}
+						_ = engine.ReportWake(generation, monitorID, report)
+						scores, detected = [modelSlots]wake.ModelScore{}, [modelSlots]bool{}
+						reportAt = frame.CapturedAt + 100*time.Millisecond
+					}
+					lastMonitorID = monitorID
 					last = frame.Frame
 					last.Samples = nil
 					haveFrame = true
@@ -155,7 +193,7 @@ func (m *modelSession) close() {
 	}
 }
 
-func (m *modelSession) feed(frame audio.Frame) {
+func (m *modelSession) feed(frame audio.Frame, monitorID uint64) {
 	if frame.Validate() != nil || frame.Discontinuity {
 		return
 	}
@@ -166,7 +204,7 @@ func (m *modelSession) feed(frame audio.Frame) {
 	select {
 	case <-m.done:
 		clear(frame.Samples)
-	case m.frames <- modelFrame{Frame: frame, epoch: m.epoch.Load()}:
+	case m.frames <- modelFrame{Frame: frame, epoch: m.epoch.Load(), monitorID: monitorID}:
 		// Ownership of samples passed to the worker.
 	default:
 		clear(frame.Samples)

@@ -6,6 +6,7 @@ import (
 	"slices"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/farooqu/encore-satellite/core/audio"
@@ -15,14 +16,12 @@ import (
 )
 
 type link struct {
-	backend  session.Backend
 	commands []session.Command
 	closed   bool
 	fail     bool
 }
 
-func (l *link) Backend() session.Backend { return l.backend }
-func (l *link) Close() error             { l.closed = true; return nil }
+func (l *link) Close() error { l.closed = true; return nil }
 func (l *link) Send(c session.Command) error {
 	if l.fail {
 		return errors.New("queue full")
@@ -73,7 +72,7 @@ func (p *player) Drain(ctx context.Context) error {
 
 func fixture(t *testing.T) (*session.Engine, *link, *player, uint64) {
 	t.Helper()
-	p, l := &player{}, &link{backend: session.Incubator}
+	p, l := &player{}, &link{}
 	e := session.New(p)
 	g, err := e.Attach(l)
 	if err != nil {
@@ -87,6 +86,14 @@ func TestRemoteCaptureFollowsExactIndicator(t *testing.T) {
 	old, err := e.SetMonitor(generation, true, false, 1)
 	if err != nil || old == 0 {
 		t.Fatalf("first monitor: id=%d err=%v", old, err)
+	}
+	report := wake.Report{Detected: []string{"model"}}
+	if err := e.ReportWake(generation, old, report); !errors.Is(err, session.ErrUnavailable) {
+		t.Fatal("unconfirmed monitor accepted telemetry", err)
+	}
+	e.ConfirmMonitor(old)
+	if err := e.ReportWake(generation, old, report); err != nil {
+		t.Fatal("confirmed monitor rejected telemetry", err)
 	}
 	id, err := e.SetMonitor(generation, true, true, 2)
 	if err != nil || id == 0 || id == old {
@@ -103,6 +110,12 @@ func TestRemoteCaptureFollowsExactIndicator(t *testing.T) {
 	e.ConfirmMonitor(old)
 	feed(37)
 	e.ConfirmMonitor(id)
+	if err := e.ReportWake(generation, old, report); !errors.Is(err, session.ErrStale) {
+		t.Fatal("replaced monitor accepted a late inference", err)
+	}
+	if err := e.ReportWake(generation, id, report); !errors.Is(err, session.ErrUnavailable) {
+		t.Fatal("intercom accepted telemetry", err)
+	}
 	e.HideMonitor(old)
 	feed(61)
 	e.HideMonitor(id)
@@ -120,63 +133,53 @@ func TestRemoteCaptureFollowsExactIndicator(t *testing.T) {
 }
 
 func TestVoiceActivityCoversListeningThroughPhysicalDrain(t *testing.T) {
-	for _, backend := range []session.Backend{session.Assist, session.Incubator} {
-		t.Run(string(backend), func(t *testing.T) {
-			p := &player{entered: make(chan struct{}), release: make(chan struct{})}
-			e := session.New(p)
-			_ = e.Select(backend)
-			g, err := e.Attach(&link{backend: backend})
-			if err != nil {
-				t.Fatal(err)
-			}
-			var active atomic.Bool
-			e.SetActivityHandler(active.Store)
-			if active.Load() {
-				t.Fatal("idle voice claims output")
-			}
-			if err := e.Wake(wake.Detection{Word: "lab-wake"}); err != nil {
-				t.Fatal(err)
-			}
-			if !active.Load() {
-				t.Fatal("microphone listening did not claim ducking")
-			}
-			_ = e.Handle(g, session.Event{Kind: "listening"})
-			_ = e.Handle(g, session.Event{Kind: "processing"})
-			if !active.Load() {
-				t.Fatal("processing released ducking")
-			}
-			_ = e.Handle(g, session.Event{Kind: "output_start"})
-			_ = e.Output(g, []int16{307, -891})
-			if backend == session.Assist {
-				_ = e.Handle(g, session.Event{Kind: "run_end"})
-			} else {
-				_ = e.Handle(g, session.Event{Kind: "hangup"})
-			}
-			done := make(chan error, 1)
-			go func() { done <- e.EndOutput(g) }()
-			<-p.entered
-			if !active.Load() {
-				t.Fatal("wire end released ducking before physical drain")
-			}
-			if s := e.Snapshot(); !s.Active || s.Output.State != "draining" || s.Output.Owner != "voice" || !s.Output.Received || s.TalkAllowed {
-				t.Fatal("draining output was hidden by wire completion", s)
-			}
-			close(p.release)
-			if err := <-done; err != nil {
-				t.Fatal(err)
-			}
-			if active.Load() {
-				t.Fatal("finished turn retained ducking")
-			}
-			if s := e.Snapshot(); s.Active || s.Output.State != "" {
-				t.Fatal("drained output retained presentation ownership", s)
-			}
-			_ = e.StartManual()
-			_ = e.Stop()
-			if active.Load() {
-				t.Fatal("cancelled turn retained ducking")
-			}
-		})
+	p := &player{entered: make(chan struct{}), release: make(chan struct{})}
+	e := session.New(p)
+	g, err := e.Attach(&link{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var active atomic.Bool
+	e.SetActivityHandler(active.Store)
+	if active.Load() {
+		t.Fatal("idle voice claims output")
+	}
+	if err := e.Wake(wake.Detection{Word: "lab-wake"}); err != nil {
+		t.Fatal(err)
+	}
+	if !active.Load() {
+		t.Fatal("microphone listening did not claim ducking")
+	}
+	_ = e.Handle(g, session.Event{Kind: "listening"})
+	_ = e.Handle(g, session.Event{Kind: "processing"})
+	if !active.Load() {
+		t.Fatal("processing released ducking")
+	}
+	_ = e.Output(g, []int16{307, -891})
+	_ = e.Handle(g, session.Event{Kind: "hangup"})
+	done := make(chan error, 1)
+	go func() { done <- e.EndOutput(g) }()
+	<-p.entered
+	if !active.Load() {
+		t.Fatal("wire end released ducking before physical drain")
+	}
+	if s := e.Snapshot(); !s.Active || s.Output.State != "draining" || s.Output.Owner != "voice" || !s.Output.Received || s.TalkAllowed {
+		t.Fatal("draining output was hidden by wire completion", s)
+	}
+	close(p.release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if active.Load() {
+		t.Fatal("finished turn retained ducking")
+	}
+	if s := e.Snapshot(); s.Active || s.Output.State != "" {
+		t.Fatal("drained output retained presentation ownership", s)
+	}
+	_ = e.StartManual()
+	_ = e.Stop()
+	if active.Load() {
+		t.Fatal("cancelled turn retained ducking")
 	}
 }
 
@@ -194,8 +197,8 @@ func TestVoiceActivityKeepsOtherOwnersAndFencesOldConnection(t *testing.T) {
 	if active.Load() {
 		t.Fatal("last owner did not release ducking")
 	}
-	_ = e.Select(session.Assist)
-	ng, err := e.Attach(&link{backend: session.Assist})
+	e.Disconnect(g, "connection_closed")
+	ng, err := e.Attach(&link{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -290,7 +293,7 @@ func TestTimerStopRecoversWithoutStreamEndAndKeepsCallFence(t *testing.T) {
 				}
 				e.Disconnect(g, "connection_closed")
 				var err error
-				g, err = e.Attach(&link{backend: session.Incubator})
+				g, err = e.Attach(&link{})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -330,7 +333,7 @@ func TestWakeRetainsEvidenceAndBoundedPreRoll(t *testing.T) {
 	if err := e.Wake(d); err != nil {
 		t.Fatal(err)
 	}
-	if l.commands[0].Detection != d || l.commands[0].PreRollBytes != 64000 {
+	if l.commands[0].Detection != d || l.commands[0].PreRollBytes != 48000 {
 		t.Fatalf("lost evidence: %+v", l.commands[0])
 	}
 	var pcm []int16
@@ -340,7 +343,7 @@ func TestWakeRetainsEvidenceAndBoundedPreRoll(t *testing.T) {
 		}
 		pcm = append(pcm, c.Samples...)
 	}
-	if len(pcm) != 32000 || pcm[0] != 2000 || pcm[len(pcm)-1] != -31537 {
+	if len(pcm) != 24000 || pcm[0] != 10000 || pcm[len(pcm)-1] != -31537 {
 		t.Fatal("wrong ring order or unbounded pre-roll")
 	}
 	if e.Snapshot().Phase != "tentative" {
@@ -348,7 +351,7 @@ func TestWakeRetainsEvidenceAndBoundedPreRoll(t *testing.T) {
 	}
 }
 
-func TestPrivacyAndBackendSwitchFenceStaleReader(t *testing.T) {
+func TestPrivacyAndReconnectFenceStaleReader(t *testing.T) {
 	e, l, p, g := fixture(t)
 	var active atomic.Bool
 	e.SetActivityHandler(active.Store)
@@ -362,8 +365,8 @@ func TestPrivacyAndBackendSwitchFenceStaleReader(t *testing.T) {
 	if active.Load() {
 		t.Fatal("mute retained voice ducking")
 	}
-	if l.closed || !e.Snapshot().Connected || !e.Snapshot().Muted || p.flushed == 0 {
-		t.Fatal("mute revoked shared transport or retained local audio")
+	if !e.Snapshot().Muted || p.flushed == 0 || l.commands[len(l.commands)-1].Kind != "cancel" {
+		t.Fatal("mute failed to silence locally and cancel the voice call")
 	}
 	if err := e.Output(g, []int16{9}); err != nil || p.writes != 0 {
 		t.Fatalf("late audio: %v", err)
@@ -373,13 +376,11 @@ func TestPrivacyAndBackendSwitchFenceStaleReader(t *testing.T) {
 	}
 	_ = e.Capture(audio.Frame{Samples: []int16{77}})
 	e.SetMuted(false)
-	if err := e.Select(session.Assist); err != nil {
-		t.Fatal(err)
+	if _, err := e.Attach(&link{}); !errors.Is(err, session.ErrUnavailable) {
+		t.Fatal("replacement attached before cancellation retired the old connection")
 	}
-	if _, err := e.Attach(&link{backend: session.Incubator}); !errors.Is(err, session.ErrUnavailable) {
-		t.Fatal("wrong backend attached")
-	}
-	newLink := &link{backend: session.Assist}
+	e.Disconnect(g, "connection_closed")
+	newLink := &link{}
 	ng, err := e.Attach(newLink)
 	if err != nil {
 		t.Fatal(err)
@@ -387,7 +388,7 @@ func TestPrivacyAndBackendSwitchFenceStaleReader(t *testing.T) {
 	if err := e.Handle(g, session.Event{Kind: "timer_ringing"}); !errors.Is(err, session.ErrStale) {
 		t.Fatal("stale alert accepted")
 	}
-	if listen, stop := e.WakeState(g); listen || stop {
+	if listen, stop, monitor := e.WakeState(g); listen || stop || monitor != 0 {
 		t.Fatal("stale model execution armed")
 	}
 	if err := e.WakeFor(g, wake.Detection{Word: "old-model"}); !errors.Is(err, session.ErrStale) {
@@ -407,185 +408,82 @@ func TestPrivacyAndBackendSwitchFenceStaleReader(t *testing.T) {
 	}
 }
 
-func TestMuteCancelsAndWaitsForBackendBoundary(t *testing.T) {
-	for _, tc := range []struct {
-		name       string
-		backend    session.Backend
-		stream     bool
-		streamLast bool
-	}{
-		{"Assist no output", session.Assist, false, false},
-		{"Assist run ends before stream starts", session.Assist, true, true},
-		{"Assist stream ends before run", session.Assist, true, false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			p, l := &player{}, &link{backend: tc.backend}
-			e := session.New(p)
-			_ = e.Select(tc.backend)
-			g, _ := e.Attach(l)
-			_ = e.Capture(audio.Frame{Samples: []int16{17}, Sequence: 4})
-			_ = e.StartManual()
-			_ = e.Handle(g, session.Event{Kind: "run_start"})
-			if tc.stream {
-				_ = e.Handle(g, session.Event{Kind: "output_expected"})
-			}
-			e.SetMuted(true)
-			e.SetMuted(true) // Repeated mute must not enqueue a second cancel.
-			if len(l.commands) != 2 || l.commands[1].Kind != "cancel" || l.commands[1].Reason != "cancelled" {
-				t.Fatal("mute did not send pipeline cancellation", l.commands)
-			}
-			_ = e.Capture(audio.Frame{Samples: []int16{32767}, Sequence: 99, Discontinuity: true})
-			e.SetMuted(false)
-			if err := e.StartManual(); !errors.Is(err, session.ErrUnavailable) || e.Snapshot().Phase != "recovering" {
-				t.Fatal("unmute admitted a turn before cancellation completed", e.Snapshot(), err)
-			}
-			_ = e.Handle(g, session.Event{Kind: "responding", Text: "discard this"})
-			_ = e.Handle(g, session.Event{Kind: "error", Reason: "cancelled"})
-			_ = e.Output(g, []int16{-81, 7})
-			if tc.streamLast {
-				_ = e.Handle(g, session.Event{Kind: "run_end"})
-				if tc.stream {
-					_ = e.Handle(g, session.Event{Kind: "output_start"})
-				}
-			} else if tc.stream {
-				_ = e.Handle(g, session.Event{Kind: "output_start"})
-				_ = e.EndOutput(g)
-			}
-			if tc.stream && e.StartManual() != session.ErrUnavailable {
-				t.Fatal("accepted incomplete cancellation")
-			}
-			if tc.streamLast {
-				_ = e.EndOutput(g)
-			} else {
-				_ = e.Handle(g, session.Event{Kind: "run_end"})
-			}
-			if l.closed || !e.Snapshot().Connected || e.Snapshot().Reply != "" || p.writes != 0 || len(l.commands) != 2 {
-				t.Fatal("late response revived playback/presentation or revoked transport", e.Snapshot())
-			}
-			// A stopped/reopened host capture stream need not retain old counters.
-			_ = e.Capture(audio.Frame{Samples: []int16{-29}, Sequence: 0})
-			if err := e.Wake(wake.Detection{Word: "new"}); err != nil {
-				t.Fatal(err)
-			}
-			if got := l.commands[len(l.commands)-1].Samples; !slices.Equal(got, []int16{-29}) {
-				t.Fatal("pre-mute/recovering microphone input leaked", got)
-			}
-		})
-	}
-}
-
-func TestAssistMuteBeforeRunStartStillGetsACancellationBoundary(t *testing.T) {
-	p, l := &player{}, &link{backend: session.Assist}
-	e := session.New(p)
-	_ = e.Select(session.Assist)
-	g, _ := e.Attach(l)
-	_ = e.StartManual()
-	e.SetMuted(true)
-	e.SetMuted(false)
-	if len(l.commands) != 2 || l.commands[1].Kind != "discard_audio" || l.closed || e.StartManual() != session.ErrUnavailable {
-		t.Fatal("aborted before HA could establish a terminal boundary")
-	}
-	_ = e.Handle(g, session.Event{Kind: "run_start"})
-	if len(l.commands) != 3 || l.commands[2].Kind != "cancel" {
-		t.Fatal("deferred cancellation not sent", l.commands)
-	}
-	_ = e.Handle(g, session.Event{Kind: "run_end"})
-	if err := e.StartManual(); err != nil {
-		t.Fatal("deferred cancellation wedged the next turn", err)
-	}
-}
-
 func TestMutedStartupAndReconnectFenceOldReaders(t *testing.T) {
-	for _, backend := range []session.Backend{session.Assist, session.Incubator} {
-		t.Run(string(backend), func(t *testing.T) {
-			e := session.New(&player{})
-			_ = e.Select(backend)
-			e.SetMuted(true)
-			for range 2 {
-				l := &link{backend: backend}
-				g, err := e.Attach(l)
-				if err != nil || !e.Snapshot().Muted || !e.Snapshot().Connected || e.Snapshot().Phase != "muted" {
-					t.Fatal("muted connection rejected or microphone re-enabled", e.Snapshot(), err)
-				}
-				_ = e.Capture(audio.Frame{Samples: []int16{127}})
-				_ = e.Handle(g, session.Event{Kind: "hangup", Listen: true})
-				_ = e.Handle(g, session.Event{Kind: "timer_ringing"})
-				_ = e.EndOutput(g)
-				if e.StartManual() != session.ErrUnavailable || len(l.commands) != 0 || e.Snapshot().Alert {
-					t.Fatal("muted connection could start or publish voice events")
-				}
-				e.SetMuted(false)
-				if err := e.StartManual(); err != nil {
-					t.Fatal(err)
-				}
-				e.SetMuted(true) // Reconnect before this cancellation completes.
-				e.Disconnect(g, "network_lost")
-				if !e.Snapshot().Muted || e.Snapshot().Connected {
-					t.Fatal(e.Snapshot())
-				}
-				if err := e.Output(g, []int16{99}); err != session.ErrStale {
-					t.Fatal("disconnected reader retained ownership", err)
-				}
-			}
-			g, err := e.Attach(&link{backend: backend})
-			if err != nil {
-				t.Fatal(err)
-			}
-			e.Disconnect(g-1, "old_reader_cleanup")
-			_ = e.Handle(g-1, session.Event{Kind: "run_end"})
-			e.SetMuted(false)
-			if err := e.StartManual(); err != nil {
-				t.Fatal("old cancellation survived reconnect", err)
-			}
-		})
+	e := session.New(&player{})
+	e.SetMuted(true)
+	for range 2 {
+		l := &link{}
+		g, err := e.Attach(l)
+		if err != nil || !e.Snapshot().Muted || !e.Snapshot().Connected || e.Snapshot().Phase != "muted" {
+			t.Fatal("muted connection rejected or microphone re-enabled", e.Snapshot(), err)
+		}
+		_ = e.Capture(audio.Frame{Samples: []int16{127}})
+		_ = e.Handle(g, session.Event{Kind: "hangup", Listen: true})
+		_ = e.Handle(g, session.Event{Kind: "timer_ringing"})
+		_ = e.EndOutput(g)
+		if e.StartManual() != session.ErrUnavailable || len(l.commands) != 0 || e.Snapshot().Alert {
+			t.Fatal("muted connection could start or publish voice events")
+		}
+		e.SetMuted(false)
+		if err := e.StartManual(); err != nil {
+			t.Fatal(err)
+		}
+		e.SetMuted(true) // Reconnect before this cancellation completes.
+		e.Disconnect(g, "network_lost")
+		if !e.Snapshot().Muted || e.Snapshot().Connected {
+			t.Fatal(e.Snapshot())
+		}
+		if err := e.Output(g, []int16{99}); err != session.ErrStale {
+			t.Fatal("disconnected reader retained ownership", err)
+		}
+	}
+	g, err := e.Attach(&link{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.Disconnect(g-1, "old_reader_cleanup")
+	_ = e.Handle(g-1, session.Event{Kind: "hangup", Listen: true})
+	e.SetMuted(false)
+	if err := e.StartManual(); err != nil {
+		t.Fatal("old cancellation survived reconnect", err)
 	}
 }
 
 func TestMuteDuringDrainCannotCompleteANewerTurn(t *testing.T) {
-	for _, backend := range []session.Backend{session.Assist, session.Incubator} {
-		t.Run(string(backend), func(t *testing.T) {
-			p, l := &player{entered: make(chan struct{}), release: make(chan struct{}), holdCancelled: true}, &link{backend: backend}
-			e := session.New(p)
-			_ = e.Select(backend)
-			g, _ := e.Attach(l)
-			_ = e.StartManual()
-			_ = e.Handle(g, session.Event{Kind: "listening"})
-			_ = e.Handle(g, session.Event{Kind: "output_start"})
-			_ = e.Output(g, []int16{5, -19, 83})
-			_ = e.Handle(g, session.Event{Kind: "run_end"})
-			done := make(chan error, 1)
-			go func() { done <- e.EndOutput(g) }()
-			<-p.entered
-			e.SetMuted(true)
-			e.SetMuted(false)
-			if backend == session.Incubator {
-				if e.StartManual() != session.ErrUnavailable {
-					t.Fatal("old stream end mistaken for cancellation acknowledgement")
-				}
-				_ = e.EndOutput(g) // Even the ACK cannot release native ownership.
-				e.Disconnect(g, "connection_closed")
-				l = &link{backend: backend}
-				g, _ = e.Attach(l)
-			}
-			if err := e.StartManual(); err != nil {
-				t.Fatal(err)
-			}
-			_ = e.Handle(g, session.Event{Kind: "listening"})
-			_ = e.Handle(g, session.Event{Kind: "output_start"})
-			close(p.release)
-			select {
-			case err := <-done:
-				if err != nil && !(backend == session.Incubator && err == session.ErrStale) {
-					t.Fatal(err)
-				}
-			case <-time.After(time.Second):
-				t.Fatal("mute blocked behind drain")
-			}
-			_ = e.Output(g, []int16{-31, 67})
-			if l.closed || p.writes != 5 || l.commands[len(l.commands)-1].Kind != "start" {
-				t.Fatal("cancelled drain interfered with new stream", e.Snapshot())
-			}
-		})
+	p, l := &player{entered: make(chan struct{}), release: make(chan struct{}), holdCancelled: true}, &link{}
+	e := session.New(p)
+	g, _ := e.Attach(l)
+	_ = e.StartManual()
+	_ = e.Handle(g, session.Event{Kind: "listening"})
+	_ = e.Output(g, []int16{5, -19, 83})
+	done := make(chan error, 1)
+	go func() { done <- e.EndOutput(g) }()
+	<-p.entered
+	e.SetMuted(true)
+	e.SetMuted(false)
+	if e.StartManual() != session.ErrUnavailable {
+		t.Fatal("old stream end mistaken for cancellation acknowledgement")
+	}
+	_ = e.EndOutput(g) // Even the ACK cannot release native ownership.
+	e.Disconnect(g, "connection_closed")
+	l = &link{}
+	g, _ = e.Attach(l)
+	if err := e.StartManual(); err != nil {
+		t.Fatal(err)
+	}
+	_ = e.Handle(g, session.Event{Kind: "listening"})
+	close(p.release)
+	select {
+	case err := <-done:
+		if err != session.ErrStale {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("mute blocked behind drain")
+	}
+	_ = e.Output(g, []int16{-31, 67})
+	if l.closed || p.writes != 5 || l.commands[len(l.commands)-1].Kind != "start" {
+		t.Fatal("cancelled drain interfered with new stream", e.Snapshot())
 	}
 }
 
@@ -623,7 +521,7 @@ func TestStopInterruptsDrainAndRejectsLateAudio(t *testing.T) {
 		t.Fatal("cancelled drain released native generation", err)
 	}
 	e.Disconnect(g, "connection_closed")
-	g, _ = e.Attach(&link{backend: session.Incubator})
+	g, _ = e.Attach(&link{})
 	if err := e.StartManual(); err != nil {
 		t.Fatal(err)
 	}
@@ -736,12 +634,18 @@ func TestDiscontinuityAndTransportFailureFailClosed(t *testing.T) {
 func TestIncubatorElectionAndFollowUp(t *testing.T) {
 	e, l, _, g := fixture(t)
 	_ = e.StartManual()
+	_ = e.Handle(g, session.Event{Kind: "listening"})
+	_ = e.Handle(g, session.Event{Kind: "responding"}) // Reply can play on an external speaker.
 	if err := e.Handle(g, session.Event{Kind: "hangup", Listen: true}); err != nil {
 		t.Fatal(err)
 	}
 	last := l.commands[len(l.commands)-1]
 	if last.Detection.Word != "follow_up" || last.PreRollBytes != 0 {
 		t.Fatal("follow-up replays wake audio")
+	}
+	before := e.Snapshot()
+	if err := e.Handle(g, session.Event{Kind: "hangup", Listen: true}); err != nil || e.Snapshot() != before || len(l.commands) != 2 {
+		t.Fatal("duplicate HANGUP changed the listening follow-up", err, e.Snapshot(), l.commands)
 	}
 	_ = e.Handle(g, session.Event{Kind: "responding", Text: ""})
 	if e.Snapshot().Phase != "speaking" || e.Snapshot().Reply != "" {
@@ -751,6 +655,69 @@ func TestIncubatorElectionAndFollowUp(t *testing.T) {
 	if l.closed || !e.Snapshot().Connected || e.Snapshot().Reason != "answered_elsewhere" {
 		t.Fatal("upstream election ignored")
 	}
+}
+
+func TestFollowUpRequiresCurrentResponse(t *testing.T) {
+	for _, phase := range []string{"idle", "ended", "unaccepted", "listening", "working", "playing"} {
+		t.Run(phase, func(t *testing.T) {
+			e, l, _, g := fixture(t)
+			if phase != "idle" {
+				_ = e.Wake(wake.Detection{Word: "nabu"})
+			}
+			switch phase {
+			case "ended":
+				_ = e.Handle(g, session.Event{Kind: "hangup", Reason: "done"})
+			case "unaccepted":
+				_ = e.Handle(g, session.Event{Kind: "responding"})
+			case "listening", "working", "playing":
+				_ = e.Handle(g, session.Event{Kind: "listening"})
+				if phase == "working" {
+					_ = e.Handle(g, session.Event{Kind: "processing"})
+				}
+				if phase == "playing" {
+					_ = e.Handle(g, session.Event{Kind: "responding"})
+					_ = e.Output(g, []int16{12})
+				}
+			}
+			before, count := e.Snapshot(), len(l.commands)
+			if err := e.Handle(g, session.Event{Kind: "hangup", Reason: "done", Listen: true}); err != nil || e.Snapshot() != before {
+				t.Fatal("unowned HANGUP changed the session", err, e.Snapshot())
+			}
+			if !before.InputOpen {
+				if err := e.Capture(audio.Frame{Samples: []int16{513}}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if len(l.commands) != count {
+				t.Fatal("unowned HANGUP sent a call start or PCM", l.commands[count:])
+			}
+		})
+	}
+}
+
+func TestCallWatchdogGivesFollowUpItsOwnDeadline(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		e, l, _, g := fixture(t)
+		if err := e.StartManual(); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(25 * time.Second)
+		for _, event := range []session.Event{{Kind: "listening"}, {Kind: "responding"}, {Kind: "hangup", Listen: true}} {
+			if err := e.Handle(g, event); err != nil {
+				t.Fatal(err)
+			}
+		}
+		time.Sleep(30*time.Second - time.Nanosecond) // Past the old deadline, just before the new one.
+		synctest.Wait()
+		if s := e.Snapshot(); s.Turn != 2 || s.Invocation != "follow_up" || !s.InputOpen {
+			t.Fatal("follow-up did not keep its full window", s)
+		}
+		time.Sleep(time.Nanosecond)
+		synctest.Wait()
+		if s := e.Snapshot(); s.InputOpen || !s.Inhibited || s.Reason != "timeout" || len(l.commands) != 3 || l.commands[2].Kind != "cancel" || l.commands[2].Reason != "timeout" {
+			t.Fatal("follow-up did not expire at its own deadline", s, l.commands)
+		}
+	})
 }
 
 func TestRejectedNativeCandidateKeepsConnectionAndFencesOldOutput(t *testing.T) {
@@ -783,32 +750,6 @@ func TestRejectedNativeCandidateKeepsConnectionAndFencesOldOutput(t *testing.T) 
 				t.Fatal("rejection suppressed a subsequent upstream timer")
 			}
 		})
-	}
-}
-
-func TestAssistIdleStreamEndAfterReconnectDoesNotClaimPlayback(t *testing.T) {
-	e, _, p, _ := fixture(t)
-	_ = e.Select(session.Assist)
-	l := &link{backend: session.Assist}
-	g, _ := e.Attach(l)
-	_ = e.Output(g, []int16{77})
-	_ = e.EndOutput(g) // Observed on real HA: cancelled task finally uses new client.
-	if p.writes != 0 || len(l.commands) != 0 {
-		t.Fatal("unsolicited stream played or falsely acknowledged")
-	}
-	_ = e.Stop() // Idle stop must not wedge the next intentional session.
-	if err := e.StartManual(); err != nil {
-		t.Fatal(err)
-	}
-	_ = e.EndOutput(g)
-	if len(l.commands) != 1 {
-		t.Fatal("empty stream ended the listening turn")
-	}
-	_ = e.Handle(g, session.Event{Kind: "output_start"})
-	_ = e.Output(g, []int16{3, -5})
-	_ = e.EndOutput(g)
-	if p.writes != 2 || l.commands[len(l.commands)-1].Kind != "drained" {
-		t.Fatal("valid response no longer plays/completes")
 	}
 }
 
@@ -855,7 +796,7 @@ func TestMuteNativeAnnouncementRevokesOnlyItsVoiceLink(t *testing.T) {
 		t.Fatal("started before native reconnect", err)
 	}
 	e.Disconnect(g, "connection_closed") // Adapter retires the link after sending cancel.
-	newLink := &link{backend: session.Incubator}
+	newLink := &link{}
 	ng, err := e.Attach(newLink)
 	if err != nil {
 		t.Fatal(err)
@@ -894,7 +835,7 @@ func TestNativeMuteCannotReuseBufferedStreamBoundary(t *testing.T) {
 		t.Fatal("cancellation ACK admitted a call on the retiring native link", err)
 	}
 	e.Disconnect(g, "connection_closed")
-	ng, err := e.Attach(&link{backend: session.Incubator})
+	ng, err := e.Attach(&link{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -904,6 +845,50 @@ func TestNativeMuteCannotReuseBufferedStreamBoundary(t *testing.T) {
 	_ = e.Output(ng, []int16{99})
 	if p.writes != 2 {
 		t.Fatal("stale native tail silenced the replacement call", p.writes)
+	}
+}
+
+func TestSpokenStopCoversResponseBeforePCMAndAfterDrain(t *testing.T) {
+	for _, playReply := range []bool{false, true} {
+		name := "awaiting-pcm"
+		if playReply {
+			name = "drained-before-hangup"
+		}
+		t.Run(name, func(t *testing.T) {
+			e, l, _, g := fixture(t)
+			stop := wake.Detection{Word: "stop"}
+			if err := e.StartManual(); err != nil {
+				t.Fatal(err)
+			}
+			for _, kind := range []string{"listening", "processing"} {
+				_ = e.Handle(g, session.Event{Kind: kind})
+				if _, armed, _ := e.WakeState(g); armed {
+					t.Fatalf("Stop armed during %s", kind)
+				}
+				if err := e.WakeFor(g, stop); err != session.ErrUnavailable {
+					t.Fatalf("Stop accepted during %s: %v", kind, err)
+				}
+			}
+			_ = e.Handle(g, session.Event{Kind: "responding"}) // External TTS can have no text.
+			if playReply {
+				if err := e.Output(g, []int16{17, -83}); err != nil {
+					t.Fatal(err)
+				}
+				if err := e.EndOutput(g); err != nil || l.commands[len(l.commands)-1].Kind != "drained" {
+					t.Fatal("response did not drain", err, l.commands)
+				}
+			}
+			if _, armed, _ := e.WakeState(g); !armed {
+				t.Fatal("Stop not armed during the current response")
+			}
+			if err := e.WakeFor(g, stop); err != nil || l.commands[len(l.commands)-1].Kind != "cancel" {
+				t.Fatal("spoken Stop did not retire the voice connection", err, l.commands)
+			}
+			_ = e.Handle(g, session.Event{Kind: "hangup", Listen: true})
+			if s := e.Snapshot(); s.Turn != 1 || s.InputOpen || !s.Inhibited {
+				t.Fatal("cancelled response reopened capture", s)
+			}
+		})
 	}
 }
 
@@ -926,7 +911,7 @@ func TestNativeStopCannotReuseBufferedStreamBoundary(t *testing.T) {
 		t.Fatal("Stop did not request exactly one native retirement", l.commands)
 	}
 	e.Disconnect(g, "connection_closed")
-	ng, err := e.Attach(&link{backend: session.Incubator})
+	ng, err := e.Attach(&link{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -965,7 +950,7 @@ func TestIdleStopPreservesUnsolicitedPlayback(t *testing.T) {
 
 func TestNativeStopThenMuteDuringAnnouncementDrainReconnects(t *testing.T) {
 	p := &player{entered: make(chan struct{}), release: make(chan struct{}), holdCancelled: true}
-	l := &link{backend: session.Incubator}
+	l := &link{}
 	e := session.New(p)
 	g, _ := e.Attach(l)
 	_ = e.Handle(g, session.Event{Kind: "announcement", Active: true})
@@ -984,7 +969,7 @@ func TestNativeStopThenMuteDuringAnnouncementDrainReconnects(t *testing.T) {
 		t.Fatal("Stop/mute left a terminal wait with no native cancellation", l.commands)
 	}
 	e.Disconnect(g, "connection_closed")
-	ng, err := e.Attach(&link{backend: session.Incubator})
+	ng, err := e.Attach(&link{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1033,10 +1018,6 @@ func TestPresentationTurnAttributionAndPolicyLifetimes(t *testing.T) {
 	if s := e.Snapshot(); s.Output.State != "playing" || !s.InputOpen || s.Speaker != person {
 		t.Fatal("output lost independent input or current-turn attribution", s)
 	}
-	_ = e.Handle(g, session.Event{Kind: "hangup", Reason: "done"})
-	if s := e.Snapshot(); s.InputOpen || s.Output.State != "playing" || s.Speaker != person {
-		t.Fatal("HANGUP did not close input independently of remaining playback", s)
-	}
 	_ = e.EndOutput(g)
 	if s := e.Snapshot(); s.Output.State != "" {
 		t.Fatal(s)
@@ -1057,7 +1038,7 @@ func TestPresentationTurnAttributionAndPolicyLifetimes(t *testing.T) {
 		t.Fatal("privacy suppressed connection-scoped policy", s)
 	}
 	e.Disconnect(g, "test")
-	ng, _ := e.Attach(&link{backend: session.Incubator})
+	ng, _ := e.Attach(&link{})
 	_ = e.Handle(g, session.Event{Kind: "night", Night: &on})
 	_ = e.Handle(g, session.Event{Kind: "processing", Speaker: person})
 	if s := e.Snapshot(); s.Generation != ng || s.Night != "unknown" || s.Speaker.Name != "" || s.Output.State != "" {
@@ -1073,7 +1054,7 @@ func TestPresentationOutputRequiresSuccessfulCurrentHostWrite(t *testing.T) {
 				p.writeErr = errors.New("host write failed")
 			}
 			e := session.New(p)
-			g, _ := e.Attach(&link{backend: session.Incubator})
+			g, _ := e.Attach(&link{})
 			_ = e.StartManual()
 			_ = e.Handle(g, session.Event{Kind: "listening"})
 			_ = e.Handle(g, session.Event{Kind: "responding", Text: "Reply"})
@@ -1090,7 +1071,7 @@ func TestPresentationOutputRequiresSuccessfulCurrentHostWrite(t *testing.T) {
 				e.SetMuted(true)
 			case "replace":
 				e.Disconnect(g, "test")
-				_, _ = e.Attach(&link{backend: session.Incubator})
+				_, _ = e.Attach(&link{})
 			}
 			close(p.writeRelease) // Host may return success despite cancellation.
 			err := <-done
@@ -1113,7 +1094,7 @@ func TestPresentationOutputRequiresSuccessfulCurrentHostWrite(t *testing.T) {
 func TestPresentationAnnouncementOwnershipSurvivesDrainAndAlertOverlap(t *testing.T) {
 	p := &player{entered: make(chan struct{}), release: make(chan struct{})}
 	e := session.New(p)
-	g, _ := e.Attach(&link{backend: session.Incubator})
+	g, _ := e.Attach(&link{})
 	_ = e.Handle(g, session.Event{Kind: "announcement", Active: true})
 	if s := e.Snapshot(); !s.Active || !s.Announcing || s.Output.State != "" {
 		t.Fatal("announcement marker was lost or claimed PCM playback", s)

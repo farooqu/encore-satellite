@@ -104,16 +104,21 @@ Local ordinary wake (idle), spoken Stop (armed for response playback,
 announcements and alerts), and active/follow-up call input share the one capture
 path through the existing Incubator adapter. The APK supplies AEC3's
 output on the existing primary call route. `listen` means call listening and
-follow-up, not an off-call mic monitor. `aec`, `monitor`, `monitor_aec`, and
-`intercom` remain false, with no `monitor_result` claim. Do not enable call AEC
+follow-up. Android separately advertises `monitor` and `monitor_result` for
+Live Monitor on the primary route. `aec`, `monitor_aec`, and `intercom` remain
+false. Do not enable call AEC
 until measured; the shared Biscuit precedent sends the **same** cleaned mono
 PCM on `0x08` before `0x03` with zero relative lead and matching pre-roll. No
 second physical lane is required by the protocol.
 
-The existing model-upload path accepts compatible mixednet models; collecting
-training samples is a separate capability. Off-call Live Monitor, Enroll Voice,
-Teach Wake Word, and two-way intercom remain unadvertised pending qualification.
-The Android UI connects its foreground mic indicator to the shared monitor gate.
+Live Monitor sends current primary PCM and report-only wake scores for any
+active mixednet models. Voice enrollment and Teach Wake Word require the separate
+AEC monitor route and remain unavailable, as does two-way intercom.
+[Voice PE at `8ba314e`](https://github.com/OHF-Voice/firmware-voice-incubator/blob/8ba314e68ff4a23b5c08b78fa21926104bbabba2/PROTOCOL.md#monitoring-and-the-intercom)
+also streams primary PCM and reports detections without answering, but can
+advertise AEC capture and intercom. Android leaves those routes off until
+qualified. Instead of Voice PE's ring, Android uses a foreground screen
+indicator: it cannot provide a persistent local recording cue while hidden.
 For an admitted request, the screen shows the visible mic edge band without
 requiring a local tap. Android confirms the exact request only after
 fresh mic samples arrive and the indicator draws in a shown, focused window.
@@ -122,8 +127,10 @@ Stop cancels the request; Mute cancels it and latches mic privacy. Permission or
 capture loss, leaving the focused screen, and disconnect also end the stream.
 The service notification and OS mic dot do not replace the app indicator. Keep
 this unauthenticated protocol on an isolated trusted LAN.
+`go test ./devices/android-generic/mobile -run TestAndroidOffersPrimaryMonitor`
+checks the advertised routes, indicator admission and revocation on the wire.
 
-For full intercom and explicit monitor admission, the required companion is
+For future full intercom support, the reference companion is
 the unpublished `encore-loopback-intercom` revision
 `ef556aea47337be17340d1499acd99e9b2f3b9ce`, based on upstream
 [`ffd4f23`](https://github.com/OHF-Voice/voice-incubator/commit/ffd4f23520d8e4c845741a0c9da797b50995d5f6).
@@ -364,8 +371,7 @@ be established on the exact unit before claiming it works there.
 Before support is claimed, record the actual tablet/OS/ABI/toolchain and pinned
 backend versions, native Incubator timer behavior, wake during playback, measured
 resource use, latency and underruns. Inspect the APK dependency closure and contents
-to exclude the Assist adapter. Assist qualification and switching tests are not
-gates for the Incubator APK.
+to verify the Incubator and Android composition.
 
 Application updates are signed APK replacements, independent of Android OS/security
 updates. Preserve signature/version constraints through a centrally reviewed
@@ -373,9 +379,7 @@ packaging policy; core SemVer and package revision alone are not an Android
 versionCode algorithm. The central ledger reserves experimental Android revision 5
 with core `0.1.1-dev.1`; this is not a built or published release. Automatic release
 support remains false. Final package/update metadata must bind the backend variant and routine updates
-must preserve it. A later, explicitly opt-in Assist package requires its own
-qualification, validated state migration/recovery and signing/version compatibility,
-not a runtime toggle or an OS reflash. The update foundation is not an activated
+must preserve it. The update foundation is not an activated
 production update service or a silent installer; see its provisioning and device
 qualification gates before using it for distribution.
 

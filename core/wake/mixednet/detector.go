@@ -22,6 +22,8 @@ type Detector struct {
 	recent        []uint8
 	index, ignore int
 	cutoff        uint8
+	reportPeak    uint8
+	reportWindow  uint8
 }
 
 // New loads an MNB1 model serialized by Voice Incubator. stepMS must be 1..30,
@@ -51,6 +53,15 @@ func (d *Detector) Reset() {
 	clear(d.audio[:])
 	clear(d.input)
 	d.resetProbabilities()
+	d.reportPeak, d.reportWindow = 0, 0
+}
+
+// TakeReport returns and clears the maxima since the previous report, without
+// clearing the live score window or rearming the detector.
+func (d *Detector) TakeReport() (peak, window uint8) {
+	peak, window = d.reportPeak, d.reportWindow
+	d.reportPeak, d.reportWindow = 0, 0
+	return
 }
 
 func (d *Detector) resetProbabilities() {
@@ -81,12 +92,17 @@ func (d *Detector) feedFeature(features []int8) (average, peak uint8, hit bool) 
 	if d.recent[d.index] < d.cutoff {
 		d.ignore = min(d.ignore+1, 0)
 	}
-	average, peak = d.summarize()
+	sum := 0
+	for _, p := range d.recent {
+		sum += int(p)
+		peak = max(peak, p)
+	}
+	average = uint8((sum + len(d.recent)/2) / len(d.recent))
+	// Firmware telemetry tracks the latest inference (not the maximum of
+	// the sliding window), and truncates the window mean before reporting.
+	d.reportPeak = max(d.reportPeak, d.recent[d.index])
+	d.reportWindow = max(d.reportWindow, uint8(sum/len(d.recent)))
 	if fresh && d.ignore == 0 {
-		sum := 0
-		for _, p := range d.recent {
-			sum += int(p)
-		}
 		hit = sum > int(d.cutoff)*len(d.recent) // deliberately strict
 		if hit {
 			d.resetProbabilities()

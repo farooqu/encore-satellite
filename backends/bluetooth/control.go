@@ -16,8 +16,7 @@ type stateSubscription struct {
 	reply chan error // At most one command in flight per connection; protected by mu.
 }
 
-// Serve is the voice-independent encrypted control endpoint, for example when
-// Incubator owns voice. Assist can compose the same Handler/Run/Features API.
+// Serve is the voice-independent encrypted control endpoint.
 // Never expose this handler through a plaintext or unprovisioned server.
 func (b *Proxy) Serve(ctx context.Context, listener net.Listener, info esphome.Info, key esphome.PSK) error {
 	if key.IsZero() {

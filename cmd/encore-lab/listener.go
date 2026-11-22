@@ -40,6 +40,6 @@ type managementConn struct {
 }
 
 func (c *managementConn) Close() error {
-	c.stop() // Do not retain normally closed sockets until the next Apply.
+	c.stop() // Do not retain normally closed sockets until shutdown.
 	return c.Conn.Close()
 }

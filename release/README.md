@@ -145,13 +145,13 @@ Building the virtual lab is not building an APK or Echo package. The initial
 workflow does not run `make lab-test`; that is a separate real-stack check, not a
 synonym for race/unit tests. The current lab requires Python 3.14.7, system
 libturbojpeg/ffmpeg, locked dependencies, checksum-verified HA source and generated
-translations, onboarding/pairing, mDNS/Noise services and **Amp-supervised service
-restarts** invoked by `lab/test_assist.py`. Standard GitHub-hosted runners do not
-provide that service lifecycle. Do not claim integration coverage by launching
+translations, onboarding/pairing, mDNS/Noise services, and the pinned Incubator
+app with its real models and generated capture fixtures. Do not claim integration coverage by launching
 only a Go test or an unprepared HA process there.
 
 Run the real integration in an isolated Amp orb per `lab/README.md`:
-`.agents/setup`, `make lab-up`, `make lab-provision`, `make lab-test`. Source of
+`.agents/setup`, `lab/incubator/setup`, `make lab-up`, `make lab-provision`, and
+the Incubator fixture and service steps before `make lab-test`. Source of
 truth is the lab's own pins: HA **2026.12.0.dev0**, commit
 `1395798e2338bd46ee522539f7281b336c44e3b8`, not stable HA 2026.11.1.
 Keep generated credentials private; never substitute production HA credentials.
@@ -170,23 +170,16 @@ The manually supplied Dot local-development USB bundle is explicitly unsigned,
 requires an out-of-band build hash, never downloads code, and must not be
 relabeled as a production update mechanism.
 
-- **Incubator default, one backend per package:** the default device package and
-  any unqualified build/install choice must use only the native `incubator`
-  adapter. Keep `assist` in the repository, but defer its possible separately
-  qualified, opt-in package, explicitly labeled for the **Home Assistant Assist
-  pipeline**. Do not present it as a co-default. The backend identifier remains
-  `assist`. No runtime
-  backend selector, automatic cross-backend fallback or live switching is part
-  of a device package.
-  Inspect built dependencies and package contents to enforce this; a disabled
-  second adapter is not isolation. The dual-backend lab remains a test fixture.
+- **Incubator only:** device packages use only the native `incubator` adapter,
+  with no runtime voice selector or fallback. Inspect built dependencies and
+  package contents to verify the composition. The virtual lab is not a package.
 - **Versions and anti-rollback:** Biscuit exposes plain SemVer derived from
   main history; its internal integer remains for anti-rollback. Android retains
   its existing core SemVer and APK versionCode. A target's positive revision
   increases across releases, variants and channels; never reuse it for
   different bytes, including after a failed or withdrawn release.
 - **Immutable provenance:** each package records exact target identity, backend
-  variant (`incubator` or later `assist`), core SemVer, package revision, full source
+  variant (`incubator`), core SemVer, package revision, full source
   commit, build/toolchain provenance, artifact byte size and cryptographic digest,
   plus compatibility requirements.
   Immutable artifact identities and retained records must be established before
@@ -196,8 +189,7 @@ relabeled as a production update mechanism.
   `stable`. Routine updates preserve the installed backend and use the explicitly
   selected persistent desired channel (which may differ from installed package
   provenance), with no implicit fallback or downgrade. Selection alone never
-  installs a package. Only Incubator is initially in scope; do not
-  create empty Assist release entries. Stable entries must not point to a
+  installs a package. Stable entries must not point to a
   prerelease core. Promotion reuses the already
   validated immutable package bytes/revision, not a rebuild disguised as the
   same package. A target advances independently.
@@ -221,12 +213,6 @@ relabeled as a production update mechanism.
   and engine, subject to real signing/install permissions. Base maintenance and
   recovery are separate; no implicit OS flashing, arbitrary remote execution,
   independently fetched Android engine or promised unattended APK update.
-- **Backend replacement is explicit:** moving between Incubator and a later Assist
-  variant is a deliberate application-package replacement, not a routine update,
-  runtime setting or required base/OS reflash. Before offering it, validate
-  configuration/state migration, platform signing/version constraints and recovery.
-  Qualify each variant independently; Assist hardware support and switching tests
-  must not block an otherwise qualified Incubator package.
 - **Rollback is deliberate:** retain known-good immutable packages and test
   recovery, but do not let rollback defeat monotonic revision enforcement.
   Ordinary OTA additionally requires a strictly newer shared-core SemVer in the

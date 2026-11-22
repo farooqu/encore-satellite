@@ -31,33 +31,19 @@ func (q *Queue) Send(c session.Command) error {
 	if q.closed {
 		return errors.New("backend: connection closed")
 	}
-	if c.Kind == "end" {
-		// Stop must not wait behind unsent microphone data.
-	clearQueued:
-		for {
-			select {
-			case <-q.commands:
-			default:
-				break clearQueued
-			}
-		}
-	}
-	if c.Kind == "cancel" || c.Kind == "discard_audio" || c.Kind == "monitor_off" {
+	if c.Kind == "cancel" || c.Kind == "monitor_off" {
 		// Drop unsent microphone data, but preserve a queued start: otherwise
 		// the engine would wait for cancellation of a pipeline never started.
 		pending := make([]session.Command, 0, len(q.commands))
-		drop := "audio"
-		if c.Kind == "monitor_off" {
-			drop = "monitor_audio"
-		}
 	dropAudio:
 		for {
 			select {
 			case queued := <-q.commands:
-				if queued.Kind != drop {
-					pending = append(pending, queued)
-				} else {
+				if (c.Kind == "cancel" && queued.Kind == "audio") ||
+					(c.Kind == "monitor_off" && (queued.Kind == "monitor_audio" || queued.Kind == "wake_report")) {
 					clear(queued.Samples)
+				} else {
+					pending = append(pending, queued)
 				}
 			default:
 				break dropAudio
@@ -66,7 +52,7 @@ func (q *Queue) Send(c session.Command) error {
 		for _, queued := range pending {
 			q.commands <- queued
 		}
-		if c.Kind != "cancel" {
+		if c.Kind == "monitor_off" {
 			return nil // Local capture invalidation, not a wire-level abort.
 		}
 	}

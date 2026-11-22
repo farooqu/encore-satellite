@@ -140,7 +140,7 @@ class ImpactTests(unittest.TestCase):
         })
 
     def test_shared_protocol_dependencies_and_infrastructure(self):
-        for path in ("core/audio/audio.go", "backends/assist/server.go", "go.mod", "go.sum",
+        for path in ("core/audio/audio.go", "backends/incubator/server.go", "go.mod", "go.sum",
                      "Makefile", "tools/check_boundaries.py", ".agents/setup", ".amp/services.yaml",
                      ".github/workflows/check.yml", "release/targets.json", "updates/policy.json",
                      "build/toolchain.lock", "scripts/package.sh", "licenses/Techo5-MIT.txt",

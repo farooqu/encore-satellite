@@ -431,8 +431,7 @@ func TestMixerPacedFalseReadinessFailsClosed(t *testing.T) {
 
 type announcementLink struct{ events []string }
 
-func (*announcementLink) Backend() session.Backend { return session.Incubator }
-func (*announcementLink) Close() error             { return nil }
+func (*announcementLink) Close() error { return nil }
 func (l *announcementLink) Send(c session.Command) error {
 	l.events = append(l.events, c.Kind)
 	return nil

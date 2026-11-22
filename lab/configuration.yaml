@@ -21,22 +21,12 @@ history:
 recorder:
   purge_keep_days: 1
 zeroconf:
-assist_pipeline:
 conversation:
-stt:
-tts:
 input_boolean:
   encore_lamp:
     name: Encore lamp
     initial: false
-input_select:
-  encore_scenario:
-    name: Encore speech fixture scenario
-    options: [success, stt_error, slow_stt, tts_error, short_tts]
-    initial: success
 logger:
   default: warning
   logs:
     homeassistant.components.esphome: debug
-    homeassistant.components.assist_pipeline: debug
-    custom_components.encore_fixture: info
