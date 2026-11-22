@@ -2,7 +2,9 @@ name: Encore Satellite Assistant APK
 
 on:
   pull_request:
-  push:
+  workflow_run:
+    workflows: [Foundation checks]
+    types: [completed]
     branches: [main]
   workflow_dispatch:
     inputs:
@@ -19,30 +21,66 @@ on:
 permissions:
   contents: read
 
+env:
+  SOURCE: ${{ github.event.workflow_run.head_sha || github.sha }}
+
 jobs:
   build:
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.repository == 'farooqu/encore-satellite' && github.ref == 'refs/heads/main' && github.ref_protected &&
+       github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.head_repository.full_name == github.repository)
     runs-on: ubuntu-24.04
     timeout-minutes: 45
-    env:
-      ENCORE_VERSION_CODE: ${{ github.run_number }}
-      ENCORE_VERSION_NAME: ${{ inputs.version || '0.1.0' }}
+    outputs:
+      publish: ${{ steps.release.outputs.publish }}
+      version: ${{ steps.release.outputs.version }}
+      revision: ${{ steps.release.outputs.revision }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          ref: ${{ github.event.workflow_run.head_sha || '' }}
+          fetch-depth: 0
           persist-credentials: false
-      - name: Validate version and publication policy
+      - name: Select Assistant release identity and policy
+        id: release
         env:
-          PUBLISH: ${{ inputs.publish == true }}
+          MANUAL_PUBLISH: ${{ inputs.publish == true }}
+          VERSION: ${{ inputs.version || '0.1.0' }}
+          MANUAL_ALLOWED: ${{ github.repository == 'farooqu/encore-satellite' && github.ref == 'refs/heads/main' && github.ref_protected }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          [[ "$ENCORE_VERSION_NAME" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
-          [[ "$ENCORE_VERSION_CODE" -gt 0 && "$ENCORE_VERSION_CODE" -le 2100000000 ]]
-          if [[ "$PUBLISH" == true ]]; then
+          test "$(git rev-parse HEAD)" = "$SOURCE"
+          publish=false
+          revision=$GITHUB_RUN_NUMBER
+          if [[ "$GITHUB_EVENT_NAME" == workflow_run ]]; then
+            identity=$(python3 release/biscuit_dev.py "$SOURCE")
+            if [[ -n "$identity" ]] && jq -e '.automatic_dev_targets | index("android-assistant") != null' release/dev-automation.json >/dev/null; then
+              read -r VERSION revision <<< "$identity"
+              publish=true
+            else
+              echo '::notice::This source is outside the automatic Dev release policy; building without signing.'
+            fi
+          elif [[ "$MANUAL_PUBLISH" == true ]]; then
+            test "$MANUAL_ALLOWED" = true
             jq -e '.publishing_enabled == true' release/dev-automation.json >/dev/null || {
               echo '::error::Manual release publication is disabled by release/dev-automation.json.'
               exit 1
             }
+            identity=$(python3 release/biscuit_dev.py "$SOURCE")
+            read -r _ revision <<< "$identity"
+            publish=true
           fi
+          if [[ "$publish" == true ]]; then
+            git rev-list --first-parent origin/main | grep -Fx "$SOURCE" >/dev/null
+            gh api "repos/$GITHUB_REPOSITORY/commits/$SOURCE" --jq '.commit.verification.verified' | grep -Fx true
+          fi
+          [[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          [[ "$revision" =~ ^[1-9][0-9]*$ && "$revision" -le 2100000000 ]]
+          printf 'publish=%s\nversion=%s\nrevision=%s\n' "$publish" "$VERSION" "$revision" >> "$GITHUB_OUTPUT"
+          printf 'ENCORE_VERSION_NAME=%s\nENCORE_VERSION_CODE=%s\n' "$VERSION" "$revision" >> "$GITHUB_ENV"
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: '1.27.4'
@@ -66,7 +104,7 @@ jobs:
           go test ./devices/android-assistant/mobile
           devices/android-assistant/build-android assembleDebug testDebugUnitTest lintDebug assembleRelease
       - name: Stage unsigned release and matching source
-        if: github.event_name == 'workflow_dispatch'
+        if: steps.release.outputs.publish == 'true' || github.event_name == 'workflow_dispatch'
         run: |
           set -euo pipefail
           dir="$RUNNER_TEMP/assistant-unsigned"
@@ -75,7 +113,7 @@ jobs:
           git archive --format=tar.gz --prefix=encore-satellite/ -o "$dir/encore-assistant-source.tar.gz" HEAD
           python3 release/android_dev.py --assistant-sources "$dir/encore-assistant-dependencies-source.tar.gz"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        if: github.event_name == 'workflow_dispatch'
+        if: steps.release.outputs.publish == 'true' || github.event_name == 'workflow_dispatch'
         with:
           name: android-assistant-unsigned-${{ github.run_attempt }}
           path: ${{ runner.temp }}/assistant-unsigned
@@ -84,16 +122,12 @@ jobs:
   sign:
     needs: build
     if: >-
-      github.event_name == 'workflow_dispatch' && inputs.publish &&
+      needs.build.outputs.publish == 'true' &&
       github.repository == 'farooqu/encore-satellite' && github.ref == 'refs/heads/main' && github.ref_protected
-    environment: android-signing
+    environment: ${{ github.event_name == 'workflow_run' && 'android-dev-signing' || 'android-signing' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - name: Require a verified source commit
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA" --jq '.commit.verification.verified' | grep -Fx true
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: android-assistant-unsigned-${{ github.run_attempt }}
@@ -110,7 +144,8 @@ jobs:
           KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
           EXPECTED_CERTIFICATE: ${{ vars.ANDROID_CERTIFICATE_SHA256 }}
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ needs.build.outputs.version }}
+          REVISION: ${{ needs.build.outputs.revision }}
         run: |
           set -euo pipefail
           umask 077
@@ -118,7 +153,7 @@ jobs:
           cd "$RUNNER_TEMP/assistant-release"
           [[ "$EXPECTED_CERTIFICATE" =~ ^[0-9a-f]{64}$ ]]
           badging=$(aapt dump badging unsigned.apk)
-          grep -F "package: name='com.encore.personal' versionCode='$GITHUB_RUN_NUMBER' versionName='$VERSION'" <<< "$badging"
+          grep -F "package: name='com.encore.personal' versionCode='$REVISION' versionName='$VERSION'" <<< "$badging"
           grep -Fx "native-code: 'arm64-v8a' 'armeabi-v7a'" <<< "$badging"
           key=$(mktemp "$RUNNER_TEMP/assistant-key.XXXXXX")
           trap 'rm -f "$key"' EXIT
@@ -141,18 +176,19 @@ jobs:
           if-no-files-found: error
 
   publish:
-    needs: sign
+    needs: [build, sign]
     concurrency:
       group: release-publication
       queue: max
-    environment: release-publication
+    environment: ${{ github.event_name == 'workflow_run' && 'release-dev-publication' || 'release-publication' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
       contents: write
     env:
       GH_TOKEN: ${{ github.token }}
-      VERSION: ${{ inputs.version }}
+      VERSION: ${{ needs.build.outputs.version }}
+      REVISION: ${{ needs.build.outputs.revision }}
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -161,27 +197,37 @@ jobs:
       - name: Retain the exact signed APK and source as a prerelease
         env:
           SETUP_APPROVED: ${{ vars.RELEASE_SETUP_APPROVED }}
-          IMMUTABILITY_READ_TOKEN: ${{ secrets.IMMUTABILITY_READ_TOKEN }}
+          IMMUTABILITY_READ_TOKEN: ${{ github.event_name == 'workflow_dispatch' && secrets.IMMUTABILITY_READ_TOKEN || '' }}
         run: |
           set -euo pipefail
           test "$SETUP_APPROVED" = true
-          : "${IMMUTABILITY_READ_TOKEN:?Missing immutable releases settings read token}"
-          GH_TOKEN="$IMMUTABILITY_READ_TOKEN" gh api "repos/$GITHUB_REPOSITORY/immutable-releases" --jq .enabled | grep -Fx true
-          tag="android-assistant-r$GITHUB_RUN_NUMBER"
+          target_args=(--target "$SOURCE")
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            : "${IMMUTABILITY_READ_TOKEN:?Missing immutable releases settings read token}"
+            GH_TOKEN="$IMMUTABILITY_READ_TOKEN" gh api "repos/$GITHUB_REPOSITORY/immutable-releases" --jq .enabled | grep -Fx true
+          fi
+          tag="android-assistant-r$REVISION"
           refs=$(gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/android-assistant-r")
           releases=$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100")
-          # Never reuse a revision or publish behind a newer revision that finished first.
-          jq -e --argjson revision "$GITHUB_RUN_NUMBER" \
-            'all(.[].ref | select(test("^refs/tags/android-assistant-r[0-9]+$")); (split("-r")[-1] | tonumber) < $revision)' <<< "$refs"
+          # A newer revision may have finished first. Never publish a downgrade.
+          jq -e --argjson revision "$REVISION" \
+            'all(.[].ref | select(test("^refs/tags/android-assistant-r[0-9]+$")); (split("-r")[-1] | tonumber) <= $revision)' <<< "$refs"
           jq -e --arg tag "$tag" 'all(.[][]; .tag_name != $tag)' <<< "$releases"
+          if jq -e --arg tag "refs/tags/$tag" 'any(.[]; .ref == $tag)' <<< "$refs" >/dev/null; then
+            # Like regular Android Dev, accept only an exact maintainer-created fallback tag.
+            test "$GITHUB_EVENT_NAME" = workflow_run
+            jq -e --arg tag "refs/tags/$tag" --arg source "$SOURCE" \
+              'any(.[]; .ref == $tag and .object.type == "commit" and .object.sha == $source)' <<< "$refs" >/dev/null
+            target_args=(--verify-tag)
+          fi
           cd "$RUNNER_TEMP/assistant-release"
           sha256sum -c SHA256SUMS
-          gh release create "$tag" ./* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
-            --draft --prerelease --title "Encore Satellite Assistant $VERSION (r$GITHUB_RUN_NUMBER)" \
-            --notes "Experimental sideload APK. [Installation guide](https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_SHA/devices/android-assistant/README.md). No update feed is activated."
+          gh release create "$tag" ./* --repo "$GITHUB_REPOSITORY" "${target_args[@]}" \
+            --draft --prerelease --title "Encore Satellite Assistant Dev $VERSION (r$REVISION)" \
+            --notes "Experimental Dev sideload APK. [Installation guide](https://github.com/$GITHUB_REPOSITORY/blob/$SOURCE/devices/android-assistant/README.md). No update feed is activated."
           mkdir "$RUNNER_TEMP/assistant-retained"
           gh release download "$tag" --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/assistant-retained"
           diff -qr . "$RUNNER_TEMP/assistant-retained"
           gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false --latest=false
           gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" --jq .immutable | grep -Fx true
-          gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" --jq .object.sha | grep -Fx "$GITHUB_SHA"
+          gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" --jq .object.sha | grep -Fx "$SOURCE"

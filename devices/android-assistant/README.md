@@ -81,28 +81,29 @@ and need device testing.
 | Sendspin music player, BLE proxy, sensors, dashboard, Home role, ESPHome controls | Not packaged. |
 | Intercom, Live Monitor, voice enrollment, wake training capture | Not advertised. The custom-model upload path does not require these. |
 
-## GitHub prereleases
+## GitHub Dev releases
 
 The [Encore Satellite Assistant APK workflow](../../.github/workflows/android-assistant.yml)
-builds and checks the APK on pull requests and on `main`. A manual run with
-**publish** off retains an unsigned candidate and matching source without
-accessing signing secrets. When publication is approved, start a new run from
-protected `main` at a verified commit with a version such as `0.1.0` and **publish** on. Each
-published APK uses the workflow run number as its Android version code and
-is tagged `android-assistant-r<run number>` at the source commit. The GitHub
-prerelease includes the signed `encore-satellite-assistant.apk`, SHA-256
-checksums, and source archives. It does not become the repo's latest release.
+builds and checks the APK on pull requests without accessing signing secrets.
+After successful Foundation checks for a push to protected `main`, it checks
+out that exact commit. Each successful build of an eligible, verified commit
+is signed and published to Dev as an immutable GitHub prerelease. It does not
+wait for an Assistant-only file change. The shared Dev version policy and
+`android-assistant` entry in `release/dev-automation.json` govern eligibility.
+The tag is `android-assistant-r<version code>`; the Android version code comes
+from `main` history, so a rerun keeps the same identity. The prerelease includes
+`encore-satellite-assistant.apk`, SHA-256 checksums, and matching source. It
+does not become the repo's latest release.
 
-Assistant releases reuse the [regular Android satellite's manual signing
-environment](../../release/android-updates.md#build-and-signing-pipeline), `android-signing`,
-including its review, APK signing key, and pinned `ANDROID_CERTIFICATE_SHA256`.
-No separate signing key or environment is needed. The shared
-`release-publication` environment still requires
-`RELEASE_SETUP_APPROVED=true`, `IMMUTABILITY_READ_TOKEN`, and immutable
-releases enabled. Manual publication in `release/dev-automation.json` must
-also be explicitly enabled. The release app ID is `com.encore.personal`;
-despite sharing a signer with the tablet APK, it installs as a separate app.
-It also installs separately from the Assistant debug build.
+Automatic Dev reuses the [regular Android satellite's signing key and pinned
+certificate](../../release/android-updates.md#build-and-signing-pipeline) in
+`android-dev-signing` and the shared `release-dev-publication` gate, which
+requires `RELEASE_SETUP_APPROVED=true` and immutable releases enabled. No new
+key or environment is needed. A manual run with **publish** off still retains
+an unsigned candidate. Manual publication continues to require explicit
+repository policy approval, `android-signing`, and `release-publication`.
+The release app ID is `com.encore.personal`; it installs separately from the
+tablet APK and from the Assistant debug build.
 
 ## Off-store updates
 
