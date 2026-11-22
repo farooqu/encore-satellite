@@ -39,24 +39,26 @@ jobs:
     steps:
       - name: Prepare pinned release environment and planning tools
         run: |
-          # Bootstrap HTTPS, then install build dependencies from signed, dated indexes.
-          apt-get update
-          apt-get install -y --no-install-recommends ca-certificates
+          # Bootstrap HTTPS from the signed snapshot too, so CA installation cannot
+          # pull a newer OpenSSL runtime than the snapshot's development headers.
           cat >/etc/apt/sources.list.d/debian.sources <<'EOF'
           Types: deb
-          URIs: https://snapshot.debian.org/archive/debian/20261120T000000Z/
+          URIs: http://snapshot.debian.org/archive/debian/20261120T000000Z/
           Suites: trixie trixie-updates
           Components: main
           Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
           Check-Valid-Until: no
 
           Types: deb
-          URIs: https://snapshot.debian.org/archive/debian-security/20261120T000000Z/
+          URIs: http://snapshot.debian.org/archive/debian-security/20261120T000000Z/
           Suites: trixie-security
           Components: main
           Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
           Check-Valid-Until: no
           EOF
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates
+          sed -i 's|^URIs: http://|URIs: https://|' /etc/apt/sources.list.d/debian.sources
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git gh jq python3
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
