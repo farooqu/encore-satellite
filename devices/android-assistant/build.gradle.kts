@@ -19,6 +19,7 @@ android {
     buildTypes { getByName("debug") { applicationIdSuffix = ".dev" } }
     sourceSets.getByName("main").apply {
         kotlin.directories += sharedVoice.map { it.destinationDir.path }.get()
+        res.srcDir("../../platforms/android/voice-ui/res")
         jniLibs.directories += aec.resolve("jniLibs").path
         assets.directories += aec.resolve("assets").path
     }

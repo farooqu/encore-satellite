@@ -275,26 +275,26 @@ Home support on Portal.
 
 ## Display and privacy behavior
 
-- The dashboard stays visible and usable during voice. The voice controls sit on
-  the right in landscape and along the bottom in portrait. Trigger assistant
-  becomes Stop in the same spot until the turn and any playback drain finish.
-  The primary action is disabled while stopped; on a running Bluetooth-first
-  install it can still explicitly start the microphone. Mute remains a separate
-  privacy latch. The gear opens full-screen Settings, where music controls live.
-- A continuous mint band shows when Encore is taking mic input, including during
-  silence. A brighter highlight flows around the band with fresh mic RMS, and a
-  lilac highlight travels the opposite direction with
-  measured response playback. Quiet input gets a visual lift without changing
-  recording gain. Queued audio and missing samples do not create motion. This
-  visualizes levels; it does not distinguish speech from other sound or echo.
-- Processing and alerts have distinct edge colors. Healthy idle has no band;
-  mute, disconnect and unknown mic state remove any live mic indication without
-  a fade. Android's disabled-animations setting keeps the level changes but
-  removes the traveling highlight. Night mode dims the display-edge treatment.
-  Voice status is available on the Stop control to screen readers without visible
-  text over the dashboard. Transcript text is not persisted. Muting clears session
-  pre-roll, cancels active voice, and releases the microphone. Android screenshots
-  are disabled for the running Activity, including locally revealed pairing keys.
+- The dashboard stays usable outside the voice panel. Tap-to-talk and accepted
+  local wakes open the **Second Pulse** transcript panel, themed by Android. A
+  slow wake decision gets only a small, silent cue; a rejected or lost wake
+  never opens the panel. Listening gives way to what Encore heard, the reply,
+  and any server-requested follow-ups from that call.
+- The panel grows to fit, up to half the screen, then scrolls under a fixed
+  header. **×** or **Back** stops an active turn, including playback drain;
+  after normal completion, the transcript stays for six seconds or until
+  dismissed. Transcripts are not persisted. The panel retains a mic-mute
+  control while the turn is active.
+- Incoming audio and remote mic sessions keep their existing edge indicator and
+  Stop/privacy controls. Fresh mic RMS and measured playback animate that edge;
+  queued audio and missing samples do not create motion. Reduced motion removes
+  the traveling highlight. No enrollment or wake-training capability is added.
+- The idle controls sit on the right in landscape and along the bottom in
+  portrait. The gear opens full-screen Settings, where music controls live.
+  On a running Bluetooth-first install the primary action can explicitly start
+  the microphone. Muting clears session pre-roll, cancels active voice, and
+  releases the microphone. Android screenshots remain disabled for the running
+  Activity, including locally revealed pairing keys.
 - Only server-requested Incubator follow-ups exist. No Assist, runtime route
   switching, Assist-only follow-up toggle, enrollment stream, advertised wire
   AEC route is included.

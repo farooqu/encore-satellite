@@ -77,6 +77,7 @@ android {
         getByName("main") {
             kotlin.directories += "../../../platforms/android/src/main/java"
             res.srcDir("../../../platforms/android/src/main/res")
+            res.srcDir("../../../platforms/android/voice-ui/res")
             assets.srcDir("../../../licenses")
             jniLibs.directories += aecOutput.resolve("jniLibs").path
             assets.directories += aecOutput.resolve("assets").path

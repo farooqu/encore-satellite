@@ -21,6 +21,7 @@ import androidx.compose.ui.unit.Density
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.github.takahirom.roborazzi.ExperimentalRoborazziApi
 import com.github.takahirom.roborazzi.RoborazziOptions
 import com.github.takahirom.roborazzi.RoborazziTaskType
@@ -162,6 +163,7 @@ class EncoreScreenTest {
         }
         advance(320)
         compose.onNodeWithTag("voice-edge-glow").assertIsDisplayed()
+        compose.onNodeWithTag("voice-transcript").assertDoesNotExist()
         assertVoiceStatusIsAccessibleOnly("Remote mic on")
         compose.onNodeWithTag("open-settings").assertIsNotEnabled()
         capture("android-monitor-edge-glow")
@@ -246,12 +248,12 @@ class EncoreScreenTest {
         assertFalse(privacy)
         compose.onNodeWithText("Done").performClick()
         compose.runOnIdle { state.value = state.value.copy(phase = "listening", input = "listening", voiceActive = true,
-            heard = "Switch on the lights.", waveform = List(64) { (.04 * sin(it * .34)).toFloat() }) }
-        assertVoiceStatusIsAccessibleOnly("Listening")
-        compose.onNodeWithText("Switch on the lights.").assertDoesNotExist()
+            invocation = "manual", heard = "Switch on the lights.") }
+        compose.onNodeWithText("Switch on the lights.").assertIsDisplayed()
         assertEquals("Voice resized the dashboard", dashboardBounds,
             compose.onNodeWithTag("dashboard-content").fetchSemanticsNode().boundsInRoot)
-        compose.onNodeWithTag("voice-edge-glow").assertIsDisplayed()
+        compose.onNodeWithTag("voice-transcript").assertIsDisplayed()
+        compose.onNodeWithTag("voice-edge-glow").assertDoesNotExist()
         compose.onNodeWithTag("dashboard-tile").performTouchInput { click() }
         assertEquals("Voice blocked a dashboard touch", 2, dashboardTaps)
         compose.onNodeWithTag("privacy").performClick()
@@ -262,7 +264,7 @@ class EncoreScreenTest {
         assertVoiceStatusIsAccessibleOnly("Finishing response")
         compose.onNodeWithContentDescription("Stop voice turn").performClick()
         assertEquals(1, stops)
-        compose.onNodeWithTag("voice-edge-glow").assertDoesNotExist()
+        compose.onNodeWithTag("voice-transcript").assertDoesNotExist()
         compose.onNodeWithTag("dashboard-tile").performTouchInput { click() }
         assertEquals(3, dashboardTaps)
         compose.runOnIdle { state.value = ready().copy(muted = true) }
@@ -272,6 +274,99 @@ class EncoreScreenTest {
         openSettings()
         compose.onNodeWithText("Satellite settings").assertIsDisplayed()
         assertFalse("Opening settings changed mute intent", privacy)
+    }
+
+    @Test fun localWakeShowsOnlyAnAcceptedCallAndKeepsItsFollowUpsThroughDrain() {
+        compose.mainClock.autoAdvance = false
+        val state = mutableStateOf(ready())
+        var stops = 0
+        compose.setContent {
+            EncoreScreen(state.value, {}, {}, { stops++; state.value = ready() }, {}, { "" }, { "" }, {}, {}, {}, {},
+                dashboardContent = {
+                    Column(Modifier.fillMaxSize().testTag("dashboard-content").padding(32.dp)) {
+                        Text("Home", fontSize = 28.sp, color = androidx.compose.ui.graphics.Color.White)
+                        Text("Living room · 21.5 °C", color = androidx.compose.ui.graphics.Color(0xffa0afbd))
+                    }
+                })
+        }
+        val panel = compose.onNodeWithTag("voice-transcript")
+        val cue = compose.onNodeWithTag("voice-wake-cue")
+        val oldIndicator = compose.onNodeWithTag("voice-edge-glow")
+        val tentative = ready().copy(voiceActive = true, invocation = "wake", phase = "tentative", input = "tentative")
+        compose.runOnIdle { state.value = tentative }
+        advance(250)
+        cue.assertDoesNotExist()
+        panel.assertDoesNotExist()
+        oldIndicator.assertDoesNotExist()
+        compose.runOnIdle { state.value = ready().copy(reason = "answered_elsewhere") }
+        advance(450)
+        cue.assertDoesNotExist()
+        panel.assertDoesNotExist()
+        compose.runOnIdle { state.value = tentative.copy(turn = 2) }
+        advance(440)
+        cue.assertIsDisplayed().assertHasNoClickAction()
+        capture("tablet-wake-cue")
+        compose.runOnIdle { state.value = ready().copy(turn = 2, reason = "wake_rejected") }
+        advance(64)
+        cue.assertDoesNotExist()
+        panel.assertDoesNotExist()
+        oldIndicator.assertDoesNotExist()
+
+        compose.runOnIdle { state.value = tentative.copy(turn = 3, accepted = true, phase = "listening", input = "listening") }
+        advance(64)
+        val compact = panel.assertIsDisplayed().fetchSemanticsNode().boundsInRoot
+        compose.onNodeWithText("Listening…").assertIsDisplayed()
+        compose.onNodeWithContentDescription("Encore Satellite").assertIsDisplayed()
+        oldIndicator.assertDoesNotExist()
+        capture("tablet-local-listening")
+        val question = "What’s on my calendar?"
+        val reply = "You have dinner with Sam at seven. Want me to set a reminder?"
+        compose.runOnIdle { state.value = state.value.copy(phase = "working", input = "", heard = question) }
+        advance(64)
+        compose.onNodeWithText("Listening…").assertDoesNotExist()
+        compose.onNodeWithContentDescription("You: $question").assertIsDisplayed()
+        compose.runOnIdle { state.value = state.value.copy(phase = "speaking", outputState = "queued", outputOwner = "voice", reply = reply) }
+        advance(64)
+        compose.onNodeWithContentDescription("Encore: $reply").assertIsDisplayed()
+        assertTrue(panel.fetchSemanticsNode().boundsInRoot.height > compact.height)
+        compose.runOnIdle { state.value = state.value.copy(turn = 4, invocation = "follow_up", phase = "listening",
+            input = "listening", accepted = false, outputState = "", outputOwner = "", heard = "", reply = "") }
+        advance(64)
+        compose.onNodeWithText(question).assertIsDisplayed()
+        compose.onNodeWithText(reply).assertIsDisplayed()
+        compose.onNodeWithText("Listening…").assertIsDisplayed()
+        capture("tablet-local-follow-up")
+
+        val longReply = "Reminder set. " + "This is a longer reply that should scroll inside the voice panel. ".repeat(32)
+        compose.runOnIdle { state.value = state.value.copy(phase = "idle", input = "", outputState = "draining", outputOwner = "voice",
+            heard = "Yes, please.", reply = longReply, reason = "done") }
+        advance(64)
+        val height = panel.fetchSemanticsNode().boundsInRoot.height
+        val screen = compose.onNodeWithTag("dashboard-content").fetchSemanticsNode().boundsInRoot
+        assertEquals(screen.height / 2, height, 1f)
+        assertVoiceStatusIsAccessibleOnly("Finishing response")
+        compose.onNodeWithText(question).assertIsNotDisplayed()
+        val scroll = compose.onNode(hasScrollAction() and hasAnyAncestor(hasTestTag("voice-transcript")))
+        repeat(3) {
+            scroll.performTouchInput { swipeDown() }
+            advance(500)
+        }
+        compose.onNodeWithText(question).assertIsDisplayed()
+        compose.onNodeWithTag("stop").assertIsDisplayed()
+        capture("tablet-local-capped-transcript")
+        compose.runOnIdle { state.value = state.value.copy(voiceActive = false, invocation = "", outputState = "", outputOwner = "") }
+        advance(5600)
+        panel.assertIsDisplayed()
+        compose.onNodeWithTag("close-voice-transcript").assertIsDisplayed()
+        compose.runOnIdle { state.value = tentative.copy(turn = 5) }
+        advance(64)
+        panel.assertIsDisplayed()
+        compose.runOnIdle { state.value = ready().copy(turn = 5, reason = "answered_elsewhere") }
+        advance(64)
+        panel.assertIsDisplayed()
+        advance(550)
+        panel.assertDoesNotExist()
+        assertEquals(0, stops)
     }
 
     @Test fun renderNativeDisplayStatesAndRespectMusicCapabilities() {
@@ -360,9 +455,11 @@ class EncoreScreenTest {
         val base = """{"voice":{"phase":"speaking","connected":true,"muted":false,"alert":false},"models":3,"dashboard":"","reload":0,"problem":""}"""
         val missing = EncoreState.parse(base, ready().copy(speakerName = "Previous", speakerRGB = listOf(1, 2, 3)))
         assertFalse(missing.talkReady); assertFalse(missing.wakeReady); assertFalse(missing.captureReady)
+        assertFalse(missing.accepted)
         assertFalse(missing.interactionVisible); assertEquals("none", missing.visual); assertEquals("", missing.speakerName)
         fun parse(fields: String) = EncoreState.parse(base.replace("\"phase\":\"speaking\"", fields), ready())
-        val work = parse(""""phase":"working","active":true,"capture_ready":true,"night":"off","speaker":{"name":"Fixture","color_known":true,"rgb":[255,0,0]}""")
+        val work = parse(""""phase":"working","active":true,"accepted":true,"capture_ready":true,"night":"off","speaker":{"name":"Fixture","color_known":true,"rgb":[255,0,0]}""")
+        assertTrue(work.accepted)
         assertEquals(listOf(255, 0, 0), work.speakerRGB)
         assertEquals("processing", work.visual)
         for (rgb in listOf("[0,0,0]", "[256,0,0]", "[0.5,0,0]", "[255,0]", "[\"255\",0,0]")) {
@@ -452,12 +549,12 @@ class EncoreScreenTest {
         compose.onNodeWithText("Motion enabled").assertIsDisplayed()
     }
 
-    @Test @Config(qualifiers = "w360dp-h640dp-mdpi") fun narrowLargeTextKeepsStopAndPrivacyReachable() {
+    @Test @Config(qualifiers = "w360dp-h640dp-night-mdpi") fun narrowLargeTextKeepsStopAndPrivacyReachable() {
         var stops = 0
         var privacy = false
         compose.setContent {
             CompositionLocalProvider(LocalDensity provides Density(1f, 1.6f)) {
-                EncoreScreen(ready().copy(voiceActive = true, phase = "working", heard = "Turn on the kitchen lights.",
+                EncoreScreen(ready().copy(voiceActive = true, invocation = "manual", phase = "working", heard = "Turn on the kitchen lights.",
                     problem = "Fixture notice: a separate music connection is unavailable."), {}, {}, { stops++ }, { privacy = it }, { "" }, { "" }, {}, {}, {}, {}, reducedMotion = true)
             }
         }
@@ -603,6 +700,7 @@ class EncoreScreenTest {
             })
         }
         assertVoiceStatusIsAccessibleOnly("Playing announcement")
+        compose.onNodeWithTag("voice-transcript").assertDoesNotExist()
         compose.onNodeWithTag("dashboard-tile").performTouchInput { click() }
         assertEquals(1, taps)
         compose.onNodeWithTag("open-settings").assertIsNotEnabled()
