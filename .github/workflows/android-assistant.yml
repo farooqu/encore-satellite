@@ -1,0 +1,187 @@
+name: Encore Satellite Assistant APK
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Assistant version name (MAJOR.MINOR.PATCH)
+        type: string
+        required: true
+        default: '0.1.0'
+      publish:
+        description: Sign and publish an immutable GitHub prerelease from protected main
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      ENCORE_VERSION_CODE: ${{ github.run_number }}
+      ENCORE_VERSION_NAME: ${{ inputs.version || '0.1.0' }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Validate version and publication policy
+        env:
+          PUBLISH: ${{ inputs.publish == true }}
+        run: |
+          set -euo pipefail
+          [[ "$ENCORE_VERSION_NAME" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          [[ "$ENCORE_VERSION_CODE" -gt 0 && "$ENCORE_VERSION_CODE" -le 2100000000 ]]
+          if [[ "$PUBLISH" == true ]]; then
+            jq -e '.publishing_enabled == true' release/dev-automation.json >/dev/null || {
+              echo '::error::Manual release publication is disabled by release/dev-automation.json.'
+              exit 1
+            }
+          fi
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.27.4'
+          cache: false
+      - name: Use Java 21
+        run: echo "JAVA_HOME=$JAVA_HOME_21_X64" >> "$GITHUB_ENV"
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+        with:
+          packages: platform-tools
+      - name: Install pinned Android and Gradle tools
+        run: |
+          set -euo pipefail
+          sdkmanager 'platforms;android-36' 'build-tools;36.0.0' 'ndk;28.0.13004108'
+          curl -fsSL https://services.gradle.org/distributions/gradle-9.4.1-bin.zip -o "$RUNNER_TEMP/gradle.zip"
+          echo "2ab2958f2a1e51120c326cad6f385153bb11ee93b3c216c5fccebfdfbb7ec6cb  $RUNNER_TEMP/gradle.zip" | sha256sum -c -
+          unzip -q "$RUNNER_TEMP/gradle.zip" -d "$RUNNER_TEMP"
+          echo "GRADLE=$RUNNER_TEMP/gradle-9.4.1/bin/gradle" >> "$GITHUB_ENV"
+          sudo apt-get update && sudo apt-get install -y meson ninja-build
+      - name: Build and check the assistant
+        run: |
+          go test ./devices/android-assistant/mobile
+          devices/android-assistant/build-android assembleDebug testDebugUnitTest lintDebug assembleRelease
+      - name: Stage unsigned release and matching source
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/assistant-unsigned"
+          mkdir "$dir"
+          cp devices/android-assistant/build/outputs/apk/release/EncoreSatelliteAssistant-release-unsigned.apk "$dir/unsigned.apk"
+          git archive --format=tar.gz --prefix=encore-satellite/ -o "$dir/encore-assistant-source.tar.gz" HEAD
+          python3 release/android_dev.py --assistant-sources "$dir/encore-assistant-dependencies-source.tar.gz"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: github.event_name == 'workflow_dispatch'
+        with:
+          name: android-assistant-unsigned-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/assistant-unsigned
+          if-no-files-found: error
+
+  sign:
+    needs: build
+    if: >-
+      github.event_name == 'workflow_dispatch' && inputs.publish &&
+      github.repository == 'farooqu/encore-satellite' && github.ref == 'refs/heads/main' && github.ref_protected
+    environment: android-signing
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Require a verified source commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA" --jq '.commit.verification.verified' | grep -Fx true
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: android-assistant-unsigned-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/assistant-release
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+        with:
+          packages: platform-tools
+      - name: Install pinned APK signing tools
+        run: sdkmanager 'build-tools;36.0.0'
+      - name: Verify identity and sign with the shared Android key
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          EXPECTED_CERTIFICATE: ${{ vars.ANDROID_CERTIFICATE_SHA256 }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          umask 077
+          export PATH="$ANDROID_HOME/build-tools/36.0.0:$PATH"
+          cd "$RUNNER_TEMP/assistant-release"
+          [[ "$EXPECTED_CERTIFICATE" =~ ^[0-9a-f]{64}$ ]]
+          badging=$(aapt dump badging unsigned.apk)
+          grep -F "package: name='com.encore.personal' versionCode='$GITHUB_RUN_NUMBER' versionName='$VERSION'" <<< "$badging"
+          grep -Fx "native-code: 'arm64-v8a' 'armeabi-v7a'" <<< "$badging"
+          key=$(mktemp "$RUNNER_TEMP/assistant-key.XXXXXX")
+          trap 'rm -f "$key"' EXIT
+          : "${KEYSTORE_BASE64:?Missing Android release keystore}"
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$key"
+          unset KEYSTORE_BASE64
+          zipalign -c -P 16 4 unsigned.apk
+          apksigner sign --ks "$key" --ks-key-alias "$KEY_ALIAS" --ks-pass env:STORE_PASSWORD \
+            --key-pass env:KEY_PASSWORD --v4-signing-enabled false --out encore-satellite-assistant.apk unsigned.apk
+          apk=encore-satellite-assistant.apk
+          certificate=$(apksigner verify --print-certs "$apk" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p')
+          test "$certificate" = "$EXPECTED_CERTIFICATE"
+          zipalign -c -P 16 4 "$apk"
+          rm unsigned.apk
+          sha256sum "$apk" ./*.tar.gz > SHA256SUMS
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: android-assistant-signed-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/assistant-release
+          if-no-files-found: error
+
+  publish:
+    needs: sign
+    concurrency:
+      group: release-publication
+      queue: max
+    environment: release-publication
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: android-assistant-signed-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/assistant-release
+      - name: Retain the exact signed APK and source as a prerelease
+        env:
+          SETUP_APPROVED: ${{ vars.RELEASE_SETUP_APPROVED }}
+          IMMUTABILITY_READ_TOKEN: ${{ secrets.IMMUTABILITY_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          test "$SETUP_APPROVED" = true
+          : "${IMMUTABILITY_READ_TOKEN:?Missing immutable releases settings read token}"
+          GH_TOKEN="$IMMUTABILITY_READ_TOKEN" gh api "repos/$GITHUB_REPOSITORY/immutable-releases" --jq .enabled | grep -Fx true
+          tag="android-assistant-r$GITHUB_RUN_NUMBER"
+          refs=$(gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/android-assistant-r")
+          releases=$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100")
+          # Never reuse a revision or publish behind a newer revision that finished first.
+          jq -e --argjson revision "$GITHUB_RUN_NUMBER" \
+            'all(.[].ref | select(test("^refs/tags/android-assistant-r[0-9]+$")); (split("-r")[-1] | tonumber) < $revision)' <<< "$refs"
+          jq -e --arg tag "$tag" 'all(.[][]; .tag_name != $tag)' <<< "$releases"
+          cd "$RUNNER_TEMP/assistant-release"
+          sha256sum -c SHA256SUMS
+          gh release create "$tag" ./* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --draft --prerelease --title "Encore Satellite Assistant $VERSION (r$GITHUB_RUN_NUMBER)" \
+            --notes "Experimental sideload APK. [Installation guide](https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_SHA/devices/android-assistant/README.md). No update feed is activated."
+          mkdir "$RUNNER_TEMP/assistant-retained"
+          gh release download "$tag" --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/assistant-retained"
+          diff -qr . "$RUNNER_TEMP/assistant-retained"
+          gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false --latest=false
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" --jq .immutable | grep -Fx true
+          gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" --jq .object.sha | grep -Fx "$GITHUB_SHA"

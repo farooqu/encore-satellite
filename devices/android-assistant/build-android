@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Build the assistant APK (debug by default). Never uploads or installs it.
+set -euo pipefail
+root="$(cd "$(dirname "$0")/../.." && pwd)"
+out="$root/build/android"
+mkdir -p "$out"
+: "${ANDROID_HOME:?Set ANDROID_HOME to an Android SDK with platform 36 and NDK 28.0.13004108}"
+export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/28.0.13004108"
+export PATH="$(go env GOPATH)/bin:$PATH"
+bash "$root/platforms/android/build-aec"
+go install golang.org/x/mobile/cmd/gomobile@v0.0.0-20261011034528-197770444867
+go install golang.org/x/mobile/cmd/gobind@v0.0.0-20261011034528-197770444867
+(cd "$root" && gomobile bind -trimpath -target=android/arm64,android/arm -androidapi 26 -javapkg com.encore.engine -o "$out/encore-assistant.aar" ./devices/android-assistant/mobile)
+if [[ $# == 0 ]]; then set -- assembleDebug; fi
+"${GRADLE:-gradle}" -p "$root/devices/android-assistant" "$@" --console=plain

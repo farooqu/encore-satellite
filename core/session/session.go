@@ -92,6 +92,8 @@ type Engine struct {
 	wakeModelWait                   chan struct{}
 	activityHandler                 func(bool)
 	voiceActive                     bool
+	presentationChanged             func(presentation.State)
+	lastPresentation                presentation.State
 }
 
 func New(player audio.Playback) *Engine {
@@ -103,6 +105,10 @@ func New(player audio.Playback) *Engine {
 func (e *Engine) Snapshot() presentation.State {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	return e.snapshot()
+}
+
+func (e *Engine) snapshot() presentation.State {
 	s := e.state
 	s.Generation, s.Turn = e.generation, e.turn
 	if s.Night == "" {
@@ -146,6 +152,16 @@ func (e *Engine) Snapshot() presentation.State {
 	return s
 }
 
+// SetPresentationChanged delivers session snapshots in order under the engine
+// lock. The callback must return promptly without calling back into the engine.
+// Adapter readiness is not part of this notification.
+func (e *Engine) SetPresentationChanged(handler func(presentation.State)) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.presentationChanged = handler
+	e.lastPresentation = e.snapshot()
+}
+
 // SetActivityHandler connects speaker policy to the entire local voice activity,
 // including listening, processing, response drain, announcements and alerts.
 // The handler runs under the session lock: it must return promptly and must not
@@ -170,6 +186,12 @@ func (e *Engine) publishActivity() {
 		e.voiceActive = active
 		if e.activityHandler != nil {
 			e.activityHandler(active)
+		}
+	}
+	if e.presentationChanged != nil {
+		if state := e.snapshot(); state != e.lastPresentation {
+			e.lastPresentation = state
+			e.presentationChanged(state)
 		}
 	}
 }
@@ -208,6 +230,7 @@ func (e *Engine) Attach(link Link) (uint64, error) {
 	if e.localOutput == nil {
 		e.resetOutput()
 	}
+	e.publishActivity()
 	return e.generation, nil
 }
 
@@ -582,6 +605,15 @@ func (e *Engine) Stop() error {
 	return e.stop()
 }
 
+// StopTurn ignores a dismiss action from an older presentation.
+func (e *Engine) StopTurn(generation, turn uint64) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if generation == e.generation && turn == e.turn && e.active {
+		_ = e.stop()
+	}
+}
+
 func (e *Engine) stop() error {
 	if e.intercom {
 		if e.state.MonitorID == 0 { // local Stop already notified the peer
@@ -881,6 +913,7 @@ func (e *Engine) outputSamples(generation, monitorID uint64, samples []int16) er
 		} else {
 			e.outputFailed = true
 		}
+		e.publishActivity()
 	}
 	return err
 }

@@ -1,0 +1,3 @@
+<resources>
+    <bool name="assistant_overlay">true</bool>
+</resources>

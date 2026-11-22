@@ -75,6 +75,11 @@ Internal board names are **Biscuit** for Echo Dot (2nd gen) and **Radar** for
 Echo (2nd gen). Radar has no device implementation here; shared Linux helpers
 do not establish board compatibility. The unpublished internal target is
 `biscuit`; see the [Biscuit naming notes](devices/biscuit/README.md#internal-names).
+
+[Encore Satellite Assistant](devices/android-assistant/README.md) is a separate
+Android-phone prototype for Incubator voice and local wake words, without the
+tablet's dashboard, Sendspin player or Bluetooth proxy.
+
 The shared Go protocol core has a
 [reproducible Home Assistant lab](lab/README.md) pinned to a 2026.12 development
 build. [Native Incubator](docs/incubator-validation.md) is tested with its real

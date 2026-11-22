@@ -18,13 +18,17 @@ BUILD = ROOT / "build/android"
 APP = ROOT / "devices/android-generic/app/build"
 
 
-def add_sources(output):
+def add_sources(output, *, assistant=False):
     goroot = Path(pipeline.run("go", "env", "GOROOT").decode().strip())
-    native = [BUILD / "sendspindroid.tar.gz", *sorted((BUILD / "aec").glob("*.tar.xz")),
+    native = [*sorted((BUILD / "aec").glob("*.tar.xz")),
               *sorted((BUILD / "aec/src/subprojects/packagecache").glob("*"))]
+    pipeline.require(len(native) >= 3 and all(path.is_file() for path in native),
+                     "missing AEC dependency sources from this assembly")
     gradle = APP / "release-dependency-sources"
-    pipeline.require(len(native) >= 4 and gradle.is_dir() and any(gradle.rglob("*.jar")),
-                     "missing Android dependency sources from this assembly")
+    if not assistant:
+        native.insert(0, BUILD / "sendspindroid.tar.gz")
+        pipeline.require(native[0].is_file() and gradle.is_dir() and any(gradle.rglob("*.jar")),
+                         "missing Android dependency sources from this assembly")
     # The full dependency graph includes extra checksums. Keep those in a copy
     # so collecting sources does not change the checkout the receipt covers.
     with tempfile.TemporaryDirectory(dir=output.resolve().parent) as scratch:
@@ -52,7 +56,8 @@ def add_sources(output):
             modules = modules[end:].lstrip()
         for path in native:
             add(path, f"native/{path.name}")
-        add(gradle, "maven")
+        if not assistant:
+            add(gradle, "maven")
 
 
 def verify_trust(apk):
@@ -100,8 +105,13 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("work", type=Path)
     parser.add_argument("output", nargs="?", type=Path, help="omit to verify the trust embedded in one APK")
+    parser.add_argument("--assistant-sources", action="store_true", help="write Assistant dependency sources to work")
     args = parser.parse_args()
-    if args.output is None:
+    if args.assistant_sources:
+        if args.output is not None:
+            parser.error("--assistant-sources accepts one output path")
+        add_sources(args.work, assistant=True)
+    elif args.output is None:
         verify_trust(args.work)
     else:
         prepare(args.work, args.output)

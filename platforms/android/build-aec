@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Android AEC3. No binaries or dependency sources are vendored.
+# Shared Android AEC3 build. No binaries or dependency sources are vendored.
 set -euo pipefail
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 out="$root/build/android/aec"

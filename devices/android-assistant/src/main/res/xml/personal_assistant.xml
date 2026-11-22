@@ -1,0 +1,4 @@
+<voice-interaction-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:sessionService="com.encore.personal.PersonalSessionService"
+    android:recognitionService="com.encore.personal.NoDeviceRecognition"
+    android:supportsAssist="true" />
