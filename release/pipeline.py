@@ -112,6 +112,8 @@ def verify_jws(path, kind, public_key):
 def tag(receipt):
     if arm64_starter(receipt):
         return f"biscuit-{receipt['core_version']}"
+    if receipt["target"] == "android-generic":
+        return f"android-{receipt['core_version']}"
     return f"{receipt['target']}-r{receipt['revision']}"
 
 
@@ -515,12 +517,15 @@ def planned_changelog(receipt, plan):
 
 def publish(directory, receipt, execute, *, automatic_dev=False, dev_plan=None):
     release_tag = tag(receipt)
-    changelog = f"release/changelogs/{receipt['core_version']}.md"
+    version = receipt["core_version"]
+    changelog = f"release/changelogs/{version}.md"
+    title = f"{release_tag} · {version}"
     notes = ""
     if dev_plan is not None:
         require(automatic_dev, "Dev release plan requires automatic Dev publication")
         notes = planned_changelog(receipt, dev_plan).rstrip() + "\n"
     if arm64_starter(receipt):
+        title = f"Biscuit ARM64 {version}"
         source = receipt["source"]
         guide = f"{biscuit_source_packaging(source)}/README.md"
         summary = ("Biscuit ARM64 native A/B pilot. The seed ZIP is for a fresh install; the OTA ZIP requires a signed native feed."
@@ -538,10 +543,11 @@ def publish(directory, receipt, execute, *, automatic_dev=False, dev_plan=None):
             # not invent a previous release: include their complete commit history.
             notes = "Initial retained experimental snapshot; not stable qualification. No channel activation.\n\n" + run(
                 "git", "log", "--reverse", "--format=- %s (%H)", receipt["source"]).decode()
+    if receipt["target"] == "android-generic":
+        title = f"Android {version}"
     commands = [
         ["gh", "release", "create", release_tag, "--repo", REPOSITORY, "--target", receipt["source"],
-         "--draft", "--prerelease", "--title", (f"Biscuit ARM64 {receipt['core_version']}" if arm64_starter(receipt)
-                                               else f"{release_tag} · {receipt['core_version']}"), "--notes", notes],
+         "--draft", "--prerelease", "--title", title, "--notes", notes],
         ["gh", "release", "upload", release_tag, "--repo", REPOSITORY,
          *[str(p) for p in sorted(directory.iterdir())]],
         ["gh", "release", "edit", release_tag, "--repo", REPOSITORY, "--draft=false", "--latest=false"],

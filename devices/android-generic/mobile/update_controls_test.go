@@ -121,8 +121,8 @@ func TestAPKUpdateCapabilityOnESPHome(t *testing.T) {
 						t.Fatalf("unexpected diagnostic: %v", got)
 					}
 				}
-				const asset = "https://github.com/farooqu/encore-satellite/releases/download/android-generic-r82/encore.apk"
-				const changelog = "https://github.com/farooqu/encore-satellite/releases/tag/android-generic-r82"
+				const asset = "https://github.com/farooqu/encore-satellite/releases/download/android-1.2.4/app.apk"
+				const changelog = "https://github.com/farooqu/encore-satellite/releases/tag/android-1.2.4"
 				const notes = "## Android\n\n- Fix reconnect\n- Restore playback"
 				r.UpdateStatus("dev", 0, "1.2.4", "Available", true, false, asset, notes)
 				assertStatus("1.2.4", "Available", true, false, changelog, notes)

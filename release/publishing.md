@@ -265,8 +265,8 @@ repository checkout. Bootstrap does not create or serve a feed.
 
 After permission to upload the signed entry, put `dev.jws` or `stable.jws` in a
 new draft feed-staging Release. Dispatch `activate-feed.yml` on main with the
-Android revision or Biscuit core version, channel, staging tag and receipt hash,
-initially `activate=false`.
+core version (without the `android-` or `biscuit-` prefix), channel, staging tag
+and receipt hash, initially `activate=false`.
 It requires a published immutable matching artifact, re-downloads/verifies all
 its sources/assets, validates the signed entry against the receipt and root,
 and checks freshness and existing per-channel checkpoints. Manual activation

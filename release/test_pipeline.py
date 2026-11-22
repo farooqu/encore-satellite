@@ -122,7 +122,7 @@ class PipelineTests(unittest.TestCase):
         self.cli("sign-receipt", self.output, "--key", self.key, success=False)
         plan = json.loads(self.verified("publish").stdout)
         self.assertEqual(plan["mode"], "dry-run")
-        self.assertIn("android-generic-r5", plan["commands"][0])
+        self.assertIn("android-1.2.0", plan["commands"][0])
         self.assertIn(self.source, plan["commands"][0])
         self.assertNotIn("--clobber", str(plan))
         self.assertNotIn("dev.jws", str(plan))
@@ -131,7 +131,7 @@ class PipelineTests(unittest.TestCase):
         self.prepare()
         for tagged_source, remote_matches, immutable, expected in (
             (None, False, True, "uploaded assets differ; leave draft unpublished"),
-            (None, True, False, "/releases/tag/android-generic-r5"),
+            (None, True, False, "/releases/tag/android-1.2.0"),
             (None, True, True, None),
             (self.source, True, True, None),
             ("0" * 40, True, True, "existing Dev tag must be a lightweight tag at the exact receipt source"),
@@ -143,11 +143,11 @@ class PipelineTests(unittest.TestCase):
                     if command[0] == "git":
                         return b""
                     if "/git/matching-refs/" in command[-1]:
-                        refs = [{"ref": "refs/tags/android-generic-r5", "object": {"type": "commit", "sha": tagged_source}}] if tagged_source else []
+                        refs = [{"ref": "refs/tags/android-1.2.0", "object": {"type": "commit", "sha": tagged_source}}] if tagged_source else []
                         return json.dumps(refs).encode()
                     if command[-1].endswith("releases?per_page=100"):
                         return b"[[]]"
-                    if command[-1].endswith("releases/tags/android-generic-r5"):
+                    if command[-1].endswith("releases/tags/android-1.2.0"):
                         return json.dumps({"immutable": immutable}).encode()
                     self.fail(f"Unexpected read: {command}")
 
@@ -386,12 +386,16 @@ class PipelineTests(unittest.TestCase):
         dev, stable = (pipeline.verify_jws(self.feed(channel), pipeline.ANDROID_FEED_TYPE, self.public)
                        for channel in ("dev", "stable"))
         self.assertEqual({**dev, "channel": "stable"}, stable)
+        self.assertEqual(dev["revision"], revision)
+        self.assertEqual(dev["url"], f"https://github.com/farooqu/encore-satellite/releases/download/android-{core}/app.apk")
         notes = "## Android\n\n- Fix startup\n\n## Biscuit\n\n- No build\n"
         plan = {"source": self.source, "version": core, "revision": revision,
                 "targets": ["android-generic"], "changelog": notes}
         plan_path = self.build / "plan.json"
         plan_path.write_text(json.dumps(plan))
         command = json.loads(self.verified("publish", "--automatic-dev", "--dev-plan", plan_path).stdout)["commands"][0]
+        self.assertEqual(command[3], f"android-{core}")
+        self.assertEqual(command[command.index("--title") + 1], f"Android {core}")
         self.assertEqual(command[command.index("--notes") + 1], notes)
         plan_path.write_text(json.dumps({**plan, "targets": ["biscuit"]}))
         rejected = self.verified("publish", "--automatic-dev", "--dev-plan", plan_path, success=False)
@@ -417,12 +421,13 @@ class PipelineTests(unittest.TestCase):
 
         android, biscuit = "android-generic", "biscuit"
         base = commit("last lockstep build", "core/session/session.go")
-        publish("android-generic-r1000000001", base)
+        publish("android-0.1.2", base)
         publish("biscuit-0.1.2", base)
         docs = commit("docs: explain setup", "docs/setup.md")
         android_tip = commit("fix(android): handle reconnect", "devices/android-generic/app/Host.java")
         # A recovery tag and draft cannot establish a release baseline.
-        android_release = publish("android-generic-r1000000003", android_tip, draft=True)
+        android_release = publish("android-0.1.4", android_tip, draft=True)
+        publish("android-generic-r1000000003", android_tip)  # Old tags cannot establish a baseline.
         biscuit_tip = commit("fix(biscuit): update kernel notice", "devices/biscuit/packaging/README.md")
         registry, _ = inventory("1.2.0")
 
@@ -456,7 +461,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(shared["changelog"].count("fix(core): restore session state"), 2)
         self.assertIn("fix(biscuit): update native OTA", shared["changelog"].split("## Biscuit", 1)[1])
         self.assertNotIn("update native OTA", shared["changelog"].split("## Biscuit", 1)[0])
-        publish("android-generic-r1000000006", shared_tip)
+        publish("android-0.1.7", shared_tip)
         publish("biscuit-0.1.7", shared_tip)
         build_inputs = commit("fix(build): pin shared Go modules", "go.sum")
         self.assertEqual(plan(build_inputs)["targets"], [android, biscuit])

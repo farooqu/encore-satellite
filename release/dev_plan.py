@@ -47,7 +47,7 @@ def plan(source, releases, registry, armed):
         if not release["immutable"] or release["draft"]:
             continue
         tag = release["tag_name"]
-        if re.fullmatch(r"android-generic-r[1-9][0-9]*", tag):
+        if re.fullmatch(r"android-[0-9]+\.[0-9]+\.[0-9]+", tag):
             target = "android-generic"
         elif re.fullmatch(r"biscuit-[0-9]+\.[0-9]+\.[0-9]+", tag):
             target = "biscuit"

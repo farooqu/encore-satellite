@@ -134,11 +134,15 @@ sources, and the dependency source kit. It uploads the flat signed bundle as
 `android-dev-signed-feed-<attempt>`. A rerun keeps the same version and cannot
 overwrite retained releases or previous attempts' artifacts.
 The [shared pipeline](publishing.md) retains those bytes immutably before
-advancing Dev. Never reuse a versionCode for different published bytes, even
-after a withdrawal. Device qualification tests two successive retained Dev
-releases: a fresh install and an OTA of the next release on each target. For
-the initial Stable baseline and later promotions, explicitly select the same
-qualified immutable APK; do not rebuild or auto-promote.
+advancing Dev. GitHub releases use the core version in the tag, for example
+`android-0.1.57`. The first release with this format establishes the new
+Android baseline for release planning; legacy `android-generic-r…` releases
+are not selected by the planner or feed activation. Never reuse a versionCode
+for different published bytes, even after a withdrawal. Device qualification
+tests two successive retained Dev releases: a fresh install and an OTA of the
+next release on each target. For the initial Stable baseline and later
+promotions, explicitly select the same qualified immutable APK; do not rebuild
+or auto-promote.
 
 ## Feed contract and trust lifecycle
 

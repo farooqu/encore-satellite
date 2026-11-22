@@ -10,7 +10,7 @@ on:
       target:
         required: true
         type: string
-      revision:
+      version:
         required: true
         type: string
       receipt_sha256:
@@ -23,8 +23,8 @@ on:
         type: choice
         options: [android-generic, biscuit]
         default: android-generic
-      revision:
-        description: Retained Android revision or Biscuit core version (no tag prefix)
+      version:
+        description: Retained core version (no tag prefix)
         type: string
         required: true
       channel:
@@ -71,7 +71,7 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       TARGET: ${{ inputs.target }}
-      REVISION: ${{ inputs.revision }}
+      VERSION: ${{ inputs.version }}
       CHANNEL: ${{ inputs.signed_feed_artifact != '' && 'dev' || inputs.channel }}
       ACTIVATE: ${{ inputs.signed_feed_artifact != '' || inputs.activate }}
       PROMOTE_STABLE: ${{ inputs.promote_stable }}
@@ -119,15 +119,14 @@ jobs:
       - name: Verify immutable release and signed channel selection
         run: |
           set -euo pipefail
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][A-Za-z0-9.+-]+)?$ ]]
           case "$TARGET" in
             android-generic)
-              [[ "$REVISION" =~ ^[1-9][0-9]*$ ]]
-              tag="android-generic-r$REVISION"
+              tag="android-$VERSION"
               public_key="$ANDROID_PUBLIC_KEY"
               ;;
             biscuit)
-              [[ "$REVISION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][A-Za-z0-9.+-]+)?$ ]]
-              tag="biscuit-$REVISION"
+              tag="biscuit-$VERSION"
               public_key="$BISCUIT_PUBLIC_KEY"
               ;;
             *) exit 1 ;;
@@ -147,13 +146,11 @@ jobs:
           from pathlib import Path
           r = json.loads((Path(os.environ['CANDIDATE']) / 'receipt.json').read_text())
           assert r['target'] == os.environ['TARGET'], 'release target mismatch'
+          assert r['core_version'] == os.environ['VERSION'], 'release identity mismatch'
           if r['target'] == 'android-generic':
-              assert str(r['revision']) == os.environ['REVISION'], 'release identity mismatch'
               assert r['compatibility']['certificate_sha256'] == os.environ['EXPECTED_CERTIFICATE'], 'unexpected APK signer'
               if os.environ['SIGNED_FEED_ARTIFACT']:
                   assert r.get('identity') == 'main', 'automatic Android activation requires a main-derived identity'
-          else:
-              assert r['core_version'] == os.environ['REVISION'], 'release identity mismatch'
           subprocess.run(['git', 'merge-base', '--is-ancestor', r['source'], 'HEAD'], check=True)
           if r['target'] == 'biscuit' or r.get('identity') == 'main':
               history = subprocess.check_output(['git', 'rev-list', '--first-parent', 'HEAD'], text=True).splitlines()
@@ -173,7 +170,7 @@ jobs:
           git -C build/feed-site config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git -C build/feed-site add --all
           if ! git -C build/feed-site diff --cached --quiet; then
-            git -C build/feed-site commit -m "Select $TARGET release $REVISION on $CHANNEL"
+            git -C build/feed-site commit -m "Select $TARGET release $VERSION on $CHANNEL"
           fi
           # No force push; another writer causes failure instead of lost feeds.
           git -C build/feed-site -c 'credential.helper=!gh auth git-credential' push origin HEAD:refs/heads/release-feeds

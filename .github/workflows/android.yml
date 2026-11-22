@@ -25,6 +25,9 @@ jobs:
       (github.repository == 'farooqu/encore-satellite' && github.ref == 'refs/heads/main' && github.ref_protected &&
        github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' &&
        github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.head_repository.full_name == github.repository)
+    # Allow the protected-main workflow_run to save dependencies after its checks pass.
+    # The protected signing job does not restore this cache.
+    cache-mode: write
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     permissions:
@@ -98,6 +101,17 @@ jobs:
       - name: Install AEC3 build tools
         if: github.event_name != 'workflow_run' || steps.dev.outputs.revision != ''
         run: sudo apt-get update && sudo apt-get install -y meson ninja-build
+      - name: Cache Gradle modules and Robolectric SDKs
+        if: github.event_name != 'workflow_run' || steps.dev.outputs.revision != ''
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.gradle/caches/modules-2/files-2.1
+            ~/.gradle/caches/modules-2/metadata-2.*
+            ~/.m2/repository/org/robolectric/android-all-instrumented
+          # build-android pins SendspinDroid, whose checkout supplies Gradle and shared modules.
+          key: android-maven-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('devices/android-generic/**/*.gradle.kts', 'devices/android-generic/gradle.properties', 'devices/android-generic/build-android') }}
+          restore-keys: android-maven-v1-${{ runner.os }}-${{ runner.arch }}-
       - name: Regenerate engine, assemble, test and lint
         if: github.event_name != 'workflow_run' || steps.dev.outputs.revision != ''
         run: devices/android-generic/build-android :app:assembleDebug :app:testDebugUnitTest :app:lintDebug
@@ -136,7 +150,7 @@ jobs:
       actions: read
       contents: read
     outputs:
-      revision: ${{ needs.check.outputs.revision }}
+      core_version: ${{ needs.check.outputs.core }}
       receipt_sha256: ${{ steps.receipt.outputs.sha256 }}
       signed_artifact: ${{ steps.receipt.outputs.signed_artifact }}
       signed_feed_artifact: ${{ steps.receipt.outputs.signed_feed_artifact }}
@@ -301,6 +315,6 @@ jobs:
     uses: ./.github/workflows/activate-feed.yml
     with:
       target: android-generic
-      revision: ${{ needs.signed-candidate.outputs.revision }}
+      version: ${{ needs.signed-candidate.outputs.core_version }}
       signed_feed_artifact: ${{ needs.signed-candidate.outputs.signed_feed_artifact }}
       receipt_sha256: ${{ needs.signed-candidate.outputs.receipt_sha256 }}

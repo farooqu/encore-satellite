@@ -214,5 +214,5 @@ jobs:
     with:
       signed_feed_artifact: biscuit-native-signed-feed
       target: biscuit
-      revision: ${{ needs.sign.outputs.core_version }}
+      version: ${{ needs.sign.outputs.core_version }}
       receipt_sha256: ${{ needs.sign.outputs.receipt_sha256 }}
