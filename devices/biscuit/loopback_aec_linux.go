@@ -33,17 +33,11 @@ func (a *loopbackAEC) process(packed []byte, mic []int16, learn bool) {
 		}
 
 		window := (*[loopbackTaps]float32)(a.history[a.next:])
-		var echo float32
-		for j, weight := range &a.weights {
-			echo += weight * window[j]
-		}
-		residual := float32(sample) - echo
+		residual := float32(sample) - loopbackDot(&a.weights, window)
 		mic[i] = int16(max(math.MinInt16, min(math.MaxInt16, residual)))
 		if learn && sample != math.MinInt16 && sample != math.MaxInt16 {
 			step := 0.1 * residual / float32(a.power+loopbackQuietPower)
-			for j, x := range window {
-				a.weights[j] += step * x
-			}
+			loopbackAddScaled(&a.weights, window, step)
 		}
 	}
 }

@@ -86,6 +86,9 @@ Encore assistant. No Kiosk Satellite application code or assets are included.
   primitives, originally from Yuri Gelfand's MIT EchoLocal. Its license and source
   inventory are retained in `platforms/linux/LICENSE.techo5` and `NOTICE`. Dot-local
   routing/control mappings cite that same source rather than claiming new measurements.
+- Biscuit's ARM64 echo canceller uses Techo5's NEON dot product and scaled-add
+  routines from `echod/internal/lib/vec` at the Techo5 pin above. The MIT license
+  for those routines is retained in `licenses/Techo5-MIT.txt`.
 - `devices/biscuit/cmd/wmtup` copies Techo5 Dot's two-file MediaTek bring-up
   helper at the pin above. That work credits Wil Bowes's MIT EchoMuse/emOS findings.
   `devices/biscuit/packaging/Techo5-Dot-{MIT,NOTICE}.txt` retain its license and
