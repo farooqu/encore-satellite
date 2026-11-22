@@ -111,6 +111,22 @@ jobs:
           # The workflow pins the Gradle distribution.
           key: android-assistant-maven-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('devices/android-assistant/**/*.gradle.kts', 'devices/android-assistant/gradle.properties', 'devices/android-assistant/build-android', '.github/workflows/android-assistant.yml') }}
           restore-keys: android-assistant-maven-v1-${{ runner.os }}-${{ runner.arch }}-
+      - name: Prepare the pinned Robolectric test SDK
+        run: |
+          set -euo pipefail
+          # MicActivityTest runs on API 35 with Robolectric 4.16 (instrumentation i7).
+          version=15-robolectric-13954326-i7
+          path="org/robolectric/android-all-instrumented/$version/android-all-instrumented-$version.jar"
+          jar="$HOME/.m2/repository/$path"
+          sha=5fc64ffccf4788154162686b3966ddd63abea8326542c465e2a7f0129fc92770d0e1e8ddcfabd7f1500e491ec02e3b4104b9e51b61fccd9cf08006c9dc02987c
+          if [[ ! -f "$jar" ]] || ! printf '%s  %s\n' "$sha" "$jar" | sha512sum --check --status; then
+            mkdir -p "$(dirname "$jar")"
+            trap 'rm -f "$jar.part"' EXIT
+            curl -fsSL --retry 3 --connect-timeout 15 "https://repo.maven.apache.org/maven2/$path" -o "$jar.part" ||
+              curl -fsSL --retry 3 --connect-timeout 15 "https://maven-central.storage-download.googleapis.com/maven2/$path" -o "$jar.part"
+            printf '%s  %s\n' "$sha" "$jar.part" | sha512sum --check
+            mv "$jar.part" "$jar"
+          fi
       - name: Build and check the assistant
         run: |
           go test ./devices/android-assistant/mobile
