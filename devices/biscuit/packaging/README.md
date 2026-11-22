@@ -457,9 +457,11 @@ and the unchanged app entry path waits for DHCP and Bluetooth before normal
 `PrepareNetwork`/`Run`. No saved Wi-Fi means physical-Action-authorized Improv,
 even if some external mechanism has already associated wlan0. Provisioning
 readiness is the fresh PID/heartbeat in `/run/encore/provisioning-ready` after
-GATT registration/advertisement/BlueZ health; `/run/encore/ready` is later voice
-startup readiness and cannot substitute for it. Config/keys/bonds/credentials
-stay in RAM. Rootfs regular files must fit 96 MiB of its 128 MiB tmpfs.
+GATT registration/advertisement/BlueZ health. Once Wi-Fi is configured,
+`/run/encore/ready` reports readiness for ESPHome onboarding or, with a valid
+key, normal audio startup. It cannot substitute for Wi-Fi provisioning readiness.
+Config/keys/bonds/credentials stay in RAM. Rootfs regular files must fit 96 MiB
+of its 128 MiB tmpfs.
 
 Runtime USB shells use the retained BusyBox `setsid -c` to acquire a controlling
 TTY, with explicit script input rather than an interactive line editor that

@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -56,8 +57,120 @@ func Run(parent context.Context, c Config, probeReference bool) error {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 	gate := linux.NewPrivacy(func() (bool, error) { return linux.ReadPrivacy(privacyState) })
-	// An unreadable state is muted; the capture worker keeps checking it.
-	muted, _ := gate.Check(nil)
+	iface, err := net.InterfaceByName("wlan0")
+	if err != nil || len(iface.HardwareAddr) != 6 {
+		return errors.New("dot: wlan0 with a real six-byte MAC is required")
+	}
+	mac := iface.HardwareAddr
+	if mac[0]&1 != 0 || mac.String() == "00:00:00:00:00:00" {
+		return errors.New("dot: invalid wlan0 MAC")
+	}
+	addresses, err := interfaceIPv4(iface)
+	if err != nil {
+		return err
+	}
+	var ips []net.IP
+	for _, address := range addresses {
+		ips = append(ips, net.ParseIP(address))
+	}
+	if len(ips) == 0 {
+		return errors.New("dot: wlan0 IPv4 address is required before startup")
+	}
+	baseGeneration, err := os.ReadFile("/run/encore/bluetooth-ready")
+	if err != nil || len(baseGeneration) == 0 {
+		return errors.New("dot: Bluetooth base is not running")
+	}
+	// Required BLE base is validated even when the optional proxy is OFF.
+	if err = bluez.Validate(ctx); err != nil {
+		return fmt.Errorf("dot: required Bluetooth base: %w", err)
+	}
+	controls := &biscuitControls{}
+	if controls.updates, err = newARM64Updates("/data/encore/arm64-update-channel.json", "/run/encore/arm64-installed.json"); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("read ARM64 boot identity: %w", err)
+	}
+	apiInfo := controls.controlInfo(c.Name, mac)
+	apiAd := mdns.Config{Name: apiInfo.Name, FriendlyName: apiInfo.FriendlyName, Port: esphome.DefaultPort, MACAddress: apiInfo.MACAddress, Version: apiInfo.ESPHomeVersion, Platform: "encore", Board: "biscuit", IPs: ips}
+	if err = os.MkdirAll("/run/encore", 0755); err != nil {
+		return err
+	}
+	markReady := func() error { return os.WriteFile(ReadyPath, []byte(strconv.Itoa(os.Getpid())+"\n"), 0644) }
+	if err = os.WriteFile(ringPath+"boot_animation", []byte("0"), 0644); err != nil {
+		return err
+	}
+	devices, err := openButtons()
+	if err != nil {
+		return err
+	}
+	var workers sync.WaitGroup
+	failed := make(chan error, len(devices)+6)
+	start := func(run func() error) { workers.Go(func() { failed <- run() }) }
+	stop := sync.OnceFunc(func() {
+		_ = os.Remove(ReadyPath)
+		cancel()
+		for _, d := range devices {
+			_ = d.Close()
+		}
+		workers.Wait()
+	})
+	defer stop()
+	var buttonsAudio atomic.Pointer[buttonAudio]
+	apiAction := make(chan struct{})
+	for _, d := range devices {
+		start(func() error { return buttons(ctx, d, gate, buttonsAudio.Load, apiAction) })
+	}
+	start(func() error {
+		t := time.NewTicker(50 * time.Millisecond)
+		defer t.Stop()
+		nextAddressCheck := time.Now().Add(time.Second)
+		for {
+			select {
+			case <-ctx.Done():
+				return nil
+			case now := <-t.C:
+				if !now.Before(nextAddressCheck) {
+					nextAddressCheck = now.Add(time.Second)
+					current, err := interfaceIPv4(iface)
+					if err != nil || !slices.Equal(current, addresses) {
+						// The separately supervised network worker owns rollback.
+						return errors.New("dot: network address changed; reinitialization required")
+					}
+				}
+				generation, err := os.ReadFile("/run/encore/bluetooth-ready")
+				if err != nil || string(generation) != string(baseGeneration) {
+					return errors.New("dot: Bluetooth base restarted; reinitialization required")
+				}
+			}
+		}
+	})
+	paired := make(chan esphome.PSK, 1)
+	workers.Go(func() {
+		// A functioning onboarding runtime is healthy even if the owner has
+		// not paired yet. Do not require capture to pass first-boot slot health.
+		key, err := waitForESPHomeKey(ctx, KeyPath, apiAction, apiInfo, apiAd, markReady)
+		if err != nil {
+			failed <- err
+			return
+		}
+		paired <- key
+	})
+	var key esphome.PSK
+	select {
+	case <-ctx.Done():
+		return nil
+	case err := <-failed:
+		if ctx.Err() != nil {
+			return nil
+		}
+		return err
+	case key = <-paired:
+	}
+	if ctx.Err() != nil {
+		return nil
+	}
+	_ = os.Remove(ReadyPath)
+
+	// No ALSA I/O, voice listener, or normal ESPHome controls exist until
+	// the saved key has been validated and the pairing window has closed.
 	mixer, err := alsa.OpenMixer(0)
 	if err != nil {
 		return err
@@ -86,26 +199,15 @@ func Run(parent context.Context, c Config, probeReference bool) error {
 	if err != nil {
 		return err
 	}
-	devices, err := openButtons()
-	if err != nil {
-		return err
-	}
-	defer func() {
-		for _, d := range devices {
-			_ = d.Close()
-		}
-	}()
-	if err = os.WriteFile(ringPath+"boot_animation", []byte("0"), 0644); err != nil {
-		return err
-	}
 	engine := session.New(player)
 	engine.SetActivityHandler(player.SetVoiceActive)
-	player.SetMusicPrivacy(muted)
 	if err = engine.Select(session.Incubator); err != nil {
 		return err
 	}
+	// An unreadable state is muted; the capture worker keeps checking it.
+	muted, _ := gate.Check(nil)
+	player.SetMusicPrivacy(muted)
 	engine.SetMuted(muted)
-	defer engine.SetMuted(true)
 	ringPolicy, err := loadRingSettings(ringSettingsPath)
 	if err != nil {
 		return err
@@ -123,34 +225,6 @@ func Run(parent context.Context, c Config, probeReference bool) error {
 	}()
 	if err = mixer.SetEnum("Ext_Speaker_Amp_Switch", "On"); err != nil {
 		return err
-	}
-
-	iface, err := net.InterfaceByName("wlan0")
-	if err != nil || len(iface.HardwareAddr) != 6 {
-		return errors.New("dot: wlan0 with a real six-byte MAC is required")
-	}
-	mac := iface.HardwareAddr
-	if mac[0]&1 != 0 || mac.String() == "00:00:00:00:00:00" {
-		return errors.New("dot: invalid wlan0 MAC")
-	}
-	addresses, err := interfaceIPv4(iface)
-	if err != nil {
-		return err
-	}
-	var ips []net.IP
-	for _, address := range addresses {
-		ips = append(ips, net.ParseIP(address))
-	}
-	if len(ips) == 0 {
-		return errors.New("dot: wlan0 IPv4 address is required before startup")
-	}
-	baseGeneration, err := os.ReadFile("/run/encore/bluetooth-ready")
-	if err != nil || len(baseGeneration) == 0 {
-		return errors.New("dot: Bluetooth base is not running")
-	}
-	// Required BLE base is validated even when the optional proxy is OFF.
-	if err = bluez.Validate(ctx); err != nil {
-		return fmt.Errorf("dot: required Bluetooth base: %w", err)
 	}
 	scanner, err := bluez.OpenScanner(ctx)
 	if err != nil {
@@ -171,16 +245,11 @@ func Run(parent context.Context, c Config, probeReference bool) error {
 	if err != nil {
 		return err
 	}
-	controls := &biscuitControls{Proxy: proxy, player: player, management: admin, ring: ringPolicy, announcements: announcements.New(engine), microphone: sensors.NewMicrophone(muted)}
-	if controls.updates, err = newARM64Updates("/data/encore/arm64-update-channel.json", "/run/encore/arm64-installed.json"); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("read ARM64 boot identity: %w", err)
-	}
+	controls.Proxy, controls.player, controls.management, controls.ring = proxy, player, admin, ringPolicy
+	controls.announcements, controls.microphone = announcements.New(engine), sensors.NewMicrophone(muted)
 	if packagedExecutable(musicExecutable) {
 		controls.music = newMusic(c, saved, player)
 	}
-	apiAction := make(chan struct{})
-	apiInfo := controls.controlInfo(c.Name, mac)
-	apiAd := mdns.Config{Name: apiInfo.Name, FriendlyName: apiInfo.FriendlyName, Port: esphome.DefaultPort, MACAddress: apiInfo.MACAddress, Version: apiInfo.ESPHomeVersion, Platform: "encore", Board: "biscuit", IPs: ips}
 	voiceListener, err := net.Listen("tcp4", ":6055")
 	if err != nil {
 		return err
@@ -192,23 +261,12 @@ func Run(parent context.Context, c Config, probeReference bool) error {
 	}
 	defer voiceAd.Shutdown()
 	log.Print("Incubator is unencrypted and unauthenticated; use a trusted LAN only")
-	if err = os.MkdirAll("/run/encore", 0755); err != nil {
-		return err
-	}
-	var workers sync.WaitGroup
-	failed := make(chan error, len(devices)+5)
-	start := func(run func() error) { workers.Go(func() { failed <- run() }) }
-	// Close pollable evdev readers before waiting, and stop capture before its
-	// descriptor is released. No reader survives this Run invocation.
+	// Stop the workers before releasing the descriptors they use.
 	defer func() {
-		_ = os.Remove(ReadyPath)
 		engine.SetMuted(true)
-		cancel()
-		for _, d := range devices {
-			_ = d.Close()
-		}
-		workers.Wait()
+		stop()
 	}()
+	buttonsAudio.Store(&buttonAudio{engine: engine, player: player})
 	start(func() error {
 		select {
 		case <-ctx.Done():
@@ -217,40 +275,24 @@ func Run(parent context.Context, c Config, probeReference bool) error {
 			return player.Err()
 		}
 	})
+	apiAd.Encrypted, apiAd.Provisionable = true, false
 	start(func() error {
-		return controls.serveAPI(ctx, KeyPath, apiAction, apiInfo, apiAd)
+		return serveAdvertisedAPI(apiAd, func(l net.Listener) error { return controls.Serve(ctx, l, apiInfo, key) })
 	})
 	voice := &incubator.Server{Engine: engine, Name: c.Name, MAC: mac.String(), Version: "0.1.0-dev.0", EnableModels: true, CallAEC: true, MonitorAEC: true}
 	start(func() error {
 		return voice.Serve(ctx, voiceListener)
 	})
-	for _, d := range devices {
-		start(func() error { return buttons(ctx, d, gate, engine, player, apiAction) })
-	}
 	meter := &captureMeter{origin: time.Now()}
 	start(func() error {
 		t := time.NewTicker(50 * time.Millisecond)
 		defer t.Stop()
-		nextAddressCheck := time.Now().Add(time.Second)
 		for {
 			select {
 			case <-ctx.Done():
 				return nil
-			case now := <-t.C:
-				if !now.Before(nextAddressCheck) {
-					nextAddressCheck = now.Add(time.Second)
-					current, addressErr := interfaceIPv4(iface)
-					if addressErr != nil || !slices.Equal(current, addresses) {
-						// The separately supervised network worker still owns
-						// rollback. Recreate both advertisements on the new IP.
-						return errors.New("dot: network address changed; reinitialization required")
-					}
-				}
-				generation, e := os.ReadFile("/run/encore/bluetooth-ready")
-				if e != nil || string(generation) != string(baseGeneration) {
-					return errors.New("dot: Bluetooth base restarted; reinitialization required")
-				}
-				now = time.Now()
+			case <-t.C:
+				now := time.Now()
 				reading := meter.snapshot(now)
 				state := voice.Snapshot(reading.ready)
 				if e := ring.update(state, reading, now, ringPolicy.snapshot()); e != nil {
@@ -274,7 +316,7 @@ func Run(parent context.Context, c Config, probeReference bool) error {
 	for {
 		select {
 		case <-ready:
-			if err = os.WriteFile(ReadyPath, []byte(strconv.Itoa(os.Getpid())+"\n"), 0644); err != nil {
+			if err = markReady(); err != nil {
 				return err
 			}
 			log.Printf("Encore %s ready (Incubator package); Action or app-pushed MixedNet wake models", c.Name)

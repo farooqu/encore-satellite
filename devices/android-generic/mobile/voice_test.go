@@ -5,27 +5,32 @@ import (
 	"encoding/json"
 	"io"
 	"net"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
+
+	esphome "github.com/ygelfand/go-esphome-device"
 )
 
 func TestAndroidOffersLocalModelsButNoOffCallMicRoutes(t *testing.T) {
-	r, err := Open(t.TempDir(), silentOutput{})
+	dir := t.TempDir()
+	b, err := json.Marshal(settings{MAC: "02:11:22:ab:cd:ef", Key: (esphome.PSK{7, 42}).String()})
 	if err != nil {
 		t.Fatal(err)
 	}
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err := os.WriteFile(filepath.Join(dir, "encore.json"), b, 0600); err != nil {
+		t.Fatal(err)
+	}
+	r, err := Open(dir, silentOutput{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	done := make(chan error, 1)
-	go func() { done <- r.voice.Serve(t.Context(), listener) }()
-	t.Cleanup(func() {
-		if err := <-done; err != nil {
-			t.Error(err)
-		}
-	})
-	c, err := net.DialTimeout("tcp", listener.Addr().String(), time.Second)
+	if err := r.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(r.Close)
+	c, err := net.DialTimeout("tcp", "127.0.0.1:6055", time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}

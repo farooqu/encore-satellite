@@ -12,28 +12,29 @@ import (
 	"github.com/ygelfand/go-esphome-device/mdns"
 )
 
-func (d *biscuitControls) serveAPI(ctx context.Context, path string, action <-chan struct{}, info esphome.Info, ad mdns.Config) error {
+// waitForESPHomeKey returns a validated key only after the bootstrap listener
+// has shut down. An expired window requires another physical press.
+func waitForESPHomeKey(ctx context.Context, path string, action <-chan struct{}, info esphome.Info, ad mdns.Config, ready func() error) (esphome.PSK, error) {
 	for {
 		key, err := noiseKey(path)
-		if err == nil {
-			ad.Encrypted, ad.Provisionable = true, false
-			return serveAdvertisedAPI(ad, func(l net.Listener) error { return d.Serve(ctx, l, info, key) })
-		}
 		if !errors.Is(err, os.ErrNotExist) {
-			return err
+			return key, err
 		}
 		log.Print("ESPHome setup: press Action to open the two-minute pairing window")
+		if err = ready(); err != nil {
+			return key, err
+		}
 		select {
 		case <-ctx.Done():
-			return nil
+			return key, ctx.Err()
 		case <-action:
 		}
 		ad.Encrypted, ad.Provisionable = false, true
 		err = serveAdvertisedAPI(ad, func(l net.Listener) error {
 			return esphomepairing.Serve(ctx, l, info, func(key esphome.PSK) error { return saveNoiseKey(path, key) })
 		})
-		if err != nil || ctx.Err() != nil {
-			return err
+		if err != nil {
+			return key, err
 		}
 	}
 }

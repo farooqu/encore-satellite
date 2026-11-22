@@ -88,7 +88,15 @@ class EncoreService : Service() {
                             val newVoiceActivity = next.voiceActive && !mutable.value.voiceActive
                             val espHomeChanged = next.esphome != mutable.value.esphome
                             mutable.value = next
-                            if (espHomeChanged && next.running) updateESPHomeAdvertisement(engine, next.esphome)
+                            if (espHomeChanged && next.running) {
+                                updateAdvertisements(engine, next.esphome)
+                                if (next.esphome == "paired" && microphoneForeground && !next.muted) {
+                                    runCatching { startMicrophone() }.onFailure {
+                                        setMuted(true)
+                                        problem("Microphone unavailable. Check permission and privacy controls before unmuting.")
+                                    }
+                                }
+                            }
                             focus.update(next.voiceActive || next.music.playing, resume = newVoiceActivity)
                             music?.duck(next.voiceActive)
                         }.onFailure {
@@ -164,10 +172,9 @@ class EncoreService : Service() {
                 updates?.start()
                 mutable.value = mutable.value.copy(running = true)
                 bluetooth.running(true)
-                advertise(engine.name(), "_voice-incubator._tcp.", 6055, mapOf("mac" to engine.mac(), "protocol" to "2"))
                 val esphome = EncoreState.parse(engine.snapshot(false), mutable.value).esphome
                 mutable.value = mutable.value.copy(esphome = esphome)
-                updateESPHomeAdvertisement(engine, esphome)
+                updateAdvertisements(engine, esphome)
             }
             if (enableMicrophone && intent?.getBooleanExtra("unmute", false) == true) engine.setMuted(false)
             if (microphoneForeground && !EncoreState.parse(engine.snapshot(audio.captureReady), mutable.value).muted) startMicrophone()
@@ -189,6 +196,7 @@ class EncoreService : Service() {
     }
 
     private fun startMicrophone() {
+        if (mutable.value.esphome != "paired") return
         check(microphoneForeground) { "Start the microphone from the app first" }
         audio.startCapture({ runtime?.capture(it) }, {
             scope.launch { setMuted(true); problem("Microphone unavailable. Check permission and privacy controls before unmuting.") }
@@ -214,7 +222,7 @@ class EncoreService : Service() {
     }
 
     fun talk() {
-        if (!mutable.value.running || !mutable.value.talkAllowed) return
+        if (!mutable.value.running || mutable.value.esphome != "paired" || !mutable.value.talkAllowed) return
         runCatching {
             check(mutable.value.microphoneReady && mutable.value.captureReady && !mutable.value.muted) { "Start the microphone from the app first" }
             focus.update(true, resume = true)
@@ -254,6 +262,7 @@ class EncoreService : Service() {
     private fun host(): MusicHost = musicHost ?: MusicHost(this).also { musicHost = it }
     fun connectMusic(address: String) {
         if (!mutable.value.running) { problem("Start the satellite before connecting Sendspin"); return }
+        if (mutable.value.esphome != "paired") { problem("Pair with Home Assistant before connecting Sendspin"); return }
         disconnectMusic()
         runCatching {
             MusicPlayer(mutable.value.name, host()) { next -> mutable.value = mutable.value.copy(music = next) }
@@ -273,7 +282,7 @@ class EncoreService : Service() {
     fun dismissProblem() { runtime?.dismissProblem(); mutable.value = mutable.value.copy(problem = "") }
     private fun problem(message: String) { mutable.value = mutable.value.copy(problem = message) }
 
-    private fun updateESPHomeAdvertisement(engine: Runtime, esphome: String) {
+    private fun updateAdvertisements(engine: Runtime, esphome: String) {
         val manager = getSystemService(NsdManager::class.java)
         espHomeAdvertisement?.let { listener ->
             runCatching { manager.unregisterService(listener) }
@@ -291,6 +300,9 @@ class EncoreService : Service() {
                 mapOf("mac" to engine.mac().replace(":", ""), "version" to Mobile.ESPHomeVersion,
                     "friendly_name" to engine.espHomeFriendlyName()) + security)
         }.onFailure { problem("ESPHome discovery unavailable; use the tablet IP") }.getOrNull()
+        if (esphome == "paired") runCatching {
+            advertise(engine.name(), "_voice-incubator._tcp.", 6055, mapOf("mac" to engine.mac(), "protocol" to "2"))
+        }.onFailure { problem("Voice discovery unavailable; use the tablet IP") }
     }
 
     private fun advertise(name: String, type: String, port: Int, attributes: Map<String, String>): NsdManager.RegistrationListener {

@@ -13,6 +13,7 @@ import (
 
 	esphome "github.com/ygelfand/go-esphome-device"
 	"github.com/ygelfand/go-esphome-device/api"
+	"github.com/ygelfand/go-esphome-device/mdns"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/farooqu/encore-satellite/backends/bluetooth"
@@ -59,8 +60,45 @@ func dialPairing(t *testing.T, addr string) net.Conn {
 
 func TestESPHomeFirstPairing(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "noise.psk")
-	addr, _, done := runPairingServer(t, func(ctx context.Context, l net.Listener) error {
-		return esphomepairing.Serve(ctx, l, pairingInfo, func(key esphome.PSK) error { return saveNoiseKey(path, key) })
+	l, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := l.Addr().String()
+	ad := mdns.Config{Name: pairingInfo.Name, Port: l.Addr().(*net.TCPAddr).Port, IPs: []net.IP{net.IPv4(127, 0, 0, 1)}}
+	l.Close()
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+	action := make(chan struct{})
+	ready := make(chan struct{})
+	done := make(chan error, 1)
+	var loaded esphome.PSK
+	go func() {
+		var err error
+		loaded, err = waitForESPHomeKey(ctx, path, action, pairingInfo, ad, func() error { close(ready); return nil })
+		done <- err
+	}()
+	select {
+	case <-ready:
+	case <-time.After(time.Second):
+		t.Fatal("unpaired runtime did not become ready for onboarding")
+	}
+	if c, err := net.DialTimeout("tcp", addr, time.Second); err == nil {
+		c.Close()
+		t.Fatal("ESPHome listened before Action")
+	}
+	select {
+	case action <- struct{}{}:
+	case <-time.After(time.Second):
+		t.Fatal("pairing did not wait for Action")
+	}
+	buttonWait(t, "ESPHome listener did not open after Action", func() bool {
+		c, err := net.DialTimeout("tcp", addr, time.Second)
+		if err != nil {
+			return false
+		}
+		c.Close()
+		return true
 	})
 	key := esphome.PSK{3, 9, 8}
 	request := &api.NoiseEncryptionSetKeyRequest{Key: []byte(key.String())}
@@ -143,14 +181,20 @@ func TestESPHomeFirstPairing(t *testing.T) {
 	if err != nil || st.Mode().Perm() != 0600 {
 		t.Fatal("key not persisted privately")
 	}
-	loaded, err := noiseKey(path)
-	if err != nil || loaded != key {
-		t.Fatal("did not reload exact HA key")
+	if loaded != key {
+		t.Fatal("first pairing did not release the runtime with the saved key")
+	}
+	stored, err := waitForESPHomeKey(t.Context(), path, nil, pairingInfo, ad, func() error {
+		t.Fatal("valid saved key unexpectedly entered onboarding")
+		return nil
+	})
+	if err != nil || stored != key {
+		t.Fatal("startup did not accept the exact saved HA key", err)
 	}
 
 	d := &biscuitControls{Proxy: bluetooth.New(managementRadio{}, bluetooth.Options{}), player: newSpeaker(&speakerPCM{})}
 	t.Cleanup(func() { _ = d.player.Close() })
-	addr, cancel, done := runPairingServer(t, func(ctx context.Context, l net.Listener) error {
+	addr, cancel, served := runPairingServer(t, func(ctx context.Context, l net.Listener) error {
 		return d.Serve(ctx, l, pairingInfo, loaded)
 	})
 	peer = newManagementPeer(t, addr, key)
@@ -168,7 +212,7 @@ func TestESPHomeFirstPairing(t *testing.T) {
 		t.Fatal("original key no longer authenticates")
 	}
 	cancel()
-	waitPairingServer(t, done)
+	waitPairingServer(t, served)
 }
 
 func TestESPHomePairingWindowExpiryAndFailedPersistence(t *testing.T) {

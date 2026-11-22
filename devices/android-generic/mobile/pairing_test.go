@@ -33,6 +33,17 @@ func TestHomeAssistantKeyEnablesEncryptedControlsAfterReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(r.Close)
+	assertVoiceClosed := func() {
+		t.Helper()
+		if c, err := net.DialTimeout("tcp", "127.0.0.1:6055", time.Second); err == nil {
+			c.Close()
+			t.Fatal("Incubator was reachable before ESPHome pairing completed")
+		}
+		if err := r.Talk(); err == nil || err.Error() != "ESPHome pairing is required for voice" {
+			t.Fatalf("Talk did not enforce pairing: %v", err)
+		}
+	}
+	assertVoiceClosed()
 	if err := r.PairHomeAssistant(); err != nil {
 		t.Fatal(err)
 	}
@@ -52,13 +63,37 @@ func TestHomeAssistantKeyEnablesEncryptedControlsAfterReopen(t *testing.T) {
 		}
 	}
 	checkInfo(bootstrap, "1.2.3-dev.4", true)
+	assertVoiceClosed()
 	request := &api.NoiseEncryptionSetKeyRequest{Key: []byte(first.String())}
 	response := &api.NoiseEncryptionSetKeyResponse{}
+	// A key request is not enough: force persistence to fail before retrying.
+	tmp := filepath.Join(dir, "encore.json.tmp")
+	if err := os.Mkdir(tmp, 0700); err != nil {
+		t.Fatal(err)
+	}
+	bootstrap(request, response)
+	if response.Success {
+		t.Fatal("bootstrap accepted a key it could not save")
+	}
+	assertVoiceClosed()
+	if err := os.Remove(tmp); err != nil {
+		t.Fatal(err)
+	}
 	bootstrap(request, response)
 	if !response.Success {
 		t.Fatal("bootstrap rejected the first key")
 	}
 	waitForESPHomeState(t, r, "paired")
+	voice, err := net.DialTimeout("tcp", "127.0.0.1:6055", time.Second)
+	if err != nil {
+		t.Fatal("Incubator did not start after pairing", err)
+	}
+	defer voice.Close()
+	_ = voice.SetDeadline(time.Now().Add(time.Second))
+	var hello [3]byte
+	if _, err := io.ReadFull(voice, hello[:]); err != nil || hello[0] != 1 {
+		t.Fatal("paired Incubator did not send its hello", hello, err)
+	}
 	paired := pairingNoisePeer(t, first)
 	checkInfo(paired, "1.2.3-dev.4", false)
 	paired(&api.NoiseEncryptionSetKeyRequest{Key: []byte((esphome.PSK{6, 3}).String())}, response)

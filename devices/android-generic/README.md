@@ -151,16 +151,9 @@ these devices, acoustic timings or model-backed enrollment/training.
    Open Encore and choose **Allow microphone access** if prompted. Notifications
    are optional. Encore starts its microphone/media foreground service automatically
    once microphone access is granted. No boot receiver, root, device owner or
-   unattended kiosk privileges are required.
-2. On a trusted LAN, pair the device with Voice Incubator using the advertised
-   `_voice-incubator._tcp` service, or its IP and TCP port 6055. This protocol is
-   **unencrypted/unauthenticated**; do not expose it to untrusted networks.
-   Incubator sends mixednet models, which execute locally through the compatible
-   microWakeWord frontend. No wake model is bundled or downloaded independently.
-   Readiness combines usable ordinary wake models with current native capture
-   health; a stop-only model does not mean hands-free wake is ready. **Talk** is a
-   manual fallback, not a replacement for local wake detection.
-3. On a fresh install, tap **Pair with Home Assistant** on the Android setup screen.
+   unattended kiosk privileges are required. Microphone capture, Incubator
+   and Sendspin stay off until ESPHome pairing succeeds.
+2. On a fresh install, tap **Pair with Home Assistant** on the Android setup screen.
    On a trusted LAN, open Home Assistant **Settings → Devices & services** and
    add the discovered satellite as **Encore Android · 0AB2** (or add ESPHome by
    tablet IP, TCP 6053) within two minutes. The friendly name ends in the last
@@ -184,6 +177,14 @@ these devices, acoustic timings or model-backed enrollment/training.
    The read-only **Microphone muted** (`microphone_muted`) binary sensor reports
    the app's microphone privacy latch and updates when it changes. It does not
    report Android permission or recorder readiness and cannot unmute the app.
+3. After ESPHome pairing, connect Voice Incubator using the advertised
+   `_voice-incubator._tcp` service, or the tablet IP and TCP port 6055. This
+   protocol is **unencrypted/unauthenticated**; use it only on a trusted LAN.
+   Incubator sends mixednet models, which execute locally through the compatible
+   microWakeWord frontend. No wake model is bundled or downloaded independently.
+   Readiness combines usable ordinary wake models with current native capture
+   health; a stop-only model does not mean hands-free wake is ready. **Talk** is a
+   manual fallback, not a replacement for local wake detection.
 4. Sign into HA in the dashboard itself, or use **Settings → Sign in with
    phone** on the tablet. Phone sign-in requires HA 2026.11 or later, an up-to-date
    Android System WebView, and an HTTPS HA address trusted and reachable by both

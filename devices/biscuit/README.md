@@ -388,7 +388,7 @@ default to DROP; OUTPUT is allowed. The package owns these device filter tables.
 | Inbound service | Policy |
 |---|---|
 | TCP 6053, ESPHome controls/Bluetooth proxy | Wi-Fi only; controls require the nonzero per-device Noise key. Unpaired starter builds listen only during the Action-authorized [first-pair window](packaging/README.md#add-the-esphome-controls-to-home-assistant). |
-| TCP 6055, native Voice Incubator protocol 2 | Wi-Fi only; **unauthenticated**, use only on a trusted LAN/VLAN, never port-forward. |
+| TCP 6055, native Voice Incubator protocol 2 | Listens only after ESPHome pairing, on Wi-Fi. **Unauthenticated**; use only on a trusted LAN/VLAN, never port-forward. |
 | UDP 5353 | mDNS multicast destinations and unicast replies on Wi-Fi. |
 | DHCP and selected ICMP/IPv6 discovery | Allowed on Wi-Fi for address configuration, diagnostics and network operation. |
 | Sendspin | No inbound port: outbound authenticated connection and its replies only. |

@@ -73,7 +73,12 @@ func buttonGroup(name string) uint8 {
 	return 0
 }
 
-func buttons(ctx context.Context, d *input.Device, gate *linux.Privacy, engine *session.Engine, player *speaker, apiAction chan<- struct{}) error {
+type buttonAudio struct {
+	engine *session.Engine
+	player *speaker
+}
+
+func buttons(ctx context.Context, d *input.Device, gate *linux.Privacy, audio func() *buttonAudio, apiAction chan<- struct{}) error {
 	// The Dot keypad emits down/up, not autorepeat. Keep reads interruptible
 	// while this worker repeats held volume keys, as Techo5 does every 200 ms.
 	events := make(chan input.Event)
@@ -118,8 +123,8 @@ func buttons(ctx context.Context, d *input.Device, gate *linux.Privacy, engine *
 			if down[115] {
 				delta++
 			}
-			if delta != 0 {
-				player.adjust(delta)
+			if a := audio(); delta != 0 && a != nil {
+				a.player.adjust(delta)
 			}
 			continue
 		case e = <-events:
@@ -146,16 +151,32 @@ func buttons(ctx context.Context, d *input.Device, gate *linux.Privacy, engine *
 		if e.Value != 1 || down[e.Code] {
 			continue
 		}
+		if e.Code == 113 {
+			// Driver acts BEFORE evdev, with up to 500ms state-report lag.
+			// Inhibit now and observe state later; NEVER toggle the latch.
+			gate.Inhibit(500 * time.Millisecond)
+		}
+		a := audio()
+		if a == nil {
+			if e.Code == 113 || e.Code == 138 {
+				down[e.Code] = true
+			}
+			if e.Code == 138 && buttonGroup(d.Name) == 4 {
+				select {
+				case apiAction <- struct{}{}:
+				default: // No waiting first-pair window; never queue an authorization.
+				}
+			}
+			continue
+		}
 		if (e.Code == 114 || e.Code == 115) && !down[114] && !down[115] {
 			repeat.Reset(200 * time.Millisecond)
 			tick = repeat.C
 		}
 		down[e.Code] = true
+		engine, player := a.engine, a.player
 		switch e.Code {
 		case 113:
-			// Driver acts BEFORE evdev, with up to 500ms state-report lag.
-			// Inhibit now and observe state later; NEVER toggle the latch.
-			gate.Inhibit(500 * time.Millisecond)
 			player.SetMusicPrivacy(true)
 			engine.SetMuted(true)
 		case 114:
@@ -163,12 +184,6 @@ func buttons(ctx context.Context, d *input.Device, gate *linux.Privacy, engine *
 		case 115:
 			player.pressVolume(1)
 		case 138:
-			if buttonGroup(d.Name) == 4 {
-				select {
-				case apiAction <- struct{}{}:
-				default: // No waiting first-pair window; never queue an authorization.
-				}
-			}
 			_, _ = gate.Check(func() {
 				s := engine.Snapshot()
 				if s.Phase == "idle" && !s.Active && !s.Alert {

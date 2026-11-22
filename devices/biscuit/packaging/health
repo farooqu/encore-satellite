@@ -1,7 +1,8 @@
 #!/bin/sh
-# Never commit solely because a process exists. The runtime writes ready only
-# after playback and controls initialize and capture is working or safely
-# disabled by privacy. Ready does not qualify the physical microphone path.
+# Never commit solely because a process exists. The unpaired runtime writes
+# ready once networking and physical pairing input are available. With a key,
+# it writes ready after audio startup and capture readiness (or privacy mute).
+# Ready does not qualify the physical microphone path.
 set -eu
 provisioning_live() {
   [ ! -s /data/encore/wpa_supplicant.conf ] || return 1

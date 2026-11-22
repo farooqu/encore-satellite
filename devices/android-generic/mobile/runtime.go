@@ -153,34 +153,23 @@ func (r *Runtime) Start() error {
 	if r.cancel != nil {
 		return nil
 	}
-	vl, err := net.Listen("tcp", ":6055")
-	if err != nil {
-		return err
-	}
-	var cl net.Listener
-	var key esphome.PSK
+	ctx, cancel := context.WithCancel(context.Background())
 	if r.config.Key != "" {
-		key, err = esphome.ParsePSK(r.config.Key)
+		key, err := esphome.ParsePSK(r.config.Key)
 		if err != nil || key.IsZero() {
-			vl.Close()
+			cancel()
 			return errors.New("invalid saved ESPHome key")
 		}
-		cl, err = net.Listen("tcp", ":6053")
-		if err != nil {
-			vl.Close()
+		if err := r.startPaired(ctx, key); err != nil {
+			cancel()
 			return err
 		}
 	}
-	ctx, cancel := context.WithCancel(context.Background())
 	r.running, r.cancel = ctx, cancel
 	r.done.Go(func() { r.proxy.Run(ctx) })
 	if r.light.Supported() {
 		sources := r.sensors()
 		r.done.Go(func() { sources.Illuminance.Run(ctx, func() { _ = r.broadcastControl(sources.IlluminanceState()) }) })
-	}
-	r.serveListener(ctx, vl, r.voice.Serve)
-	if cl != nil {
-		r.startControl(ctx, cl, key)
 	}
 	return nil
 }
@@ -210,8 +199,19 @@ func (r *Runtime) controlInfo() esphome.Info {
 		Manufacturer: r.manufacturer, Model: r.model, Version: version})
 }
 
-// startControl is called under mu after the encrypted listener is bound.
-func (r *Runtime) startControl(ctx context.Context, l net.Listener, key esphome.PSK) {
+// startPaired is called under mu with a validated key, after bootstrap has
+// closed if this is first pairing. Bind both listeners before serving either.
+func (r *Runtime) startPaired(ctx context.Context, key esphome.PSK) error {
+	l, err := net.Listen("tcp", ":6053")
+	if err != nil {
+		return err
+	}
+	vl, err := net.Listen("tcp", ":6055")
+	if err != nil {
+		l.Close()
+		return err
+	}
+	r.serveListener(ctx, vl, r.voice.Serve)
 	info := r.controlInfo()
 	info.BluetoothFeatures = r.proxy.Features()
 	control := &esphome.Server{Info: info, PSK: &key, Handler: r, WriteTimeout: 2 * time.Second,
@@ -229,6 +229,7 @@ func (r *Runtime) startControl(ctx context.Context, l net.Listener, key esphome.
 			}
 		}
 	})
+	return nil
 }
 
 func (r *Runtime) sendAnnouncementState(send func(proto.Message) error) error {
@@ -268,8 +269,8 @@ func (r *Runtime) broadcastControl(msg proto.Message) error {
 	return control.Broadcast(msg)
 }
 
-// PairHomeAssistant is called only by the local first-run UI. The voice server
-// stays up while the restricted listener takes and persists the first key.
+// PairHomeAssistant is called only by the local first-run UI. Normal listeners
+// stay closed until the restricted listener has persisted the first key.
 func (r *Runtime) PairHomeAssistant() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -315,11 +316,7 @@ func (r *Runtime) pairHomeAssistant(ctx context.Context) error {
 			return
 		}
 		if err == nil {
-			var encrypted net.Listener
-			encrypted, err = net.Listen("tcp", ":6053")
-			if err == nil {
-				r.startControl(r.running, encrypted, key)
-			}
+			err = r.startPaired(r.running, key)
 		}
 		if err != nil {
 			r.problem = "ESPHome could not start. Restart the satellite and try again."
@@ -352,6 +349,12 @@ func (r *Runtime) Capture(pcm []byte) error {
 	if len(pcm) == 0 || len(pcm)%2 != 0 || len(pcm) > audio.MaxSamples*2 {
 		return errors.New("invalid PCM block")
 	}
+	r.mu.Lock()
+	paired := r.control != nil
+	r.mu.Unlock()
+	if !paired {
+		return nil
+	}
 	r.captureMu.Lock()
 	defer r.captureMu.Unlock()
 	samples := make([]int16, len(pcm)/2)
@@ -364,8 +367,15 @@ func (r *Runtime) Capture(pcm []byte) error {
 	return r.voice.Capture(f)
 }
 
-func (r *Runtime) Talk() error { return r.engine.StartManual() }
-func (r *Runtime) Stop()       { _ = r.engine.Stop() }
+func (r *Runtime) Talk() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.control == nil {
+		return errors.New("ESPHome pairing is required for voice")
+	}
+	return r.engine.StartManual()
+}
+func (r *Runtime) Stop() { _ = r.engine.Stop() }
 
 // SetMonitorVisible applies the Android overlay state for one exact request.
 func (r *Runtime) SetMonitorVisible(id int64, visible bool) {
@@ -429,6 +439,7 @@ func (r *Runtime) Snapshot(captureReady bool) string {
 	}
 	problem := r.problem
 	esphomeState := r.pairing
+	captureReady = captureReady && r.control != nil
 	if r.control != nil {
 		esphomeState = "paired"
 	} else if esphomeState == "" && r.config.Key == "" {
