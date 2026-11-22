@@ -78,7 +78,7 @@ internal fun VoiceTranscript?.update(state: EncoreState, local: Boolean, active:
 }
 
 @Composable internal fun VoiceTranscriptPanel(call: VoiceTranscript, state: EncoreState, modifier: Modifier,
-    onClose: () -> Unit, privacy: @Composable () -> Unit) {
+    onClose: () -> Unit) {
     val lines = buildList {
         for (turn in call.earlier + call.current) {
             val current = turn === call.current && !call.finished
@@ -104,7 +104,6 @@ internal fun VoiceTranscript?.update(state: EncoreState, local: Boolean, active:
                     Icon(painterResource(R.drawable.ic_second_pulse), contentDescription = "Encore Satellite",
                         modifier = Modifier.size(36.dp), tint = colors.primary)
                     Spacer(Modifier.weight(1f))
-                    if (!call.finished) privacy()
                     IconButton(onClick = onClose, modifier = Modifier.size(48.dp)
                         .testTag(if (call.finished) "close-voice-transcript" else "stop").semantics {
                             contentDescription = if (call.finished) "Close voice panel" else "Stop voice turn"

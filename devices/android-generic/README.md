@@ -283,8 +283,8 @@ Home support on Portal.
 - The panel grows to fit, up to half the screen, then scrolls under a fixed
   header. **×** or **Back** stops an active turn, including playback drain;
   after normal completion, the transcript stays for six seconds or until
-  dismissed. Transcripts are not persisted. The panel retains a mic-mute
-  control while the turn is active.
+  dismissed. Transcripts are not persisted. Close the panel to return to the
+  main controls and mute the mic.
 - Incoming audio and remote mic sessions keep their existing edge indicator and
   Stop/privacy controls. Fresh mic RMS and measured playback animate that edge;
   queued audio and missing samples do not create motion. Reduced motion removes

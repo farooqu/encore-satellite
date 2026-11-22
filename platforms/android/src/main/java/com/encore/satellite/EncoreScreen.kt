@@ -132,9 +132,7 @@ internal fun EncoreScreen(state: EncoreState, onStart: () -> Unit, onTalk: () ->
             } else if (panel != null) {
                 BackHandler(onBack = ::closePanel)
                 VoiceTranscriptPanel(panel, state, Modifier.align(Alignment.BottomCenter).widthIn(max = 640.dp)
-                    .fillMaxWidth().heightIn(max = maxHeight / 2), onClose = ::closePanel) {
-                    MuteButton(state, onMuted, compact = true)
-                }
+                    .fillMaxWidth().heightIn(max = maxHeight / 2), onClose = ::closePanel)
             } else if (settingsVisible) {
                 // Keep Settings in the Activity window so a remote turn can take over without losing window focus.
                 BackHandler(onBack = ::closeSettings)
@@ -164,12 +162,11 @@ internal fun EncoreScreen(state: EncoreState, onStart: () -> Unit, onTalk: () ->
     }
 }
 
-@Composable private fun MuteButton(state: EncoreState, onMuted: (Boolean) -> Unit, compact: Boolean = false) {
+@Composable private fun MuteButton(state: EncoreState, onMuted: (Boolean) -> Unit) {
     FilledIconToggleButton(checked = state.muted, onCheckedChange = onMuted, enabled = state.microphoneReady || state.muted,
-        colors = IconButtonDefaults.filledIconToggleButtonColors(containerColor = if (compact) Color.Transparent else Ink,
-            contentColor = if (compact) MaterialTheme.colorScheme.onSurfaceVariant else Mint,
+        colors = IconButtonDefaults.filledIconToggleButtonColors(containerColor = Ink, contentColor = Mint,
             checkedContainerColor = Color(0xffa23b45), checkedContentColor = Color.White),
-        modifier = Modifier.size(if (compact) 48.dp else 56.dp).testTag("privacy").semantics {
+        modifier = Modifier.size(56.dp).testTag("privacy").semantics {
             contentDescription = if (state.muted) "Unmute mic" else "Mute mic"
             stateDescription = if (state.muted) "Microphone muted" else "Microphone unmuted"
         }) {

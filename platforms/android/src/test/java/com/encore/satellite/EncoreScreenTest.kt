@@ -256,15 +256,17 @@ class EncoreScreenTest {
         compose.onNodeWithTag("voice-edge-glow").assertDoesNotExist()
         compose.onNodeWithTag("dashboard-tile").performTouchInput { click() }
         assertEquals("Voice blocked a dashboard touch", 2, dashboardTaps)
-        compose.onNodeWithTag("privacy").performClick()
-        assertTrue(privacy)
+        compose.onNodeWithTag("privacy").assertDoesNotExist()
         // HANGUP does not remove Stop while the host still drains.
         compose.runOnIdle { state.value = state.value.copy(phase = "idle", input = "", outputState = "draining") }
         assertTrue("Drain lost shared audio-focus ownership", state.value.voiceActive)
         assertVoiceStatusIsAccessibleOnly("Finishing response")
-        compose.onNodeWithContentDescription("Stop voice turn").performClick()
+        compose.onNodeWithContentDescription("Stop voice turn").performTouchInput { click() }
         assertEquals(1, stops)
+        assertFalse("Closing the panel changed mute", privacy)
         compose.onNodeWithTag("voice-transcript").assertDoesNotExist()
+        compose.onNodeWithTag("privacy").assertContentDescriptionEquals("Mute mic").performTouchInput { click() }
+        assertTrue(privacy)
         compose.onNodeWithTag("dashboard-tile").performTouchInput { click() }
         assertEquals(3, dashboardTaps)
         compose.runOnIdle { state.value = ready().copy(muted = true) }
@@ -549,21 +551,16 @@ class EncoreScreenTest {
         compose.onNodeWithText("Motion enabled").assertIsDisplayed()
     }
 
-    @Test @Config(qualifiers = "w360dp-h640dp-night-mdpi") fun narrowLargeTextKeepsStopAndPrivacyReachable() {
-        var stops = 0
-        var privacy = false
+    @Test @Config(qualifiers = "w360dp-h640dp-night-mdpi") fun narrowLargeTextKeepsCloseReachable() {
         compose.setContent {
             CompositionLocalProvider(LocalDensity provides Density(1f, 1.6f)) {
                 EncoreScreen(ready().copy(voiceActive = true, invocation = "manual", phase = "working", heard = "Turn on the kitchen lights.",
-                    problem = "Fixture notice: a separate music connection is unavailable."), {}, {}, { stops++ }, { privacy = it }, { "" }, { "" }, {}, {}, {}, {}, reducedMotion = true)
+                    problem = "Fixture notice: a separate music connection is unavailable."), {}, {}, {}, {}, { "" }, { "" }, {}, {}, {}, {}, reducedMotion = true)
             }
         }
         compose.onNodeWithContentDescription("Dismiss notice").assertIsDisplayed().assertHasClickAction()
         compose.onNodeWithTag("stop").assertIsDisplayed().assertHasClickAction()
-        compose.onNodeWithTag("privacy").assertIsDisplayed().assertHasClickAction()
-        compose.onNodeWithTag("stop").performTouchInput { click() }
-        compose.onNodeWithTag("privacy").performTouchInput { click() }
-        assertEquals(1, stops); assertTrue(privacy)
+        compose.onNodeWithTag("privacy").assertDoesNotExist()
         capture("android-narrow-large-text")
     }
 
