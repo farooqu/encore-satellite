@@ -105,7 +105,7 @@ def load_native_bundle(path, digest):
     return manifest, files
 
 
-def install_native_locked(adb, args, manifest, files, name):
+def install_native_locked(adb, args, manifest, files, name, *, wifi=None):
     """First-install only. Never move, import or erase an old enrollment."""
     store = STORE + "/native-ab-v1"
     next_data = "/data/.encore-native-next"
@@ -142,6 +142,8 @@ def install_native_locked(adb, args, manifest, files, name):
         adb.write(f"{store}/slots/{slot}/rootfs.tar.gz", files["rootfs.tar.gz"])
     adb.write(f"{store}/highest-revision", f"{manifest['package_revision']}\n".encode())
     adb.write(f"{next_data}/config.json", json.dumps({"schema": 1, "name": name, "bluetooth_proxy": True}).encode() + b"\n")
+    if wifi is not None:
+        adb.write(f"{next_data}/wpa_supplicant.conf", wifi)
     adb.shell(f"mv {next_data} {STATE}; sync")
     # Keep the live USB recovery session open until all readbacks pass.
     # Start with B, so A remains stock during the first boot-store write.
@@ -298,7 +300,7 @@ def load_bundle(path, digest):
     return manifest, rootfs, recovery
 
 
-def install_locked(adb, args, manifest, rootfs, recovery, name):
+def install_locked(adb, args, manifest, rootfs, recovery, name, *, wifi=None):
     revision = manifest["package_revision"]
     fresh = args.command == "install-arm64"
     archive = f"archive-arm32-before-{revision}"
@@ -397,6 +399,8 @@ def install_locked(adb, args, manifest, rootfs, recovery, name):
     adb.write(f"{pending}/recovery.img", recovery)
     adb.write(f"{pending}/manifest.json", json.dumps(manifest, sort_keys=True).encode() + b"\n")
     adb.write(f"{next_data}/config.json", json.dumps({"schema": 1, "name": name, "bluetooth_proxy": True}).encode() + b"\n")
+    if wifi is not None:
+        adb.write(f"{next_data}/wpa_supplicant.conf", wifi)
     if key is not None:
         adb.write(f"{next_data}/noise.psk", key)
     adb.write(f"{pending}/active", b"a\n")

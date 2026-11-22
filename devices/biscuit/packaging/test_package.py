@@ -8,12 +8,15 @@ from pathlib import Path
 import re
 import struct
 import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
+import warnings
 import zipfile
 from argparse import Namespace
 from contextlib import redirect_stdout
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import install
@@ -456,7 +459,7 @@ class RecoveryTests(unittest.TestCase):
 
         self.addCleanup(patch.stopall)
         patch.object(install, "ADB", RecoveryADB).start()
-        patch.object(install.getpass, "getpass", return_value="fresh-password").start()
+        self.passphrase = patch.object(install.getpass, "getpass", return_value="fresh-password").start()
 
     def bundle(self, revision, base="b" * 64, kernel=None):
         buf = io.BytesIO()
@@ -517,8 +520,23 @@ class RecoveryTests(unittest.TestCase):
         (state / "wpa_supplicant.conf").unlink()
         state.rmdir()
 
-        starter_install.install_native_locked(adb, self.args, manifest, files, "native-dot")
-        self.assertEqual([x.name for x in state.iterdir()], ["config.json"])
+        receipt = {"target": "biscuit", "artifact": {"name": "seed.zip", "sha256": "fixture digest"}}
+        pipeline = SimpleNamespace(verify=lambda *_: receipt, native_starter=lambda _: True)
+        argv = ["install.py", "install-native", "--serial", self.args.serial, "--name", "native-dot",
+                "--candidate", str(self.root), "--public-key", "fixture.pem", "--receipt-sha256", "fixture digest",
+                "--twrp-sha256", self.args.twrp_sha256, "--backup-dir", str(self.args.backup_dir), "--wifi-ssid", "IEEE"]
+        self.passphrase.return_value = "password"
+        with patch.dict(sys.modules, {"pipeline": pipeline}), patch.object(sys, "path", sys.path.copy()), \
+                patch.object(install, "preflight"), \
+                patch.object(starter_install, "load_native_bundle", return_value=(manifest, files)):
+            with patch.object(sys, "argv", argv):
+                install.main()
+            self.passphrase.assert_not_called()
+            self.assertFalse(state.exists())
+            with patch.object(sys, "argv", [*argv, "--apply"]):
+                install.main()
+        self.assert_preseeded_wifi()
+        self.assertEqual(sorted(x.name for x in state.iterdir()), ["config.json", "wpa_supplicant.conf"])
         self.assertEqual(json.loads((state / "config.json").read_bytes()),
                          {"schema": 1, "name": "native-dot", "bluetooth_proxy": True})
         for slot, number, old in (("a", 10, a), ("b", 11, b)):
@@ -530,7 +548,20 @@ class RecoveryTests(unittest.TestCase):
         for name, value in originals.items():
             self.assertEqual((self.args.backup_dir / f"{name}.img").read_bytes(), value)
 
+    def assert_preseeded_wifi(self):
+        self.passphrase.assert_called_once()
+        path = self.device / "data/encore/wpa_supplicant.conf"
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(path.read_bytes(), b"ctrl_interface=/run/wpa_supplicant\nupdate_config=0\nnetwork={\n"
+                         b" ssid=49454545\n psk=f42c6fc52df0ebef9ebb4b90b38a5f902e83fe1b135a70e23aed762e9710a12e\n}\n")
+
     def test_fresh_arm64_install_needs_no_legacy_layout(self):
+        self.check_fresh_arm64_install(seed=False)
+
+    def test_fresh_arm64_install_can_preseed_wifi(self):
+        self.check_fresh_arm64_install(seed=True)
+
+    def check_fresh_arm64_install(self, seed):
         from kernel61 import starter_install
 
         p12 = self.device / "dev/block/mmcblk0p12"
@@ -559,7 +590,29 @@ class RecoveryTests(unittest.TestCase):
             self.assertEqual(p12.read_bytes(), twrp)
             self.assertFalse(self.store("").exists())
             self.args.twrp_sha256 = package.sha(twrp)
-            install.install(self.args)
+            argv = ["install.py", "install", "--serial", self.args.serial, "--bundle", str(self.args.bundle),
+                    "--sha256", self.args.sha256, "--twrp-sha256", self.args.twrp_sha256,
+                    "--backup-dir", str(self.args.backup_dir), "--allow-development"]
+            if seed:
+                argv += ["--wifi-ssid", "IEEE"]
+                self.passphrase.return_value = "password"
+            with patch.object(sys, "argv", argv):
+                install.main()
+            self.passphrase.assert_not_called()
+            self.assertFalse(self.store("").exists())
+            if seed:
+                def echo_fallback(*_):
+                    warnings.warn("cannot turn off echo", install.getpass.GetPassWarning)
+                with patch.object(sys, "argv", [*argv, "--apply"]), \
+                        patch.object(install.getpass, "getpass", side_effect=echo_fallback), \
+                        self.assertRaises(SystemExit) as error:
+                    install.main()
+                self.assertEqual(error.exception.code, 1)
+                self.assertFalse(self.args.backup_dir.exists())
+                self.assertFalse(self.store("").exists())
+                self.assertEqual(p12.read_bytes(), twrp)
+            with patch.object(sys, "argv", [*argv, "--apply"]):
+                install.main()
             with self.assertRaises(RuntimeError):
                 install.install(self.args)
         self.assertEqual(self.store("format").read_text(), starter_install.FORMAT + "\n")
@@ -572,7 +625,11 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(unrelated.read_bytes(), b"not Encore")
         self.assertFalse((self.args.backup_dir / "encore-api-key.txt").exists())
         self.assertEqual(sorted(p.name for p in (self.device / "data/encore").iterdir()),
-                         ["config.json"])
+                         ["config.json", "wpa_supplicant.conf"] if seed else ["config.json"])
+        if seed:
+            self.assert_preseeded_wifi()
+        else:
+            self.passphrase.assert_not_called()
         config = json.loads((self.device / "data/encore/config.json").read_bytes())
         self.assertIs(config["bluetooth_proxy"], True)
 

@@ -29,11 +29,12 @@ readbacks, and selects A. It backs up boot A, boot B, recovery and MISC before
 writes; it leaves recovery and stock system partitions unchanged and does not
 reboot. If apply is interrupted, stay in recovery and inspect the backups
 instead of retrying over the partial install. The hardware owner controls
-fastboot entry and the first normal boot. Enroll with Improv Wi-Fi, then Voice
-Incubator and Home Assistant ESPHome. After Home Assistant installs the next
-signed update, verify the confirmed slot and version before any fastboot
-round trip. For read-only verification, never use `set_active`, `flash`, or
-`erase`; a normal reboot into a *pending* slot can consume a boot attempt.
+fastboot entry and the first normal boot. Set up [Wi-Fi](#wi-fi-at-install-time),
+then enroll with Voice Incubator and Home Assistant ESPHome. After Home
+Assistant installs the next signed update, verify the confirmed slot and version
+before any fastboot round trip. For read-only verification, never use
+`set_active`, `flash`, or `erase`; a normal reboot into a *pending* slot can
+consume a boot attempt.
 
 ## Private persistent ARM64 starter
 
@@ -131,8 +132,8 @@ files to RAM, then unmounts stock. There is no persistent duplicate, and neither
 Encore slot writes either stock system partition. If import fails, base and
 radios stay unavailable; USB rescue and `/run/encore/base.log` remain available.
 After `base-ready`, radio and networking start automatically. On a fresh
-install, Improv requires the physical Action button to authorize Wi-Fi setup;
-on later boots the starter waits for the saved network instead. After Wi-Fi is
+install without saved Wi-Fi, Improv requires the physical Action button to
+authorize setup; otherwise the starter joins the saved network. After Wi-Fi is
 ready, the app starts regardless of the physical privacy state. The microphone
 stays off while muted or while the state is unreadable; capture starts or
 resumes only after the driver confirms it is unmuted. The slots start `held`,
@@ -141,6 +142,18 @@ commit a slot. App readiness does not require an active microphone: capture
 may be safely disabled by privacy. Failed health leaves USB available without
 rebooting. Persistent enrollment and runtime acceptance still require hardware
 verification.
+
+### Wi-Fi at install time
+
+To skip BLE/Improv Wi-Fi onboarding, add `--wifi-ssid "Your Network"` to
+either `install` or `install-native`. With `--apply`, the installer prompts
+for the WPA2-Personal passphrase without echoing it. Do not put the passphrase
+on the command line. The installer stores only the derived Wi-Fi key in a
+private configuration file on the Dot, and Encore uses it on first boot.
+Read-only preflight does not prompt or verify network connectivity. Double-check
+the credentials: if the Dot can't join, saved Wi-Fi settings prevent Improv from
+starting automatically. Omit the flag to use the usual Improv setup. Home
+Assistant pairing is separate.
 
 ### Add the ESPHome controls to Home Assistant
 

@@ -15,6 +15,7 @@ import shlex
 import subprocess
 import sys
 import tarfile
+import warnings
 import zipfile
 
 from package import FORMAT, boot_image, sha, validate_kernel
@@ -101,6 +102,18 @@ def wifi_config(ssid, password):
     # Hex encoding avoids supplicant and shell injection and never persists the
     # original passphrase. The derived PSK is still a secret; mode 0600.
     return f"ctrl_interface=/run/wpa_supplicant\nupdate_config=0\nnetwork={{\n ssid={encoded.hex()}\n psk={psk}\n}}\n".encode()
+
+
+def prompt_wifi(ssid):
+    if ssid is None:
+        return None
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", getpass.GetPassWarning)
+        try:
+            password = getpass.getpass("Wi-Fi WPA2 passphrase: ")
+        except (getpass.GetPassWarning, EOFError):
+            raise ValueError("Wi-Fi setup requires an interactive, non-echoing passphrase prompt") from None
+    return wifi_config(ssid, password)
 
 
 class ADB:
@@ -236,6 +249,7 @@ def install(args):
         return
     if not args.allow_development:
         raise ValueError("unsigned local bundles require explicit --allow-development; this is not a production update channel")
+    wifi = prompt_wifi(args.wifi_ssid) if args.command == "install-arm64" else None
     # TWRP remains in RAM. Mount only the two filesystems we own directories on.
     for mount, number in (("/cache", 15), ("/data", 16)):
         adb.shell(f"mountpoint -q {mount} || mount {mount}; "
@@ -255,7 +269,7 @@ def install(args):
     adb.shell(f"{store_check}; umask 077; mkdir {lock}")
     try:
         if starter:
-            starter_install.install_locked(adb, args, manifest, rootfs, image, name)
+            starter_install.install_locked(adb, args, manifest, rootfs, image, name, wifi=wifi)
         else:
             adb.shell(f"test ! -e {store}/.arm64-transition")
             apply_locked(args, adb, manifest, files, store, name, recovery, image)
@@ -277,7 +291,7 @@ def apply_locked(args, adb, manifest, files, store, name, recovery, image):
             raise ValueError("recovery changed after preflight; inspect it before retrying")
         # Default to first-boot Improv. USB credentials are an explicit alternative,
         # never a migration of Fire OS state.
-        wifi = wifi_config(args.wifi_ssid, getpass.getpass("Wi-Fi WPA2 passphrase: ")) if args.wifi_ssid is not None else None
+        wifi = prompt_wifi(args.wifi_ssid)
         config = json.dumps({"schema": 1, "name": name, "bluetooth_proxy": True}).encode()
         # Keep actual TWRP and misc backups, not personal Fire OS settings.
         args.backup_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -391,6 +405,7 @@ def install_native(args):
     if not args.apply:
         print(f"Read-only signed native preflight passed for {name}. Apply checks empty state and retains full backup before writes.")
         return
+    wifi = prompt_wifi(args.wifi_ssid)
     for mount, number in (("/cache", 15), ("/data", 16)):
         adb.shell(f"mountpoint -q {mount} || mount {mount}; "
                   f"source=$(awk '$2 == \"{mount}\" && $3 == \"ext4\" && $4 ~ /^rw(,|$)/ {{print $1}}' /proc/mounts); "
@@ -398,7 +413,7 @@ def install_native(args):
     lock = "/cache/.encore-install-lock"
     adb.shell(f"umask 077; mkdir {lock}")
     try:
-        starter_install.install_native_locked(adb, args, manifest, files, name)
+        starter_install.install_native_locked(adb, args, manifest, files, name, wifi=wifi)
     finally:
         adb.shell(f"rmdir {lock}")
 
@@ -426,6 +441,8 @@ def main():
     p.add_argument("--backup-dir", type=Path, required=True, help="new private rollback backup directory")
     p.add_argument("--name", help="new DNS device name")
     p.add_argument("--apply", action="store_true", help="perform device writes; otherwise read-only preflight")
+    for command in commands.choices.values():
+        command.add_argument("--wifi-ssid", help="seed a WPA2 network; prompts privately for its passphrase on --apply")
     args = parser.parse_args()
     try:
         (install_native if args.command == "install-native" else install)(args)
