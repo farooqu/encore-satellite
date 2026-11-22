@@ -53,6 +53,7 @@ data class EncoreState(
     val speakerRGB: List<Int> = emptyList(),
     val reason: String = "",
     val esphome: String = "",
+    val espHomeFriendlyName: String = "",
 ) {
     val needsHomeAssistantSetup: Boolean get() = esphome == "unpaired" || esphome == "waiting" || esphome == "expired"
     val origin: String get() = if (dashboard.isEmpty()) "" else Uri.parse(dashboard).let { "${it.scheme}://${it.encodedAuthority}" }

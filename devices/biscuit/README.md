@@ -24,8 +24,14 @@ The unpublished target/discovery board ID is `biscuit`, the package format is
 `encore-biscuit-arm64-starter-v1`, and default generated names use
 `encore-biscuit-…`. The packaged backend is `incubator`.
 
-ESPHome reports the friendly name `Biscuit`, manufacturer `Amazon`, model
-`Echo Dot (2nd gen)`, and the booted image's version without the package revision.
+ESPHome advertises `Encore Echo Dot · 0AB2` as the friendly name, using the last
+four uppercase hex digits of the unit's Wi-Fi MAC (here `0AB2`). Home Assistant
+uses it as the title for new ESPHome config entries and appends the adapter MAC
+to that title for the Bluetooth proxy adapter's device name. Existing ESPHome
+entry titles can be renamed in Home Assistant without re-pairing.
+
+ESPHome reports manufacturer `Amazon`, model `Echo Dot (2nd gen)`, and the
+booted image's version without the package revision.
 The project name `Encore Satellite.Amazon Echo Dot (2nd gen)` makes Home Assistant
 display `Amazon Echo Dot (2nd gen)` by `Encore Satellite` in Device info.
 The `Firmware update` entity uses the title `Encore Satellite` and reports core

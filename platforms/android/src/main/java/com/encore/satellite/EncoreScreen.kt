@@ -195,7 +195,7 @@ internal fun trustedNavigation(origin: String, value: String): Boolean {
                 Text(when {
                     needsPermission -> "Allow microphone access for local wake-word detection. If Android asks to allow notifications, that's optional."
                     !state.running -> if (state.problem.isEmpty()) "Starting Encore…" else "Reopen Encore to try again."
-                    state.esphome == "waiting" -> "In Home Assistant, go to Settings → Devices & services and add ${state.name} under Discovered. You won't need to enter a key. The pairing window closes after two minutes."
+                    state.esphome == "waiting" -> "In Home Assistant, go to Settings → Devices & services and add ${state.espHomeFriendlyName} under Discovered. You won't need to enter a key. The pairing window closes after two minutes."
                     state.esphome == "expired" -> "The pairing window expired. Start pairing again, then add the satellite in Home Assistant."
                     else -> "Pair on a trusted local network to add this satellite in Home Assistant without entering an encryption key."
                 }, Modifier.semantics { liveRegion = LiveRegionMode.Polite }, color = Muted)

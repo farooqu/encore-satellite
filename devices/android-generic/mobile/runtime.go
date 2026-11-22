@@ -136,7 +136,7 @@ func (r *Runtime) save(c settings) error {
 	return os.Rename(r.path+".tmp", r.path)
 }
 
-func (r *Runtime) Name() string { return "encore-" + strings.ReplaceAll(r.mac[9:], ":", "") }
+func (r *Runtime) Name() string { return "encore-android-" + strings.ReplaceAll(r.mac[9:], ":", "") }
 func (r *Runtime) MAC() string  { return r.mac }
 
 // NoiseKey is for local pairing UI only; never include it in snapshots/logs.
@@ -187,8 +187,10 @@ func (r *Runtime) Start() error {
 // ESPHomeVersion is the compatibility version used by Android's discovery advertisement.
 const ESPHomeVersion = esphomeadapter.CompatibilityVersion
 
-// ESPHomeFriendlyName is the default Home Assistant name for this package.
-const ESPHomeFriendlyName = "Generic Android"
+// ESPHomeFriendlyName is the unit's default display name in Home Assistant.
+func (r *Runtime) ESPHomeFriendlyName() string {
+	return "Encore Android · " + strings.ToUpper(strings.ReplaceAll(r.mac[12:], ":", ""))
+}
 
 // ConfigureHardware supplies Android's hardware labels before starting ESPHome.
 func (r *Runtime) ConfigureHardware(manufacturer, model string) {
@@ -203,7 +205,7 @@ func (r *Runtime) controlInfo() esphome.Info {
 	if r.updateState != nil {
 		version = r.updateState.CurrentVersion
 	}
-	return esphomeadapter.DeviceInfo(esphome.Info{Name: r.Name(), FriendlyName: ESPHomeFriendlyName, MACAddress: r.MAC(),
+	return esphomeadapter.DeviceInfo(esphome.Info{Name: r.Name(), FriendlyName: r.ESPHomeFriendlyName(), MACAddress: r.MAC(),
 		Manufacturer: r.manufacturer, Model: r.model, Version: version})
 }
 

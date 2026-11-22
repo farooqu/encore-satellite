@@ -162,8 +162,12 @@ these devices, acoustic timings or model-backed enrollment/training.
    manual fallback, not a replacement for local wake detection.
 3. On a fresh install, tap **Pair with Home Assistant** on the Android setup screen.
    On a trusted LAN, open Home Assistant **Settings → Devices & services** and
-   add the discovered satellite (or add ESPHome by tablet IP, TCP 6053) within two
-   minutes. Use a Home Assistant version that supports zero-PSK provisioning.
+   add the discovered satellite as **Encore Android · 0AB2** (or add ESPHome by
+   tablet IP, TCP 6053) within two minutes. The friendly name ends in the last
+   four uppercase hex digits of the app's saved, generated MAC. The ESPHome
+   node name is `encore-android-` plus the last six hex digits of that MAC, for
+   example `encore-android-350ab2`. Use a Home Assistant version that supports
+   zero-PSK provisioning.
    HA generates the permanent encryption key; no key entry is required. If the
    window expires, tap **Pair with Home Assistant** again. If HA adds the device
    but controls do not appear, reload its ESPHome integration. Existing installs

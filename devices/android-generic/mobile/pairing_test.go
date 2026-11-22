@@ -19,6 +19,9 @@ import (
 
 func TestHomeAssistantKeyEnablesEncryptedControlsAfterReopen(t *testing.T) {
 	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "encore.json"), []byte(`{"mac":"02:13:24:35:0a:b2"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
 	r, err := Open(dir, silentOutput{})
 	if err != nil {
 		t.Fatal(err)
@@ -39,10 +42,10 @@ func TestHomeAssistantKeyEnablesEncryptedControlsAfterReopen(t *testing.T) {
 		t.Helper()
 		info := &api.DeviceInfoResponse{}
 		peer(&api.DeviceInfoRequest{}, info)
-		if info.ApiEncryptionProvisionable != provisionable || info.MacAddress != r.MAC() || info.Name != r.Name() {
+		if info.ApiEncryptionProvisionable != provisionable || info.MacAddress != "02:13:24:35:0a:b2" || info.Name != "encore-android-350ab2" {
 			t.Fatal("ESPHome did not preserve per-unit identity or report the correct provisioning state", info)
 		}
-		if info.FriendlyName != "Generic Android" || info.ProjectName != "Encore Satellite.ACME Inc․ Tab 10․1 Pro" ||
+		if info.FriendlyName != "Encore Android · 0AB2" || info.ProjectName != "Encore Satellite.ACME Inc․ Tab 10․1 Pro" ||
 			info.Manufacturer != "ACME Inc." || info.Model != "Tab 10.1 Pro" ||
 			info.ProjectVersion != version || info.EsphomeVersion != esphome.DefaultESPHomeVersion {
 			t.Fatalf("incorrect Android metadata (want installed version %q): %v", version, info)

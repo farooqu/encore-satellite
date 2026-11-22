@@ -34,12 +34,13 @@ func packagedExecutable(path string) bool {
 	return err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0111 != 0
 }
 
-func (d *biscuitControls) controlInfo(name, mac string) esphome.Info {
+func (d *biscuitControls) controlInfo(name string, mac net.HardwareAddr) esphome.Info {
 	var version string
 	if d.updates != nil {
 		version = d.updates.client.Installed.CoreVersion
 	}
-	return esphomeadapter.DeviceInfo(esphome.Info{Name: name, FriendlyName: "Biscuit", MACAddress: mac,
+	friendlyName := fmt.Sprintf("Encore Echo Dot · %02X%02X", mac[4], mac[5])
+	return esphomeadapter.DeviceInfo(esphome.Info{Name: name, FriendlyName: friendlyName, MACAddress: mac.String(),
 		Manufacturer: "Amazon", Model: "Echo Dot (2nd gen)", Version: version})
 }
 
@@ -178,7 +179,7 @@ func Run(parent context.Context, c Config, probeReference bool) error {
 		controls.music = newMusic(c, saved, player)
 	}
 	apiAction := make(chan struct{})
-	apiInfo := controls.controlInfo(c.Name, mac.String())
+	apiInfo := controls.controlInfo(c.Name, mac)
 	apiAd := mdns.Config{Name: apiInfo.Name, FriendlyName: apiInfo.FriendlyName, Port: esphome.DefaultPort, MACAddress: apiInfo.MACAddress, Version: apiInfo.ESPHomeVersion, Platform: "encore", Board: "biscuit", IPs: ips}
 	voiceListener, err := net.Listen("tcp4", ":6055")
 	if err != nil {

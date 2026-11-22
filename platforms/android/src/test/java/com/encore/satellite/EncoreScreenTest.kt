@@ -103,7 +103,7 @@ class EncoreScreenTest {
         allow.assertIsDisplayed()
         pair.assertDoesNotExist()
         compose.runOnIdle {
-            state.value = state.value.copy(name = "encore-abc", esphome = "unpaired")
+            state.value = state.value.copy(name = "encore-android-350ab2", espHomeFriendlyName = "Encore Android · 0AB2", esphome = "unpaired")
             microphonePermission.value = true
         }
         allow.assertDoesNotExist()
@@ -116,7 +116,7 @@ class EncoreScreenTest {
         capture("android-ha-setup-ready")
         pair.performClick()
         pair.assertDoesNotExist()
-        compose.onNodeWithText("add encore-abc under Discovered", substring = true).assertIsDisplayed()
+        compose.onNodeWithText("add Encore Android · 0AB2 under Discovered", substring = true).assertIsDisplayed()
         capture("android-ha-setup-waiting")
         compose.runOnIdle { state.value = state.value.copy(esphome = "expired") }
         compose.onNodeWithText("pairing window expired", substring = true).assertIsDisplayed()

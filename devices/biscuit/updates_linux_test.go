@@ -298,7 +298,7 @@ func TestLinuxUpdateAndRingControlsEncryptedAPI(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
 	go func() {
-		done <- d.Serve(ctx, l, d.controlInfo(c.Name, "02:13:24:35:46:57"), key)
+		done <- d.Serve(ctx, l, d.controlInfo(c.Name, net.HardwareAddr{0x02, 0x13, 0x24, 0x35, 0x0a, 0xb2}), key)
 	}()
 	t.Cleanup(func() { cancel(); l.Close(); <-done })
 	peer := newManagementPeer(t, l.Addr().String(), key)
@@ -306,10 +306,10 @@ func TestLinuxUpdateAndRingControlsEncryptedAPI(t *testing.T) {
 	peer.receive()
 	peer.send(&api.DeviceInfoRequest{})
 	device, ok := peer.receive().(*api.DeviceInfoResponse)
-	if !ok || device.Name != "update-test" || device.MacAddress != "02:13:24:35:46:57" {
+	if !ok || device.Name != "update-test" || device.MacAddress != "02:13:24:35:0a:b2" {
 		t.Fatal("product metadata replaced per-unit identity", device)
 	}
-	if device.FriendlyName != "Biscuit" || device.Manufacturer != "Amazon" || device.Model != "Echo Dot (2nd gen)" ||
+	if device.FriendlyName != "Encore Echo Dot · 0AB2" || device.Manufacturer != "Amazon" || device.Model != "Echo Dot (2nd gen)" ||
 		device.ProjectName != "Encore Satellite.Amazon Echo Dot (2nd gen)" || device.ProjectVersion != "1.3.0-dev.4" ||
 		device.EsphomeVersion != esphome.DefaultESPHomeVersion {
 		t.Fatal("incorrect product metadata", device)

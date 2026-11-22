@@ -62,7 +62,12 @@ class EncoreService : Service() {
                 it.configureDashboard()
             }
         }
-            .onSuccess { runtime = it; bluetooth.attach(it); mutable.value = mutable.value.copy(name = it.name()); updates = ApkUpdates(this, it, scope) }
+            .onSuccess {
+                runtime = it
+                bluetooth.attach(it)
+                mutable.value = mutable.value.copy(name = it.name(), espHomeFriendlyName = it.espHomeFriendlyName())
+                updates = ApkUpdates(this, it, scope)
+            }
             .onFailure { problem("Engine could not start: ${it.message}") }
         scope.launch {
             while (isActive) {
@@ -284,7 +289,7 @@ class EncoreService : Service() {
         espHomeAdvertisement = runCatching {
             advertise(engine.name(), "_esphomelib._tcp.", 6053,
                 mapOf("mac" to engine.mac().replace(":", ""), "version" to Mobile.ESPHomeVersion,
-                    "friendly_name" to Mobile.ESPHomeFriendlyName) + security)
+                    "friendly_name" to engine.espHomeFriendlyName()) + security)
         }.onFailure { problem("ESPHome discovery unavailable; use the tablet IP") }.getOrNull()
     }
 
