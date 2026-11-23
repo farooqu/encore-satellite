@@ -184,7 +184,7 @@ jobs:
         with:
           name: ${{ env.PAGES_ARTIFACT }}
           path: ${{ runner.temp }}/pages
-      - name: Wait for the uploaded Pages artifact to appear in the run
+      - name: Wait for Pages artifact visibility and propagation
         if: env.ACTIVATE == 'true'
         env:
           ARTIFACT_ID: ${{ steps.pages.outputs.artifact_id }}
@@ -193,6 +193,9 @@ jobs:
           for attempt in {1..10}; do
             if gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?name=$PAGES_ARTIFACT" \
               --jq '.artifacts[] | select(.expired == false) | .id' | grep -Fx "$ARTIFACT_ID" >/dev/null; then
+              # deploy-pages uses a separate listing that can lag behind REST.
+              # https://github.com/actions/deploy-pages/issues/451
+              sleep 15
               exit 0
             fi
             if test "$attempt" -lt 10; then sleep 3; fi
