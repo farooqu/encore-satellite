@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"time"
 
@@ -60,6 +61,7 @@ type linuxUpdates struct {
 	busy, activated bool
 	checkAfterJob   bool
 	client          linuxupdate.Client
+	displayVersion  string // immutable for the lifetime of the running package
 	store           linuxupdate.Store
 	arm64           arm64UpdateStore
 	offer           *linuxupdate.Release
@@ -124,6 +126,11 @@ func newARM64Updates(selectionPath, manifestPath string) (*linuxUpdates, error) 
 		return nil, err
 	}
 	m := boot.Manifest
+	version := m.CoreVersion
+	// This file ships in the same verified rootfs as the running executable.
+	if label, err := os.ReadFile("/etc/encore-display-version"); err == nil {
+		version = strings.TrimSpace(string(label))
+	}
 	var store arm64UpdateStore = &linuxupdate.ARM64Store{Directory: "/store/encore", Booted: "/run/encore/slot"}
 	if m.Target == nativeab.Target {
 		if m.Format != nativeab.Format || m.BaseSHA256 != nativeab.LayoutID {
@@ -133,7 +140,8 @@ func newARM64Updates(selectionPath, manifestPath string) (*linuxUpdates, error) 
 	}
 	u := &linuxUpdates{
 		channel: "stable", jobs: make(chan updateRequest, 1),
-		state: api.UpdateStateResponse{Key: linuxUpdateKey, Title: controls.UpdateTitle, CurrentVersion: m.CoreVersion, LatestVersion: m.CoreVersion},
+		displayVersion: version,
+		state:          api.UpdateStateResponse{Key: linuxUpdateKey, Title: controls.UpdateTitle, CurrentVersion: version, LatestVersion: version},
 		client: linuxupdate.Client{Installed: m, Key: linuxupdate.BiscuitARM64Root(), Directory: "/data/encore/updates",
 			BaseURL: "https://umer.thefarooqs.net/encore-satellite"},
 		arm64:  store,
@@ -336,6 +344,9 @@ func (u *linuxUpdates) executeARM64(ctx context.Context, job updateRequest, chan
 		u.state.ReleaseUrl = ""
 		if offer != nil {
 			u.state.LatestVersion = offer.CoreVersion
+			if offer.DisplayVersion != "" {
+				u.state.LatestVersion = offer.DisplayVersion
+			}
 			u.state.ReleaseUrl = controls.ChangelogURL(offer.URL)
 			if offer.ReleaseSummary != "" {
 				summary += "\n\n" + offer.ReleaseSummary

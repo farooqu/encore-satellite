@@ -80,10 +80,15 @@ jobs:
               echo '::notice::Assistant was not selected in the Dev release plan.'
               exit 0
             fi
-            identity=$(python3 release/biscuit_dev.py "$SOURCE")
-            read -r VERSION revision <<< "$identity"
-            jq -e --arg version "$VERSION" --argjson revision "$revision" \
-              '.version == $version and .revision == $revision' "$plan" >/dev/null
+            if test -f release/product_versions.py; then
+              identity=$(python3 release/product_versions.py "$SOURCE" android-assistant)
+            else
+              identity=$(python3 release/biscuit_dev.py "$SOURCE")
+            fi
+            read -r core revision VERSION <<< "$identity"
+            VERSION=${VERSION:-$core}
+            jq -e --arg core "$core" --arg version "$VERSION" --argjson revision "$revision" \
+              '(.identities["android-assistant"] // {core_version: .version, version, revision}) == {core_version: $core, version: $version, revision: $revision}' "$plan" >/dev/null
             jq -e '.automatic_dev_targets | index("android-assistant") != null' release/dev-automation.json >/dev/null
             publish=true
           elif [[ "$MANUAL_PUBLISH" == true ]]; then
@@ -92,15 +97,20 @@ jobs:
               echo '::error::Manual release publication is disabled by release/dev-automation.json.'
               exit 1
             }
-            identity=$(python3 release/biscuit_dev.py "$SOURCE")
-            read -r _ revision <<< "$identity"
+            if test -f release/product_versions.py; then
+              identity=$(python3 release/product_versions.py "$SOURCE" android-assistant)
+            else
+              identity=$(python3 release/biscuit_dev.py "$SOURCE")
+            fi
+            read -r core revision display <<< "$identity"
+            if [[ -n "$display" && "$display" != "$core" ]]; then VERSION=$display; fi
             publish=true
           fi
           if [[ "$publish" == true ]]; then
             git rev-list --first-parent origin/main | grep -Fx "$SOURCE" >/dev/null
             gh api "repos/$GITHUB_REPOSITORY/commits/$SOURCE" --jq '.commit.verification.verified' | grep -Fx true
           fi
-          [[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          [[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-dev\.[1-9][0-9]*)?$ ]]
           [[ "$revision" =~ ^[1-9][0-9]*$ && "$revision" -le 2100000000 ]]
           printf 'publish=%s\nversion=%s\nrevision=%s\n' "$publish" "$VERSION" "$revision" >> "$GITHUB_OUTPUT"
           printf 'ENCORE_VERSION_NAME=%s\nENCORE_VERSION_CODE=%s\n' "$VERSION" "$revision" >> "$GITHUB_ENV"
@@ -274,11 +284,20 @@ jobs:
             GH_TOKEN="$IMMUTABILITY_READ_TOKEN" gh api "repos/$GITHUB_REPOSITORY/immutable-releases" --jq .enabled | grep -Fx true
           fi
           tag="android-assistant-r$REVISION"
-          refs=$(gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/android-assistant-r")
+          title="Encore Satellite Assistant Dev $VERSION (r$REVISION)"
+          if [[ "$VERSION" == *-dev.* ]]; then
+            tag="android-assistant-v$VERSION"
+            title="Encore Satellite Assistant $VERSION"
+          fi
+          refs=$(gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/android-assistant-")
           releases=$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100")
           # A newer revision may have finished first. Never publish a downgrade.
           jq -e --argjson revision "$REVISION" \
             'all(.[].ref | select(test("^refs/tags/android-assistant-r[0-9]+$")); (split("-r")[-1] | tonumber) <= $revision)' <<< "$refs"
+          jq -e --arg version "$VERSION" '
+            def key: sub("-dev\\."; ".") | split(".") | map(tonumber);
+            all(.[].ref | select(test("^refs/tags/android-assistant-v[0-9.]+-dev\\.[0-9]+$"));
+                ($version | contains("-dev.")) and ((split("-v")[-1] | key) <= ($version | key)))' <<< "$refs"
           jq -e --arg tag "$tag" 'all(.[][]; .tag_name != $tag)' <<< "$releases"
           if jq -e --arg tag "refs/tags/$tag" 'any(.[]; .ref == $tag)' <<< "$refs" >/dev/null; then
             # Like regular Android Dev, accept only an exact maintainer-created fallback tag.
@@ -294,7 +313,7 @@ jobs:
           printf '\nExperimental Dev sideload APK. [Installation guide](https://github.com/%s/blob/%s/devices/android-assistant/README.md). No update feed is activated.\n' \
             "$GITHUB_REPOSITORY" "$SOURCE" >> "$notes"
           gh release create "$tag" ./* --repo "$GITHUB_REPOSITORY" "${target_args[@]}" \
-            --draft --prerelease --title "Encore Satellite Assistant Dev $VERSION (r$REVISION)" \
+            --draft --prerelease --title "$title" \
             --notes-file "$notes"
           mkdir "$RUNNER_TEMP/assistant-retained"
           gh release download "$tag" --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/assistant-retained"

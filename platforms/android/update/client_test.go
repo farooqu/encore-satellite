@@ -103,6 +103,17 @@ func TestSignedChannelDownloadAndRejections(t *testing.T) {
 	if _, err := client().Check(context.Background(), "stable"); err != nil {
 		t.Fatal(err)
 	}
+	stable.CoreVersion, stable.DisplayVersion, stable.Version = "1.0.1000000020", "0.10.0", "0.10.0-dev.12"
+	metadata = sign(stable)
+	bridge := client()
+	bridge.InstalledCore = "0.9.1"
+	if found, err := bridge.Check(context.Background(), "stable"); err != nil || found == nil || found.DisplayVersion != "0.10.0" || found.Version != "0.10.0-dev.12" {
+		t.Fatalf("expected Stable display label and exact APK version: %#v %v", found, err)
+	}
+	bridge.Installed = stable.Revision
+	if found, err := bridge.Check(context.Background(), "stable"); err != nil || found != nil {
+		t.Fatalf("identical build offered after channel switch: %#v %v", found, err)
+	}
 	metadata = sign(r)
 	installed := client()
 	installed.Installed = 9

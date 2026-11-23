@@ -10,33 +10,104 @@ advance Dev; PR/check artifacts cannot. Signing stays restricted to protected
 `main` with verified commits. Stable always selects an exact qualified version
 manually.
 
-New Dev builds for Biscuit, Android Tablet and Android Assistant use the same frozen first-parent anchor
-(`release/biscuit_dev.py`). A source commit deterministically fixes the core
-version and increasing OTA revision (also Android's `versionCode`). Android
-main-derived receipts use `identity: main`, without a reservation. The old
-ledger is retained to verify historical receipts; do not allocate new entries.
-After the versioning cutover, `feat` advances the minor, a breaking change
-advances the major, and every other main commit advances the patch. Automatic
-Dev releases are not restricted to any version series. After successful
-**CI · Repository checks**, one Dev
+The frozen first-parent anchor in `release/biscuit_dev.py` still fixes the
+increasing build revision (also Android's `versionCode`). Historical sources
+retain their original shared version. New product trains use a separate
+public version, resolved from the exact source by `release/product_versions.py`.
+Android main-derived receipts use `identity: main`, without a reservation.
+Keep the old ledger for historical verification; do not allocate new entries.
+After successful **CI · Repository checks**, one Dev
 plan compares the push tip against each device's own last immutable published
 release on first-parent `main`. Shared package inputs select the targets that use them;
 device-only inputs select that device. Failed checks, an unpublished build, a
 draft, or a bare tag do not consume pending changes, so the next eligible
-green push can release them. A skipped target leaves its published
-release and feed untouched and can jump SemVer and OTA revision numbers on its
-next build. The APK and native seed/OTA identify the shared version they contain.
+green push can release them. A skipped target leaves its published release and
+feed untouched. Its next build can skip Dev suffixes and OTA revisions.
 
 The **CI · Repository checks** summary shows the combined changelog, including an explicit
 **No build** for each skipped target. The shared `dev-release-plan` artifact
 also carries separate release notes per selected target. Each GitHub release
 and, for Tablet and Biscuit, each automatic Dev OTA entry uses only its own
-target's notes. For a commit with changes specific to different products, notes
-link to the commit and list only the files relevant to that target. The Assistant
-remains a sideload APK with no OTA feed and uses its latest immutable
-`android-assistant-r…` release as its own baseline.
+target's highlights: breaking changes, features, fixes (including reverts),
+and performance. Maintenance commits stay in the full source comparison, which
+can include other targets' changes. The Assistant remains a sideload APK with no
+OTA feed. Both old and new immutable Dev releases remain valid baselines.
 Reviewed manual candidate builds remain available and do not automatically
 publish or promote Stable.
+
+## Independent product trains
+
+| Product | Existing Dev tag | First tag after cutover | First possible Stable tag |
+| --- | --- | --- | --- |
+| Android Tablet (`android-generic`) | `android-0.x.y` | `android-tablet-v0.10.0-dev.1` | `android-tablet-v0.10.0` |
+| Biscuit (`biscuit`) | `biscuit-0.x.y` | `biscuit-v0.10.0-dev.1` | `biscuit-v0.10.0` |
+| Android Assistant (`android-assistant`) | `android-assistant-r…` | `android-assistant-v0.10.0-dev.1` | `android-assistant-v0.10.0` |
+
+Dev advances only `-dev.N`. A train derives its suffix from the package's
+first-parent revision minus `first_revision`, plus one. A rerun of the same
+source gets the same version even if Stable has advanced since. After a product
+ships Stable `0.10.0`, open that product's `0.10.1-dev.N` train; Dev does not
+promise that `0.10.1` will ship. Other products keep their trains.
+
+**Cutover is not active.** `release/dev-trains.json` is empty until the owner
+approves the migration. Before adding an entry, hold and drain affected writers
+and audit public tags, deployed signed feeds, private/attempted revisions, and
+Biscuit base compatibility. Keep every legacy tag, immutable asset, pinned
+input release, feed URL and checkpoint. For each approved product, add
+`{"base":"0.10.0","first_revision":<cutover revision>,"ordering_major":<audited major>}`
+in one reviewed `chore(release): …` commit. Use the revision of that commit
+(its first parent's revision plus one) and an ordering major strictly above
+the legacy installed ordering floors. Pin the source before qualifying the
+`.1` candidate. Verify legacy-to-Dev OTA and two successive new Dev builds on
+compatible devices before opening publication. A source that missed `.1` can
+be retried at the same SHA; do not move the counter origin.
+
+Tablet and Biscuit still require **both** a higher revision and a higher signed
+`core_version`. New builds use `<ordering_major>.0.<revision>` only for
+ordering and artifact identity. The signed `display_version` is what the new
+clients offer in Home Assistant; the installed label comes from the verified
+APK or rootfs. Legacy clients may show the internal ordering value for the
+first offer, before installing a build that understands the display field.
+Do not lower signed versions or bypass the device's OTA compatibility rules.
+
+### Review and promote Stable
+
+Run `python3 release/stable_plan.py PRODUCT CANDIDATE_SHA BASELINE_SHA --initial 0.10.0`
+for the first Stable release. For subsequent releases use the last immutable
+Stable record's source as `BASELINE_SHA` and replace `--initial` with
+`--previous VERSION`. Use the exact candidate, not today's `main` or latest Dev.
+Take the strongest applicable bump once: breaking → major, feature → minor,
+fix/performance/shipped packaging → patch. Test-only, verification-only and
+docs-only changes do not count unless shipped. No qualifying change means no
+new Stable release. For mixed changes use `Version-Bumps: android-generic=minor, biscuit=patch`.
+Omitted products have no contribution. `Release-Targets` still only controls
+notes. Resolve flagged ambiguous historical commits with `--decisions FILE`,
+a reviewed JSON map of SHA to `none`, `patch`, `minor` or `major` for this product.
+
+1. Download the exact immutable Dev release and independently verify the
+   source/tag, signing identity and qualification. Save the reviewed preview
+   JSON. For Tablet and Biscuit, run `release/pipeline.py stable-record`
+   with the retained directory, `--plan`, `--public-key` and `--receipt-sha256`.
+   For Assistant use `assistant-stable-record` with the directory, `--plan`,
+   `--certificate-sha256` and Android build tools. Both print `promotion.json`
+   without publishing anything.
+2. With release approval, publish an immutable non-prerelease at the record's
+   Stable tag and exact source, with `promotion.json`, reviewed notes and links
+   to the existing immutable Dev downloads and matching source kits. Use the
+   same product title prefixes (`Android`, `Biscuit ARM64`, `Encore Satellite
+   Assistant`). Do not rebuild or rename an APK or ZIP. Its installed label
+   remains the embedded Dev label; Stable is a release/offer label.
+3. For Tablet or Biscuit, sign with `pipeline.py feed --channel stable
+   --promotion promotion.json` (Biscuit's protected signer also accepts
+   `channel=stable` and `stable_version`). Stage with **Release · Update OTA feed**:
+   use the retained Dev label as `version` and the Stable label as
+   `stable_version`. Start with validation only; activation still requires the
+   protected environment and explicit approval. Assistant has no feed.
+4. Only when that product's Stable publication (and feed activation, if any)
+   succeeds, record the preview's `next_dev_base` and the housekeeping commit's
+   new `first_revision` in `dev-trains.json`. Keep `ordering_major` unchanged.
+   No other product should be edited. An equal or older revision on a newly
+   selected channel does not reinstall or relabel the device.
 
 ## Conventional Commits
 
@@ -50,6 +121,27 @@ versions do not change.
 **CI · Repository checks** lints all commits introduced by a PR and all new `main`
 history since the enforcement cutoff. Use a Conventional Commit subject for
 the final merge or squash commit too.
+
+For user-facing changes, make the scope name the feature or area and the subject
+say what users can now do or what stopped going wrong. Use the body for why and
+how. If a mixed-product commit has the same release note for several products,
+write it once and list the intended audiences in a Git trailer:
+
+```text
+feat(sendspin): add Sendspin playback
+
+Release-Targets: android-generic, biscuit
+```
+
+Tablet and Biscuit both show **Add Sendspin playback** under **Features**.
+Use comma-separated target IDs: `android-generic`, `android-assistant`, or
+`biscuit`. The trailer filters the changelog only: it cannot add a note for an
+unaffected product, and it does not change build selection or versioning.
+Omit it when the changed files make the audience clear. Without it, ambiguous
+mixed-product highlights use a short commit link instead of the subject.
+Use `Release-Note-<target>: <user-facing summary>` when a product needs different
+wording. If both trailers are present, that wording applies only to products
+included in `Release-Targets`.
 
 Enable the local pre-push hook once per clone with
 `git config --local core.hooksPath .githooks`. If you already use a custom hooks
@@ -113,26 +205,22 @@ the former slot still holds its previous version, and that enrollment survives
 a further reboot. A later ordinary update writes the opposite slot. Do not
 mirror the new version onto both slots; that discards the rollback version.
 After qualification, explicitly select the verified immutable release for the
-initial Stable feed; do not rebuild it. Dev is a feed channel, not a prerelease
-suffix on the version.
+initial Stable feed; do not rebuild it. The Dev feed channel and the `-dev.N`
+package label are separate from the signed ordering version.
 
 ## Biscuit ARM64 public dev starter
 
-The ARM64 starter is a signed fresh-install download, not an OTA feed entry.
-It uses plain SemVer: for example, tag `biscuit-0.1.7`, title
-`Biscuit ARM64 0.1.7`, and asset `encore-biscuit-arm64-0.1.7.zip`.
-`biscuit_dev.py` calculates the patch number from the first-parent distance on
-`main` from the private dev.5 anchor. The same source gets the same
-version on rerun; skipped numbers are fine. Do not force-push main, move the
-anchor, rename older releases, or use the private R22 reservation. The device
-still gets an internal increasing anti-rollback number above legacy revisions.
+The legacy ARM64 starter is a signed fresh-install download, not an OTA feed
+entry. Historical releases retain their original naming, for example tag
+`biscuit-0.1.7`, title `Biscuit ARM64 0.1.7`, and asset
+`encore-biscuit-arm64-0.1.7.zip`. New trains use the native A/B packaging path.
+Do not force-push main, move the revision anchor, rename older releases, or
+use the private R22 reservation.
 Neither a new registry entry nor an Android build is needed.
 
-Dev is the initial publication channel, not a version suffix. The intended
-promotion selects the same immutable version for the release channel without
-rebuilding or retagging. For runtime OTA, such a promotion would sign new
-channel metadata for the same rootfs bytes, not put the starter ZIP on a feed.
-Release promotion is not implemented by the automatic dev workflow.
+The historical starter versions do not have a Dev suffix. A runtime OTA feed
+for these releases selects the retained rootfs, never the starter ZIP.
+Release promotion is not performed by the automatic Dev workflow.
 
 1. `devices/biscuit/packaging/ci-inputs.json` locks only external
    bytes. CI fetches the pinned upstream Linux source and Go archives from
@@ -274,8 +362,9 @@ verified release plan for inline Home Assistant release notes. For a manual
 feed, pass `--changelog path/to/reviewed-notes.md` with the Markdown from the
 exact retained release. Notes are optional, signed with the rest of the entry,
 and excerpted if they exceed 3 KiB. Renewing an entry can add notes without
-changing which bytes it selects. For stable, change `--channel stable` and the output filename; it
-rejects prerelease cores, including **0.1.1-dev.1**. Stable promotion signs a new
+changing which bytes it selects. For Stable, use `--channel stable` and the Stable
+output filename; for a new-train candidate add `--promotion promotion.json`.
+Stable rejects prerelease cores, including **0.1.1-dev.1**. Stable promotion signs a new
 entry selecting the same already-reviewed bytes/revision, without rebuilding,
 rewriting the receipt, changing APK identity or relabelling bundle provenance.
 Stable can be verified with `activate=false`. Seed Stable only with a

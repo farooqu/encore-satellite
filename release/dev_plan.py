@@ -6,12 +6,14 @@ from pathlib import Path
 import re
 import subprocess
 
-from biscuit_dev import ANCHOR, identity
+from biscuit_dev import ANCHOR, CONVENTIONAL, identity
 from check import ROOT, changed_paths, select
+from product_versions import check_train_change, dev_tag_target, product_identity
 
 ASSISTANT = "android-assistant"
 TARGETS = {"android-generic": "Android", "biscuit": "Biscuit", ASSISTANT: "Android Assistant"}
 REPOSITORY = "farooqu/encore-satellite"
+CHANGELOG_GROUPS = ("Breaking changes", "Features", "Fixes", "Performance", "Other changes")
 
 
 def git(*args):
@@ -24,7 +26,7 @@ def affected(paths, registry):
     result = set()
     common = []
     for path in paths:
-        if path == "release/dev-automation.json":
+        if path in {"release/dev-automation.json", "release/dev-trains.json"}:
             continue  # Policy can arm a target; it does not change its package.
         if path == ".github/workflows/android-assistant.yml" or path.startswith("devices/android-assistant/"):
             if not path.endswith(".md"):
@@ -61,13 +63,8 @@ def published_baselines(history, releases):
         if not release["immutable"] or release["draft"]:
             continue
         tag = release["tag_name"]
-        if re.fullmatch(r"android-[0-9]+\.[0-9]+\.[0-9]+", tag):
-            target = "android-generic"
-        elif re.fullmatch(r"biscuit-[0-9]+\.[0-9]+\.[0-9]+", tag):
-            target = "biscuit"
-        elif re.fullmatch(r"android-assistant-r[1-9][0-9]*", tag):
-            target = ASSISTANT
-        else:
+        target = dev_tag_target(tag)
+        if not target or not release.get("prerelease", True):
             continue
         names = {asset["name"] for asset in release["assets"]}
         expected = {"encore-satellite-assistant.apk", "SHA256SUMS"} if target == ASSISTANT else {"receipt.json", "receipt.jws"}
@@ -82,66 +79,101 @@ def published_baselines(history, releases):
 
 
 def target_changes(target, history, base, registry):
-    changes = []
+    changes = {group: [] for group in CHANGELOG_GROUPS}
     commits = history[:history.index(base)]
     for commit, parent in reversed(list(zip(commits, history[1:]))):
         paths = changed_paths(parent, commit)
         if target not in affected(paths, registry):
             continue
-        impacts = [(path, affected([path], registry) & TARGETS.keys()) for path in paths]
-        if any(target not in products for _, products in impacts if products):
-            # A mixed commit's subject can describe a different product.
-            files = ", ".join(f"`{path.replace('`', '')}`" for path, products in impacts if target in products)
-            subject = f"Update {files}"
-        else:
-            subject = git("show", "-s", "--format=%s", commit)
-        changes.append(f"- {subject} ([{commit[:10]}](https://github.com/{REPOSITORY}/commit/{commit}))")
+        subject, body, audience, override = git(
+            "show", "-s", "--format=%s%x00%b%x00%(trailers:key=Release-Targets,valueonly,unfold)"
+            f"%x00%(trailers:key=Release-Note-{target},valueonly,unfold)", commit,
+        ).split("\0", 3)
+        if audience and target not in {name.strip() for name in re.split(r"[,\n]", audience)}:
+            continue
+        match = CONVENTIONAL.fullmatch(subject)
+        group = None
+        if match:
+            kind, breaking, summary = match.groups()
+            group = {"feat": "Features", "fix": "Fixes", "perf": "Performance", "revert": "Fixes"}.get(kind)
+            if breaking or re.search(r"^BREAKING[ -]CHANGE: \S", body, re.M):
+                group = "Breaking changes"
+        summaries = [line.strip() for line in override.splitlines() if line.strip()]
+        if not summaries:
+            if not group:
+                continue
+            # A mixed commit's subject can describe a different product. Link
+            # to the change without claiming that the whole subject applies.
+            impacts = (affected([path], registry) & TARGETS.keys() for path in paths)
+            if not audience and any(products and target not in products for products in impacts):
+                group = "Other changes"
+                summary = "Changes spanning multiple products"
+            summaries = [summary]
+        for summary in summaries:
+            summary = summary[0].upper() + summary[1:]
+            changes[group or "Other changes"].append(
+                f"- {summary} ([{commit[:10]}](https://github.com/{REPOSITORY}/commit/{commit}))")
     return changes
 
 
 def assistant_changelog(source, releases, registry):
     history = git("rev-list", "--first-parent", source).splitlines()
     baseline = published_baselines(history, releases).get(ASSISTANT)
-    return "\n".join(target_section(ASSISTANT, history, baseline, registry) + [""])
+    return "\n".join(["## What's changed", "", *target_section(ASSISTANT, history, baseline, registry), ""])
 
 
 def target_section(target, history, baseline, registry):
+    notes = []
     if target == ASSISTANT and baseline is None:
         # Do not include shared commits from before this package existed.
         added = git("log", "--first-parent", "--reverse", "--diff-filter=A", "--format=%H",
                     history[0], "--", "devices/android-assistant/build-android").splitlines()
         previous = history[history.index(added[0]) + 1:] if added else []
-        changes = target_changes(target, history, previous[0], registry) if previous else []
-        changes.insert(0, "- Initial Assistant release.")
-    else:
-        changes = target_changes(target, history, baseline or ANCHOR, registry)
-    return [f"## {TARGETS[target]}", "", *(changes or ["- No package changes."])]
+        baseline = previous[0] if previous else None
+        notes += ["Initial Assistant release.", ""]
+    elif baseline is None:
+        baseline = ANCHOR
+    if baseline:
+        changes = target_changes(target, history, baseline, registry)
+        for group, entries in changes.items():
+            if entries:
+                notes += [f"### {group}", "", *entries, ""]
+        if not notes:
+            notes += ["No release highlights listed.", ""]
+        notes.append(f"[Full source comparison](https://github.com/{REPOSITORY}/compare/{baseline}...{history[0]})")
+    return notes
 
 
 def plan(source, releases, registry, armed):
     version, revision = identity(source)
     history = git("rev-list", "--first-parent", source).splitlines()
+    check_train_change(source, history[1])
     baselines = published_baselines(history, releases)
 
     selected = []
+    identities = {}
     target_changelogs = {}
-    notes = [f"# Encore {version}", "", f"[Source commit](https://github.com/{REPOSITORY}/commit/{source})", ""]
+    notes = ["# Encore Dev release plan", "", f"[Source commit](https://github.com/{REPOSITORY}/commit/{source})", ""]
     for target, name in TARGETS.items():
         section = [f"## {name}", ""]
         baseline = baselines.get(target)
+        current = product_identity(source, target)
+        new_train = (baseline and current["version"] != current["core_version"] and
+                     current["version"].split("-dev.")[0] != product_identity(baseline, target)["version"].split("-dev.")[0])
         if target not in armed:
             reason = "automatic Dev is disabled"
-        elif baseline and target not in affected(changed_paths(baseline, source), registry):
+        elif baseline and not new_train and target not in affected(changed_paths(baseline, source), registry):
             reason = "no package changes since the last published release"
         else:
             selected.append(target)
-            section = target_section(target, history, baseline, registry)
-            target_changelogs[target] = "\n".join([*section, ""])
-            notes += [*section, ""]
+            identities[target] = current
+            highlights = target_section(target, history, baseline, registry)
+            target_changelogs[target] = "\n".join(["## What's changed", "", *highlights, ""])
+            notes += [*section, f"**{current['version']}**", "", *highlights, ""]
             continue
         notes += [*section, f"- No build — {reason}.", ""]
     return {"source": source, "version": version, "revision": revision,
-            "targets": selected, "changelog": "\n".join(notes), "target_changelogs": target_changelogs}
+            "targets": selected, "identities": identities, "changelog": "\n".join(notes), "target_changelogs": target_changelogs}
 
 
 def main():

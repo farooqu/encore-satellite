@@ -38,7 +38,7 @@ def native_payloads(output, image, dtb, header, busybox, fpga, runtime, verifier
                 out.writestr(zipfile.ZipInfo(file), data)
 
 
-def starter_rootfs(base, binaries, version=None, ca=None, *, locked=False, sendspin=None):
+def starter_rootfs(base, binaries, version=None, ca=None, *, locked=False, sendspin=None, display=None):
     files = {
         **{"usr/local/bin/" + name: (data, 0o755) for name, data in binaries.items()},
         "etc/encore-base": ((FORMAT + "\n").encode(), 0o644),
@@ -57,6 +57,8 @@ def starter_rootfs(base, binaries, version=None, ca=None, *, locked=False, sends
     if version is not None:
         files["etc/encore-arm64-version"] = ((version + "\n").encode(), 0o644)
         files["etc/ssl/certs/ca-certificates.crt"] = (ca, 0o644)
+    if display:
+        files["etc/encore-display-version"] = ((display + "\n").encode(), 0o644)
     if locked:
         files["sbin/init"] = ((HERE / "arm64-probe-init").read_bytes(), 0o755)
         files["usr/local/sbin/encore-bluetooth"] = (arm64_bluetooth(), 0o755)
@@ -123,6 +125,7 @@ def main():
     parser.add_argument("--sealed-base", type=Path, required=True)
     parser.add_argument("--revision", type=int, required=True)
     parser.add_argument("--core-version", required=True, help="complete core SemVer, including prerelease when applicable")
+    parser.add_argument("--display-version", help="public product label embedded in the verified runtime")
     parser.add_argument("--ca-bundle", type=Path, required=True, help="pinned Alpine Mozilla CA bundle")
     parser.add_argument("--output", type=Path, required=True, help="new private build directory")
     parser.add_argument("--sendspin-directory", type=Path, help="use an existing locked ARM64 companion build instead of building it")
@@ -165,7 +168,8 @@ def main():
     subprocess.run(["go", "build", "-trimpath", "-buildvcs=false", "-o", str(verifier),
                     "./devices/biscuit/cmd/arm64-verify"], cwd=ROOT, env=env, check=True)
     binaries["arm64-verify"] = verifier.read_bytes()
-    rootfs = starter_rootfs(base, binaries, version, ca, locked=bool(args.input_lock_sha256), sendspin=sendspin)
+    rootfs = starter_rootfs(base, binaries, version, ca, locked=bool(args.input_lock_sha256), sendspin=sendspin,
+                            display=args.display_version)
     compatibility = boot_compatibility(image, dtb) if args.input_lock_sha256 else BASE_SHA
     signed = (args.core_version, args.revision, binaries["arm64-verify"])
     if args.input_lock_sha256:

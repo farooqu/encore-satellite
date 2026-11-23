@@ -87,22 +87,27 @@ jobs:
           path: ${{ runner.temp }}/dev-release-plan
           run-id: ${{ github.event.workflow_run.id }}
           github-token: ${{ github.token }}
-      - name: Select the shared release identity and external-input lock
+      - name: Select the Biscuit release identity and external-input lock
         if: github.event_name == 'workflow_dispatch' || steps.source.outputs.planning == 'true'
         id: inputs
         run: |
           set -euo pipefail
-          release=$(python3 release/biscuit_dev.py "$SOURCE")
+          if test -f release/product_versions.py; then
+            release=$(python3 release/product_versions.py "$SOURCE" biscuit)
+          else
+            release=$(python3 release/biscuit_dev.py "$SOURCE")
+          fi
           if [[ -z "$release" ]]; then
             echo '::notice::This source does not advance an eligible Encore release version.'
             exit 0
           fi
-          read -r version revision <<< "$release"
+          read -r core revision version <<< "$release"
+          version=${version:-$core}
           if test "$GITHUB_EVENT_NAME" = workflow_run; then
             plan="$RUNNER_TEMP/dev-release-plan/plan.json"
-            jq -e --arg source "$SOURCE" --arg version "$version" --argjson revision "$revision" \
-              '.source == $source and .version == $version and .revision == $revision' "$plan" >/dev/null
             if ! jq -e '.targets | index("biscuit") != null' "$plan" >/dev/null; then exit 0; fi
+            jq -e --arg source "$SOURCE" --arg core "$core" --arg version "$version" --argjson revision "$revision" \
+              '.source == $source and ((.identities.biscuit // {core_version: .version, version, revision}) == {core_version: $core, version: $version, revision: $revision})' "$plan" >/dev/null
           fi
           packaging=devices/biscuit/packaging
           # Manual builds and queued runs can still select a pre-move commit.
@@ -115,7 +120,7 @@ jobs:
             echo '::notice::No approved external bundle is available; skipping assembly.'
             exit 0
           fi
-          printf 'tag=%s\nversion=%s\nrevision=%s\npackaging=%s\n' "$tag" "$version" "$revision" "$packaging" >> "$GITHUB_OUTPUT"
+          printf 'tag=%s\ncore=%s\nversion=%s\nrevision=%s\npackaging=%s\n' "$tag" "$core" "$version" "$revision" "$packaging" >> "$GITHUB_OUTPUT"
       - name: Install release build tools
         if: steps.inputs.outputs.tag != ''
         run: |
@@ -144,11 +149,14 @@ jobs:
         if: steps.inputs.outputs.tag != ''
         env:
           VERSION: ${{ steps.inputs.outputs.version }}
+          CORE_VERSION: ${{ steps.inputs.outputs.core }}
           REVISION: ${{ steps.inputs.outputs.revision }}
           PACKAGING: ${{ steps.inputs.outputs.packaging }}
         run: |
           set -euo pipefail
-          python3 "$PACKAGING/locked_build.py" \
+          identity_args=()
+          if [[ "$VERSION" != "$CORE_VERSION" ]]; then identity_args=(--core-version "$CORE_VERSION"); fi
+          python3 "$PACKAGING/locked_build.py" "${identity_args[@]}" \
             --inputs "$RUNNER_TEMP/inputs" --output build/biscuit-arm64-dev \
             --version "$VERSION" --revision "$REVISION"
           git diff --exit-code

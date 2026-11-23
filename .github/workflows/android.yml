@@ -44,6 +44,7 @@ jobs:
     outputs:
       core: ${{ steps.dev.outputs.core }}
       revision: ${{ steps.dev.outputs.revision }}
+      version: ${{ steps.dev.outputs.version }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -77,18 +78,23 @@ jobs:
           set -euo pipefail
           gh api "repos/$GITHUB_REPOSITORY/commits/$SOURCE" --jq '.commit.verification.verified' | grep -Fx true
           test "$(git rev-parse HEAD)" = "$SOURCE"
-          identity=$(python3 release/biscuit_dev.py "$SOURCE")
+          if test -f release/product_versions.py; then
+            identity=$(python3 release/product_versions.py "$SOURCE" android-generic)
+          else
+            identity=$(python3 release/biscuit_dev.py "$SOURCE")
+          fi
           test -n "$identity" || exit 0
-          read -r core revision extra <<< "$identity"
+          read -r core revision version extra <<< "$identity"
+          version=${version:-$core}
           [[ "$core" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "$revision" =~ ^[1-9][0-9]*$ &&
             "$revision" -gt 8 && "$revision" -le 2100000000 && -z "$extra" ]]
           if test "$GITHUB_EVENT_NAME" = workflow_run; then
             plan="$RUNNER_TEMP/dev-release-plan/plan.json"
-            jq -e --arg source "$SOURCE" --arg version "$core" --argjson revision "$revision" \
-              '.source == $source and .version == $version and .revision == $revision' "$plan" >/dev/null
             if ! jq -e '.targets | index("android-generic") != null' "$plan" >/dev/null; then exit 0; fi
+            jq -e --arg source "$SOURCE" --arg core "$core" --arg version "$version" --argjson revision "$revision" \
+              '.source == $source and ((.identities["android-generic"] // {core_version: .version, version, revision}) == {core_version: $core, version: $version, revision: $revision})' "$plan" >/dev/null
           fi
-          printf 'core=%s\nrevision=%s\n' "$core" "$revision" >> "$GITHUB_OUTPUT"
+          printf 'core=%s\nrevision=%s\nversion=%s\n' "$core" "$revision" "$version" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         if: github.event_name != 'workflow_run' || steps.dev.outputs.revision != ''
         with:
@@ -159,7 +165,7 @@ jobs:
       actions: read
       contents: read
     outputs:
-      core_version: ${{ needs.check.outputs.core }}
+      version: ${{ needs.check.outputs.version }}
       receipt_sha256: ${{ steps.receipt.outputs.sha256 }}
       signed_artifact: ${{ steps.receipt.outputs.signed_artifact }}
       signed_feed_artifact: ${{ steps.receipt.outputs.signed_feed_artifact }}
@@ -167,7 +173,7 @@ jobs:
       SOURCE: ${{ github.event.workflow_run.head_sha || github.sha }}
       ENCORE_CORE_VERSION: ${{ needs.check.outputs.core }}
       ENCORE_VERSION_CODE: ${{ needs.check.outputs.revision }}
-      ENCORE_VERSION_NAME: ${{ needs.check.outputs.core }}
+      ENCORE_VERSION_NAME: ${{ needs.check.outputs.version }}
       ENCORE_UPDATE_BASE_URL: ${{ vars.ANDROID_UPDATE_BASE_URL }}
       ANDROID_METADATA_PUBLIC_KEY_PEM: ${{ vars.ANDROID_METADATA_PUBLIC_KEY_PEM }}
       ANDROID_CERTIFICATE_SHA256: ${{ vars.ANDROID_CERTIFICATE_SHA256 }}
@@ -325,6 +331,6 @@ jobs:
     uses: ./.github/workflows/activate-feed.yml
     with:
       target: android-generic
-      version: ${{ needs.signed-candidate.outputs.core_version }}
+      version: ${{ needs.signed-candidate.outputs.version }}
       signed_feed_artifact: ${{ needs.signed-candidate.outputs.signed_feed_artifact }}
       receipt_sha256: ${{ needs.signed-candidate.outputs.receipt_sha256 }}

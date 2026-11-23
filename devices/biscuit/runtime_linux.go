@@ -38,7 +38,10 @@ func packagedExecutable(path string) bool {
 func (d *biscuitControls) controlInfo(name string, mac net.HardwareAddr) esphome.Info {
 	var version string
 	if d.updates != nil {
-		version = d.updates.client.Installed.CoreVersion
+		version = d.updates.displayVersion
+		if version == "" {
+			version = d.updates.client.Installed.CoreVersion
+		}
 	}
 	friendlyName := fmt.Sprintf("Encore Echo Dot · %02X%02X", mac[4], mac[5])
 	return esphomeadapter.DeviceInfo(esphome.Info{Name: name, FriendlyName: friendlyName, MACAddress: mac.String(),

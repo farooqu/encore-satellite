@@ -24,9 +24,12 @@ on:
         options: [android-generic, biscuit]
         default: android-generic
       version:
-        description: Retained core version (no tag prefix)
+        description: Retained Dev version (no tag prefix)
         type: string
         required: true
+      stable_version:
+        description: Stable release version holding promotion.json (required for new-train Stable)
+        type: string
       channel:
         description: Stable activation requires explicit promotion
         type: choice
@@ -73,6 +76,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       TARGET: ${{ inputs.target }}
       VERSION: ${{ inputs.version }}
+      STABLE_VERSION: ${{ inputs.stable_version }}
       CHANNEL: ${{ inputs.signed_feed_artifact != '' && 'dev' || inputs.channel }}
       ACTIVATE: ${{ inputs.signed_feed_artifact != '' || inputs.activate }}
       PROMOTE_STABLE: ${{ inputs.promote_stable }}
@@ -124,15 +128,30 @@ jobs:
           [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][A-Za-z0-9.+-]+)?$ ]]
           case "$TARGET" in
             android-generic)
+              prefix=android-tablet
               tag="android-$VERSION"
               public_key="$ANDROID_PUBLIC_KEY"
               ;;
             biscuit)
+              prefix=biscuit
               tag="biscuit-$VERSION"
               public_key="$BISCUIT_PUBLIC_KEY"
               ;;
             *) exit 1 ;;
           esac
+          # Legacy receipts can also end in -dev.N; their series precedes 0.10.0.
+          if [[ "$VERSION" =~ ^([0-9]+)\.([0-9]+)\.[0-9]+-dev\.[1-9][0-9]*$ ]] &&
+             (( 10#${BASH_REMATCH[1]} > 0 || 10#${BASH_REMATCH[2]} >= 10 )); then tag="$prefix-v$VERSION"; fi
+          promotion_args=()
+          if [[ -n "$STABLE_VERSION" ]]; then
+            test "$CHANNEL" = stable
+            [[ "$STABLE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+            stable_tag="$prefix-v$STABLE_VERSION"
+            gh api "repos/$GITHUB_REPOSITORY/releases/tags/$stable_tag" --jq '.immutable and (.draft or .prerelease | not)' | grep -Fx true
+            gh release download "$stable_tag" --repo "$GITHUB_REPOSITORY" --pattern promotion.json --dir "$RUNNER_TEMP/promotion"
+            jq -e --arg tag "$stable_tag" --arg dev "$tag" '.tag == $tag and .dev_tag == $dev' "$RUNNER_TEMP/promotion/promotion.json" >/dev/null
+            promotion_args=(--promotion "$RUNNER_TEMP/promotion/promotion.json")
+          fi
           test -n "$public_key"
           printf '%s\n' "$public_key" > "$RUNNER_TEMP/root.pem"
           gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" --jq '.immutable == true and .draft == false' | grep -Fx true
@@ -148,7 +167,7 @@ jobs:
           from pathlib import Path
           r = json.loads((Path(os.environ['CANDIDATE']) / 'receipt.json').read_text())
           assert r['target'] == os.environ['TARGET'], 'release target mismatch'
-          assert r['core_version'] == os.environ['VERSION'], 'release identity mismatch'
+          assert r.get('display_version', r['core_version']) == os.environ['VERSION'], 'release identity mismatch'
           if r['target'] == 'android-generic':
               assert r['compatibility']['certificate_sha256'] == os.environ['EXPECTED_CERTIFICATE'], 'unexpected APK signer'
               if os.environ['SIGNED_FEED_ARTIFACT']:
@@ -163,7 +182,7 @@ jobs:
           git worktree add --detach build/feed-site origin/release-feeds
           python3 release/pipeline.py stage-feed "$CANDIDATE" \
             --public-key "$RUNNER_TEMP/root.pem" --receipt-sha256 "$RECEIPT_SHA256" \
-            --channel "$CHANNEL" --feed "$RUNNER_TEMP/feed/$CHANNEL.jws" --site build/feed-site
+            --channel "$CHANNEL" --feed "$RUNNER_TEMP/feed/$CHANNEL.jws" --site build/feed-site "${promotion_args[@]}"
       - name: Explicitly save feed checkpoints and stage Pages
         if: env.ACTIVATE == 'true'
         run: |

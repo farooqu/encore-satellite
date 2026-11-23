@@ -20,8 +20,9 @@ import tempfile
 import time
 import zipfile
 
-from biscuit_dev import identity as biscuit_dev_identity
 from check import ROOT, SEMVER, validate, validate_ledger
+from product_versions import DEV, PLAIN, PREFIXES, product_identity
+from stable_plan import preview as stable_preview
 
 REPOSITORY = "farooqu/encore-satellite"
 RECEIPT_TYPE = "encore-release-receipt+jws"
@@ -110,11 +111,10 @@ def verify_jws(path, kind, public_key):
 
 
 def tag(receipt):
-    if arm64_starter(receipt):
-        return f"biscuit-{receipt['core_version']}"
-    if receipt["target"] == "android-generic":
-        return f"android-{receipt['core_version']}"
-    return f"{receipt['target']}-r{receipt['revision']}"
+    target = receipt["target"]
+    if "display_version" in receipt:
+        return f"{PREFIXES[target]}-v{receipt['display_version']}"
+    return f"{'android' if target == 'android-generic' else target}-{receipt['core_version']}"
 
 
 def asset_url(receipt, name):
@@ -212,6 +212,7 @@ def inspect_artifact(receipt, path, aapt="aapt", apksigner="apksigner"):
     certs = re.findall(r"^Signer #[0-9]+ certificate SHA-256 digest: ([0-9a-f]{64})$", certificates, re.M)
     require(package and sdk and abis and len(certs) == 1, "missing APK identity/SDK/ABI/single signer")
     require(package[1] == "com.encore.satellite.incubator" and int(package[2]) == receipt["revision"], "wrong APK identity")
+    require(receipt.get("display_version", package[3]) == package[3], "APK display version mismatch")
     require("application-debuggable" not in badging, "debug APK is not distributable")
     require("launchable-activity: name='com.encore.satellite.MainActivity'" in badging, "APK has no Encore launcher")
     require("uses-permission: name='android.permission.REQUEST_INSTALL_PACKAGES'" in badging, "APK cannot request update installation")
@@ -235,6 +236,10 @@ def inspect_native_pair(receipt, path):
     require(manifest["input_lock_sha256"] == lock_sha, "native seed external lock differs from receipt source")
     require((manifest["core_version"], manifest["package_revision"]) == (receipt["core_version"], receipt["revision"]),
             "wrong native seed version")
+    if "display_version" in receipt:
+        with tarfile.open(fileobj=io.BytesIO(files["rootfs.tar.gz"])) as rootfs:
+            require(rootfs.extractfile("etc/encore-display-version").read(128) == (receipt["display_version"] + "\n").encode(),
+                    "native runtime display version mismatch")
     ota = path.with_name(receipt["ota"]["name"])
     require(record(ota) == receipt["ota"] and native_members(ota, NATIVE_FILES) == files,
             "native OTA does not match the seed")
@@ -248,6 +253,9 @@ def validate_receipt(receipt):
     require(SEMVER.fullmatch(receipt["core_version"]) and re.fullmatch(r"[0-9a-f]{40}", receipt["source"]), "invalid core/source")
     require(receipt["toolchain"].strip() and receipt["recipe"].strip(), "exact toolchain/build recipe required")
     require(receipt["built_channel"] == "dev", "retain original dev build identity")
+    if "display_version" in receipt:
+        require(re.fullmatch(DEV, receipt["display_version"]) and (native_starter(receipt) or receipt.get("identity") == "main"),
+                "invalid Dev display version")
     require(receipt["reproduction"] == "byte-identical-reassembly", "repeat-assembly evidence required")
     review = "requires-signed-approval" if native_starter(receipt) else "approved-for-distribution"
     require(receipt["review"] == review, "source/notices/cohort review required")
@@ -256,15 +264,16 @@ def validate_receipt(receipt):
         require(receipt["target"] == "android-generic" and receipt["identity"] == "main" and "reservation" not in receipt,
                 "invalid main-derived receipt identity")
     if receipt["target"] == "biscuit":
+        version = receipt.get("display_version", receipt["core_version"])
         suffix = "-native-seed.zip" if native_starter(receipt) else ".zip"
         require(arm64_starter(receipt) and "reservation" not in receipt
-                and receipt["artifact"]["name"] == f"encore-biscuit-arm64-{receipt['core_version']}{suffix}",
+                and receipt["artifact"]["name"] == f"encore-biscuit-arm64-{version}{suffix}",
                 "Biscuit requires an ARM64 starter named for its public dev version")
     require(set(receipt["sources"]) == required, "matching corresponding-source roles required")
     names = []
     items = [receipt["artifact"], receipt["evidence"], *receipt["sources"].values()]
     if arm64_starter(receipt):
-        name, limit = ((f"encore-biscuit-arm64-{receipt['core_version']}-native-ota.zip", 129 << 20)
+        name, limit = ((f"encore-biscuit-arm64-{version}-native-ota.zip", 129 << 20)
                        if native_starter(receipt) else ("rootfs.tar.gz", 96 << 20))
         require(receipt["ota"]["name"] == name and receipt["ota"]["size"] <= limit, "invalid Biscuit OTA asset")
         items.append(receipt["ota"])
@@ -291,13 +300,14 @@ def validate_receipt(receipt):
 
 def validate_source(receipt):
     source = receipt["source"]
+    if receipt.get("identity") == "main" or arm64_starter(receipt):
+        expected = product_identity(source, receipt["target"])
+        require({"core_version": receipt["core_version"], "revision": receipt["revision"],
+                 "version": receipt.get("display_version", receipt["core_version"])} == expected,
+                f"{'Android' if receipt['target'] == 'android-generic' else 'ARM64'} receipt differs from its main-derived identity")
     if receipt.get("identity") == "main":
-        require((receipt["core_version"], receipt["revision"]) == biscuit_dev_identity(source),
-                "Android receipt differs from its main-derived identity")
         return
     if arm64_starter(receipt):
-        require((receipt["core_version"], receipt["revision"]) == biscuit_dev_identity(source),
-                "ARM64 receipt differs from its main-derived identity")
         names = {"kernel": "kernel-source.tar.gz", "alpine": "alpine-go-source.tar.gz"}
         require(all(receipt["sources"][role]["name"] == name for role, name in names.items()),
                 "expected same-commit ARM64 source kits")
@@ -324,7 +334,8 @@ def prepare(spec, output, aapt="aapt", apksigner="apksigner"):
         require(spec.get("format") in {ARM64_STARTER, NATIVE_STARTER} and "reservation" not in spec,
                 "expected ARM64 starter without reservation")
     if starter or main_android:
-        core, revision = biscuit_dev_identity(source)
+        candidate = product_identity(source, spec["target"])
+        core, revision = candidate["core_version"], candidate["revision"]
         require(revision <= 2_100_000_000, "main-derived revision exceeds limit")
     else:
         registry = validate(read_json(ROOT / "release/targets.json"))
@@ -352,6 +363,8 @@ def prepare(spec, output, aapt="aapt", apksigner="apksigner"):
                "toolchain": spec["toolchain"], "recipe": spec["recipe"], "review": spec["review"],
                "artifact": record(paths["artifact"]), "evidence": record(paths["evidence"]),
                "sources": {role: record(path) for role, path in sources.items()}}
+    if (starter or main_android) and candidate["version"] != core:
+        receipt["display_version"] = candidate["version"]
     receipt["sources"]["encore"] = {"name": "encore-source.tar.gz", "size": len(archive),
                                           "sha256": hashlib.sha256(archive).hexdigest()}
     if starter and spec["format"] == NATIVE_STARTER:
@@ -394,7 +407,7 @@ def prepare(spec, output, aapt="aapt", apksigner="apksigner"):
 
 
 def prepare_native_ci(build, output):
-    version, _ = biscuit_dev_identity(run("git", "rev-parse", "HEAD").decode().strip())
+    version = product_identity(run("git", "rev-parse", "HEAD").decode().strip(), "biscuit")["version"]
     asset = f"encore-biscuit-arm64-{version}"
     seed, ota = f"{asset}-native-seed.zip", f"{asset}-native-ota.zip"
     prepare({"target": "biscuit", "format": NATIVE_STARTER, "review": "requires-signed-approval",
@@ -441,10 +454,56 @@ def verify_assets(directory, receipt, *, signed):
             run("git", "archive", "--format=tar", receipt["source"]), "Encore archive differs from exact source")
 
 
-def metadata(receipt, channel, issued, expires):
+def stable_binding(receipt):
+    return {"target": receipt["target"], "source": receipt["source"], "revision": receipt["revision"],
+            "dev_tag": tag(receipt), "receipt_sha256": hashlib.sha256(canonical(receipt) + b"\n").hexdigest(),
+            "artifact_sha256": receipt["artifact"]["sha256"],
+            "update_sha256": receipt.get("ota", receipt["artifact"])["sha256"]}
+
+
+def stable_record(binding, label, plan):
+    require(re.fullmatch(DEV, label), "Stable record requires a source-pinned Dev candidate")
+    target, source = binding["target"], binding["source"]
+    version = plan["version"]
+    expected = stable_preview(target, source, plan["baseline"], read_json(ROOT / "release/targets.json"),
+                              previous=plan["previous"], initial=version if plan["previous"] is None else None,
+                              decisions=plan["decisions"])
+    require(plan == expected and version and not plan["review_commits"], "Stable plan differs or has unresolved bump review")
+    require(core_key(version) > core_key(label), "Stable version must follow the candidate's Dev train")
+    return {**binding, "version": version, "tag": f"{PREFIXES[target]}-v{version}",
+            "baseline": plan["baseline"], "previous": plan["previous"]}
+
+
+def assistant_stable_record(directory, plan, certificate, aapt, apksigner):
+    target, source = "android-assistant", plan["source"]
+    candidate = product_identity(source, target)
+    apk = directory / "encore-satellite-assistant.apk"
+    badging = run(aapt, "dump", "badging", str(apk)).decode()
+    require(f"package: name='com.encore.personal' versionCode='{candidate['revision']}' versionName='{candidate['version']}'" in badging,
+            "Assistant APK differs from the approved Dev identity")
+    certs = re.findall(r"^Signer #[0-9]+ certificate SHA-256 digest: ([0-9a-f]{64})$",
+                       run(apksigner, "verify", "--print-certs", str(apk)).decode(), re.M)
+    require(certs == [certificate], "unexpected Assistant APK signer")
+    sha = digest(apk)
+    require(f"{sha}  {apk.name}" in (directory / "SHA256SUMS").read_text().splitlines(), "Assistant APK differs from retained checksum")
+    return stable_record({"target": target, "source": source, "revision": candidate["revision"], "artifact_sha256": sha,
+                          "dev_tag": f"{PREFIXES[target]}-v{candidate['version']}"}, candidate["version"], plan)
+
+
+def metadata(receipt, channel, issued, expires, *, promotion=None):
     require(channel in {"dev", "stable"}, "invalid channel")
     require(channel != "stable" or "-" not in receipt["core_version"].split("+", 1)[0], "stable cannot advertise a prerelease")
     require(type(issued) is int and type(expires) is int and issued > 0 and 0 < expires - issued <= 7 * 86400, "invalid feed lifetime")
+    display = {"display_version": receipt["display_version"]} if "display_version" in receipt else {}
+    if channel == "stable" and display:
+        require(promotion is not None and all(promotion.get(k) == v for k, v in stable_binding(receipt).items()),
+                "Stable promotion does not bind this retained candidate")
+        version = promotion["version"]
+        require(re.fullmatch(PLAIN, version) and promotion["tag"] == f"{PREFIXES[receipt['target']]}-v{version}" and
+                core_key(version) > core_key(receipt["display_version"]), "invalid Stable promotion label")
+        display = {"display_version": version}
+    else:
+        require(promotion is None, "promotion record is only for a source-pinned candidate on Stable")
     if arm64_starter(receipt):
         ota = receipt["ota"]
         if native_starter(receipt):
@@ -452,7 +511,7 @@ def metadata(receipt, channel, issued, expires):
                     "format": NATIVE_STARTER, "base_sha256": receipt["compatibility"]["base_sha256"],
                     "core_version": receipt["core_version"], "revision": receipt["revision"],
                     "url": asset_url(receipt, ota["name"]), "size": ota["size"], "sha256": ota["sha256"],
-                    "issued": issued, "expires": expires}
+                    "issued": issued, "expires": expires, **display}
         return {"target": "biscuit-arm64", "backend": "incubator", "channel": channel,
                 "format": "encore-biscuit-arm64-rootfs-v1", "base_sha256": receipt["compatibility"]["base_sha256"],
                 "core_version": receipt["core_version"], "revision": receipt["revision"],
@@ -464,7 +523,7 @@ def metadata(receipt, channel, issued, expires):
               "core_version": receipt["core_version"], "revision": receipt["revision"],
               "url": asset_url(receipt, artifact["name"]), "size": artifact["size"],
               "sha256": artifact["sha256"], "issued": issued, "expires": expires,
-              **receipt["compatibility"]}
+              **receipt["compatibility"], **display}
     result.update(source=receipt["source"], toolchain=receipt["toolchain"])
     return result
 
@@ -490,7 +549,7 @@ def core_key(version):
             tuple((0, int(part)) if part.isdigit() else (1, part) for part in prerelease.split(".")) if prerelease else ())
 
 
-def stage_feed(receipt, feed, public_key, site, channel, now=None):
+def stage_feed(receipt, feed, public_key, site, channel, now=None, *, promotion=None):
     now = int(time.time()) if now is None else now
     feed_type = ARM64_FEED_TYPE if arm64_starter(receipt) else ANDROID_FEED_TYPE
     signed = verify_jws(feed, feed_type, public_key)
@@ -498,7 +557,7 @@ def stage_feed(receipt, feed, public_key, site, channel, now=None):
     notes = signed.get("release_summary", "")
     require(isinstance(notes, str) and len(notes.encode("utf-8")) <= MAX_CHANGELOG_BYTES, "invalid inline changelog")
     require({k: v for k, v in signed.items() if k != "release_summary"} ==
-            metadata(receipt, channel, signed["issued"], signed["expires"]), "feed differs from retained artifact")
+            metadata(receipt, channel, signed["issued"], signed["expires"], promotion=promotion), "feed differs from retained artifact")
     require(signed["issued"] <= now + 300 and signed["expires"] > now, "future or expired feed")
     target = signed["target"]
     destination = site / target / "incubator" / f"{channel}.jws"
@@ -523,7 +582,12 @@ def stage_feed(receipt, feed, public_key, site, channel, now=None):
             require({k: v for k, v in signed.items() if k not in mutable} ==
                     {k: v for k, v in previous.items() if k not in mutable}, "renewal cannot replace identity/bytes")
         else:
-            require(core_key(signed["core_version"]) >= core_key(previous["core_version"]), "feed core must not roll back")
+            require(core_key(signed["core_version"]) > core_key(previous["core_version"]), "feed core must advance with revision")
+            if "display_version" in previous:
+                require("display_version" in signed and core_key(signed["display_version"]) > core_key(previous["display_version"]),
+                        "feed display version must advance")
+                if channel == "stable":
+                    require(promotion["previous"] == previous["display_version"], "Stable promotion must use the current Stable baseline")
     require(not history.exists(), "feed history is append-only")
     history.parent.mkdir(parents=True, exist_ok=True)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -534,8 +598,11 @@ def stage_feed(receipt, feed, public_key, site, channel, now=None):
 
 def planned_changelog(receipt, plan):
     target = receipt["target"]
-    require(plan["source"] == receipt["source"] and plan["version"] == receipt["core_version"] and
-            plan["revision"] == receipt["revision"] and target in plan["targets"],
+    expected = {"core_version": receipt["core_version"], "revision": receipt["revision"],
+                "version": receipt.get("display_version", receipt["core_version"])}
+    planned = (plan["identities"].get(target) if "identities" in plan else
+               {"core_version": plan["version"], "version": plan["version"], "revision": plan["revision"]})
+    require(plan["source"] == receipt["source"] and planned == expected and target in plan["targets"],
             "Dev release plan differs from signed candidate")
     if "target_changelogs" in plan:
         notes = plan["target_changelogs"].get(target)
@@ -550,7 +617,7 @@ def planned_changelog(receipt, plan):
 
 def publish(directory, receipt, execute, *, automatic_dev=False, dev_plan=None):
     release_tag = tag(receipt)
-    version = receipt["core_version"]
+    version = receipt.get("display_version", receipt["core_version"])
     title = f"{release_tag} · {version}"
     notes = ""
     if dev_plan is not None:
@@ -642,7 +709,13 @@ def main():
     signer.add_argument("directory", type=Path)
     signer.add_argument("--key", type=Path, required=True)
     signer.add_argument("--receipt-sha256", help="independently reviewed receipt hash; required for ARM64")
-    for name in ("verify", "publish", "feed", "stage-feed"):
+    assistant = commands.add_parser("assistant-stable-record", help="verify and describe a Stable sideload of the exact retained APK")
+    assistant.add_argument("directory", type=Path)
+    assistant.add_argument("--plan", type=Path, required=True)
+    assistant.add_argument("--certificate-sha256", required=True)
+    assistant.add_argument("--aapt", default="aapt")
+    assistant.add_argument("--apksigner", default="apksigner")
+    for name in ("verify", "publish", "feed", "stage-feed", "stable-record"):
         sub = commands.add_parser(name)
         sub.add_argument("directory", type=Path)
         sub.add_argument("--public-key", type=Path, required=True)
@@ -653,6 +726,9 @@ def main():
             sub.add_argument("--dev-plan", type=Path, help="Version-specific changelog and target selection from CI · Repository checks")
         if name in {"feed", "stage-feed"}:
             sub.add_argument("--channel", choices=("dev", "stable"), required=True)
+            sub.add_argument("--promotion", type=Path, help="reviewed promotion record for the exact Stable candidate")
+        if name == "stable-record":
+            sub.add_argument("--plan", type=Path, required=True)
         if name == "feed":
             sub.add_argument("--issued", type=int, default=int(time.time()))
             sub.add_argument("--expires", type=int, required=True)
@@ -669,6 +745,8 @@ def main():
         prepare(read_json(args.spec), args.output, args.aapt, args.apksigner)
     elif args.command == "prepare-native-ci":
         prepare_native_ci(args.build, args.output)
+    elif args.command == "assistant-stable-record":
+        print(canonical(assistant_stable_record(args.directory, read_json(args.plan), args.certificate_sha256, args.aapt, args.apksigner)).decode())
     elif args.command == "inspect-android":
         receipt = {"target": "android-generic", "revision": args.revision,
                    "core_version": args.core_version or read_json(ROOT / "release/targets.json")["core_version"]}
@@ -694,19 +772,23 @@ def main():
         if args.command == "publish":
             publish(args.directory, receipt, args.execute, automatic_dev=args.automatic_dev,
                     dev_plan=read_json(args.dev_plan) if args.dev_plan else None)
+        elif args.command == "stable-record":
+            print(canonical(stable_record(stable_binding(receipt), receipt.get("display_version", ""), read_json(args.plan))).decode())
         elif args.command == "feed":
             feed_type = ARM64_FEED_TYPE if arm64_starter(receipt) else ANDROID_FEED_TYPE
             if arm64_starter(receipt):
                 require(run("openssl", "pkey", "-in", str(args.key), "-pubout", "-outform", "DER") ==
                         BISCUIT_ARM64_ROOT, "wrong signing key for Biscuit ARM64")
-            payload = metadata(receipt, args.channel, args.issued, args.expires)
+            payload = metadata(receipt, args.channel, args.issued, args.expires,
+                               promotion=read_json(args.promotion) if args.promotion else None)
             notes = (planned_changelog(receipt, read_json(args.dev_plan)) if args.dev_plan else
                      args.changelog.read_text(encoding="utf-8") if args.changelog else "")
             if summary := inline_changelog(notes):
                 payload["release_summary"] = summary
             sign(payload, feed_type, args.key, args.output)
         elif args.command == "stage-feed":
-            stage_feed(receipt, args.feed, args.public_key, args.site, args.channel)
+            stage_feed(receipt, args.feed, args.public_key, args.site, args.channel,
+                       promotion=read_json(args.promotion) if args.promotion else None)
         else:
             print(f"Verified {tag(receipt)} and all retained sources/assets")
 

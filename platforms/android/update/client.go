@@ -29,6 +29,7 @@ type Release struct {
 	Revision          int64    `json:"revision"`
 	Version           string   `json:"version"`
 	CoreVersion       string   `json:"core_version"`
+	DisplayVersion    string   `json:"display_version,omitempty"`
 	Source            string   `json:"source"`
 	Toolchain         string   `json:"toolchain"`
 	MinSDK            int      `json:"min_sdk"`
@@ -99,6 +100,9 @@ func (c *Client) Check(ctx context.Context, channel string) (*Release, error) {
 	}
 	if channel == "stable" && strings.Contains(strings.SplitN(r.CoreVersion, "+", 2)[0], "-") {
 		return nil, errors.New("stable core must not be a prerelease")
+	}
+	if r.DisplayVersion != "" && (!corePattern.MatchString(r.DisplayVersion) || (channel == "stable" && semver.Prerelease("v"+r.DisplayVersion) != "")) {
+		return nil, errors.New("invalid release display version")
 	}
 	if !updateverify.Fresh(now, r.Issued, r.Expires) {
 		return nil, errors.New("expired or invalid metadata lifetime")

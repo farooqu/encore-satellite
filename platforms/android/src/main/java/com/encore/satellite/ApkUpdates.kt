@@ -33,7 +33,8 @@ class ApkUpdates(private val context: Context, private val runtime: Runtime, pri
     private var worker: Worker? = null
     private val installed = context.packageManager.getPackageInfo(context.packageName, signingFlags() or PackageManager.GET_META_DATA)
     private val updateTrust = installed.applicationInfo?.metaData
-    private val current = BuildConfig.CORE_VERSION
+    private val current = installed.versionName?.takeIf { Regex("[0-9]+\\.[0-9]+\\.[0-9]+-dev\\.[1-9][0-9]*").matches(it) }
+        ?: BuildConfig.CORE_VERSION
     private val installer = ApkInstall(context)
     private val preferences = installer.preferences
     private val installListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
@@ -162,7 +163,7 @@ class ApkUpdates(private val context: Context, private val runtime: Runtime, pri
                     if (release == null) {
                         if (!publishAttempt(channel, generation, offer = false)) runtime.updateStatus(channel, generation, current, "Up to date", true, false, "", "")
                     } else {
-                        val latest = release.getString("core_version")
+                        val latest = release.optString("display_version", release.getString("core_version"))
                         if (install) {
                             // Notification denial must not hide a verified request from Settings or HA.
                             runCatching { notifyReady(context) }
@@ -228,7 +229,7 @@ class ApkUpdates(private val context: Context, private val runtime: Runtime, pri
             return busy
         }
         val known = offer && preferences.contains("pending") && runCatching { validateRequest(context, attempt) }.isSuccess && updateFile(context, attempt).isFile
-        runtime.updateStatus(channel, generation, if (known) attempt.getString("core_version") else current,
+        runtime.updateStatus(channel, generation, if (known) attempt.optString("display_version", attempt.getString("core_version")) else current,
             if (known || busy || attempt.optString("phase") == "failed") attempt.getString("status") else "Local approval expired or was superseded. Request the update again.", known, busy,
             attempt.optString("url"), attempt.optString("release_summary"))
         return true

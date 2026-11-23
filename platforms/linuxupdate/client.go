@@ -45,6 +45,7 @@ type Release struct {
 	Format         string `json:"format"`
 	Channel        string `json:"channel"`
 	CoreVersion    string `json:"core_version"`
+	DisplayVersion string `json:"display_version,omitempty"`
 	Revision       int64  `json:"revision"`
 	BaseSHA256     string `json:"base_sha256"`
 	URL            string `json:"url"`
@@ -154,6 +155,9 @@ func VerifyRelease(b []byte, key ed25519.PublicKey, i Manifest, channel string) 
 	}
 	if channel == "stable" && semver.Prerelease("v"+r.CoreVersion) != "" {
 		return r, errors.New("stable core must not be a prerelease")
+	}
+	if r.DisplayVersion != "" && (!validCore(r.DisplayVersion) || (channel == "stable" && semver.Prerelease("v"+r.DisplayVersion) != "")) {
+		return r, errors.New("invalid release display version")
 	}
 	r.Proof = proof
 	return r, nil

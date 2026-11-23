@@ -32,6 +32,9 @@ on:
         type: choice
         options: [none, stable, dev]
         default: none
+      stable_version:
+        description: Stable release version holding promotion.json (required for new-train Stable)
+        type: string
 
 permissions:
   actions: read
@@ -138,6 +141,18 @@ jobs:
           path: ${{ runner.temp }}/dev-release-plan
           run-id: ${{ steps.candidate.outputs.plan_run }}
           github-token: ${{ github.token }}
+      - name: Download the immutable Stable promotion record
+        if: steps.candidate.outputs.receipt_sha256 != '' && env.CHANNEL == 'stable' && inputs.stable_version != ''
+        env:
+          STABLE_VERSION: ${{ inputs.stable_version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$STABLE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          tag="biscuit-v$STABLE_VERSION"
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" --jq '.immutable and (.draft or .prerelease | not)' | grep -Fx true
+          gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern promotion.json --dir "$RUNNER_TEMP/promotion"
+          jq -e --arg tag "$tag" '.tag == $tag' "$RUNNER_TEMP/promotion/promotion.json" >/dev/null
       - name: Sign the receipt and optional feed with the pinned Ed25519 root
         if: steps.candidate.outputs.receipt_sha256 != ''
         env:
@@ -163,8 +178,12 @@ jobs:
               if test -f "$RUNNER_TEMP/dev-release-plan/plan.json"; then
                 notes=(--dev-plan "$RUNNER_TEMP/dev-release-plan/plan.json")
               fi
+              promotion=()
+              if test -f "$RUNNER_TEMP/promotion/promotion.json"; then
+                promotion=(--promotion "$RUNNER_TEMP/promotion/promotion.json")
+              fi
               python3 release/pipeline.py feed "$candidate" --key "$key" --public-key "$RUNNER_TEMP/biscuit-root.pem" \
-                --receipt-sha256 "$RECEIPT_SHA256" --channel "$CHANNEL" --issued "$issued" "${notes[@]}" \
+                --receipt-sha256 "$RECEIPT_SHA256" --channel "$CHANNEL" --issued "$issued" "${notes[@]}" "${promotion[@]}" \
                 --expires "$((issued + 604800))" --output "$RUNNER_TEMP/signed-feed/$CHANNEL.jws"
               ;;
             none) ;;
@@ -189,7 +208,7 @@ jobs:
         if: github.event_name == 'workflow_run' || inputs.operation == 'deliver-dev'
         run: |
           set -euo pipefail
-          core=$(jq -er '.core_version' "$RUNNER_TEMP/candidate/receipt.json")
+          core=$(jq -er '.display_version // .core_version' "$RUNNER_TEMP/candidate/receipt.json")
           printf 'core_version=%s\n' "$core" >> "$GITHUB_OUTPUT"
 
   retain-dev:

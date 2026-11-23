@@ -124,6 +124,7 @@ def main():
     parser.add_argument("--inputs", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--version", required=True)
+    parser.add_argument("--core-version", help="embedded updater ordering version; defaults to the public version")
     parser.add_argument("--revision", required=True)
     parser.add_argument("--jobs", type=int, default=4)
     args = parser.parse_args()
@@ -153,8 +154,9 @@ def main():
         dest = output / attempt
         dest.mkdir()
         staging = work / attempt
+        display = ["--display-version", args.version] if args.core_version else []
         subprocess.run([sys.executable, HERE / "starter_build.py", "--sealed-base", work, "--ca-bundle", ca,
-                        "--core-version", args.version, "--revision", args.revision, "--output", staging,
+                        "--core-version", args.core_version or args.version, "--revision", args.revision, "--output", staging, *display,
                         "--sendspin-directory", sendspin,
                         "--input-lock-sha256", hashlib.sha256(data).hexdigest(), "--native-payloads"], env=env, check=True)
         for old, name in files.items():
