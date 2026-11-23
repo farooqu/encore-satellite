@@ -28,7 +28,7 @@ type CharSpec struct {
 	UUID  string
 	Flags []string
 	Value []byte
-	Write func(value []byte)
+	Write func(value []byte, peer dbus.ObjectPath)
 }
 
 // AdvertSpec is what the Peripheral advertises while it is up: the service UUIDs and service data a
@@ -44,6 +44,7 @@ type AdvertSpec struct {
 // connection, so its objects and Adapter's or Central's do not mix.
 type Peripheral struct {
 	conn    *dbus.Conn
+	owner   dbus.Sender
 	adapter dbus.ObjectPath
 	root    dbus.ObjectPath
 	advert  dbus.ObjectPath
@@ -59,7 +60,7 @@ type Peripheral struct {
 type charObj struct {
 	p     *Peripheral
 	path  dbus.ObjectPath
-	write func([]byte)
+	write func([]byte, dbus.ObjectPath)
 }
 
 // OpenPeripheral connects to bluetoothd, exports the service under root (a path of this process's
@@ -83,6 +84,12 @@ func OpenPeripheral(root dbus.ObjectPath, serviceUUID string, chars []CharSpec, 
 		objects: map[dbus.ObjectPath]map[string]map[string]*prop.Prop{},
 		chars:   map[string]*charObj{},
 	}
+	var owner string
+	if err := (boundedObject{conn.BusObject()}).Call("org.freedesktop.DBus.GetNameOwner", 0, service).Store(&owner); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("bluez: find daemon: %w", err)
+	}
+	p.owner = dbus.Sender(owner)
 	if err := p.findAdapter(); err != nil {
 		conn.Close()
 		return nil, err
@@ -242,6 +249,10 @@ func (p *Peripheral) SetServiceData(data map[string][]byte) error {
 
 // Close unregisters the advertisement and the service, and lets the bus go.
 func (p *Peripheral) Close() error {
+	return p.close(nil)
+}
+
+func (p *Peripheral) close(afterUnregister func()) error {
 	p.mu.Lock()
 	if p.closed {
 		p.mu.Unlock()
@@ -255,6 +266,9 @@ func (p *Peripheral) Close() error {
 		advertErr = adapter.Call(advertMgrIfc+".UnregisterAdvertisement", 0, p.advert).Err
 	}
 	appErr := adapter.Call(gattMgrIfc+".UnregisterApplication", 0, p.root).Err
+	if advertErr == nil && appErr == nil && afterUnregister != nil {
+		afterUnregister()
+	}
 	return errors.Join(advertErr, appErr, p.conn.Close())
 }
 
@@ -282,11 +296,12 @@ func (c *charObj) ReadValue(options map[string]dbus.Variant) ([]byte, *dbus.Erro
 }
 
 // WriteValue is a central's write.
-func (c *charObj) WriteValue(value []byte, options map[string]dbus.Variant) *dbus.Error {
-	if c.write == nil {
+func (c *charObj) WriteValue(sender dbus.Sender, value []byte, options map[string]dbus.Variant) *dbus.Error {
+	if c.write == nil || sender != c.p.owner {
 		return dbus.NewError("org.bluez.Error.NotPermitted", nil)
 	}
-	c.write(append([]byte(nil), value...))
+	peer, _ := options["device"].Value().(dbus.ObjectPath)
+	c.write(append([]byte(nil), value...), peer)
 	return nil
 }
 

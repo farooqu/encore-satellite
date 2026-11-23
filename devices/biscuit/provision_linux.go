@@ -194,7 +194,8 @@ func PrepareNetwork(ctx context.Context, c Config) error {
 			})
 		}
 		log.Print("First setup: press Action to authorize Improv Wi-Fi; proxy remains off")
-		if err = bluez.Provision(ctx, "Encore Satellite Echo Dot", improv.Options{Name: c.Name, Version: "0.1.0-dev.0", Hardware: "Echo Dot 2", Authorize: auth, Join: joinWiFi,
+		if err = bluez.Provision(ctx, "Encore Satellite Echo Dot", bluez.ProvisionOptions{DisconnectPeer: true, Options: improv.Options{
+			Name: c.Name, Version: "0.1.0-dev.0", Hardware: "Echo Dot 2", Authorize: auth, Join: joinWiFi,
 			Health: func() error {
 				if err := ctx.Err(); err != nil {
 					return err
@@ -205,12 +206,12 @@ func PrepareNetwork(ctx context.Context, c Config) error {
 				}
 				return writePrivate(provisioningReady, fmt.Appendf(nil, "%d %d\n", os.Getpid(), time.Now().Unix()))
 			},
-		}); err != nil {
+		}}); err != nil {
 			return err
 		}
-		// The result dwell and GATT teardown are complete, but the client can
-		// still be connected. This controller can reject the voice app's
-		// connectable advertising probe until the link drops.
+		// BlueZ has torn down Improv and requested disconnect if the writer
+		// was still connected. Check kernel link state before the app tries
+		// connectable advertising; a D-Bus reply is not that check.
 		drainCtx, stop := context.WithTimeout(ctx, 10*time.Second)
 		err = waitForImprovLinkDrain(drainCtx, "/sys/class/bluetooth/hci0")
 		stop()

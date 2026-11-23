@@ -18,12 +18,12 @@ func TestDeviceInfoCapabilityMatchesRPC(t *testing.T) {
 			t.Fatal("device-info request attempted to join Wi-Fi")
 			return "", nil
 		}}
-		writes := make(chan []byte, 1)
-		writes <- (improv.Frame{Command: improv.CmdDeviceInfo}).Bytes()
+		writes := make(chan improv.Write, 1)
+		writes <- improv.Write{Data: (improv.Frame{Command: improv.CmdDeviceInfo}).Bytes()}
 		close(writes)
 		var result []byte
 		var lastError improv.Error
-		err := improv.Run(t.Context(), options, writes, func(uuid string, value []byte) {
+		_, err := improv.Run(t.Context(), options, writes, func(uuid string, value []byte) {
 			switch uuid {
 			case improv.RPCResultUUID:
 				result = value
@@ -49,7 +49,7 @@ func TestPhysicalAuthorizationFragmentedWiFiAndRetry(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		auth := make(chan struct{}, 1)
-		writes := make(chan []byte, 8)
+		writes := make(chan improv.Write, 8)
 		type value struct {
 			uuid string
 			data []byte
@@ -58,7 +58,7 @@ func TestPhysicalAuthorizationFragmentedWiFiAndRetry(t *testing.T) {
 		done := make(chan error, 1)
 		attempts := 0
 		go func() {
-			done <- improv.Run(ctx, improv.Options{Authorize: auth, Join: func(ctx context.Context, wifi improv.WiFi) (string, error) {
+			peer, err := improv.Run(ctx, improv.Options{Authorize: auth, Join: func(ctx context.Context, wifi improv.WiFi) (string, error) {
 				if wifi.SSID != "asymmetric network" || wifi.Passphrase != "secret passphrase" {
 					t.Error("credentials changed in transit")
 				}
@@ -68,6 +68,10 @@ func TestPhysicalAuthorizationFragmentedWiFiAndRetry(t *testing.T) {
 				}
 				return "http://192.0.2.23/", nil
 			}}, writes, func(uuid string, b []byte) { updates <- value{uuid, append([]byte(nil), b...)} })
+			if err == nil && peer != "retry" {
+				t.Errorf("successful Wi-Fi RPC came from %q, want retry", peer)
+			}
+			done <- err
 		}()
 		next := func(uuid string, expected []byte) {
 			t.Helper()
@@ -83,7 +87,7 @@ func TestPhysicalAuthorizationFragmentedWiFiAndRetry(t *testing.T) {
 		}
 		next(improv.StateUUID, []byte{1})
 		frame := improv.WiFiFrame(improv.WiFi{SSID: "asymmetric network", Passphrase: "secret passphrase"})
-		writes <- frame
+		writes <- improv.Write{Data: frame}
 		next(improv.ErrorUUID, []byte{0}) // Initial error clear.
 		next(improv.ErrorUUID, []byte{0}) // Accepted frame, but not authorized.
 		next(improv.ErrorUUID, []byte{4})
@@ -94,7 +98,7 @@ func TestPhysicalAuthorizationFragmentedWiFiAndRetry(t *testing.T) {
 		next(improv.StateUUID, []byte{2})
 		time.Sleep(time.Minute)
 		next(improv.StateUUID, []byte{1})
-		writes <- frame
+		writes <- improv.Write{Data: frame}
 		next(improv.ErrorUUID, []byte{0})
 		next(improv.ErrorUUID, []byte{4})
 		if attempts != 0 {
@@ -102,16 +106,17 @@ func TestPhysicalAuthorizationFragmentedWiFiAndRetry(t *testing.T) {
 		}
 		auth <- struct{}{}
 		next(improv.StateUUID, []byte{2})
-		writes <- improv.WiFiFrame(improv.WiFi{SSID: strings.Repeat("s", 33)})
+		writes <- improv.Write{Data: improv.WiFiFrame(improv.WiFi{SSID: strings.Repeat("s", 33)})}
 		next(improv.ErrorUUID, []byte{0})
 		next(improv.ErrorUUID, []byte{1})
-		writes <- frame[:1]
-		writes <- frame[1:9]
-		writes <- frame[9:]
+		writes <- improv.Write{Peer: "other", Data: frame[:1]}
+		writes <- improv.Write{Peer: "first", Data: frame[:1]}
+		writes <- improv.Write{Peer: "first", Data: frame[1:9]}
+		writes <- improv.Write{Peer: "first", Data: frame[9:]}
 		next(improv.StateUUID, []byte{3})
 		next(improv.ErrorUUID, []byte{3})
 		next(improv.StateUUID, []byte{2})
-		writes <- frame
+		writes <- improv.Write{Peer: "retry", Data: frame}
 		next(improv.StateUUID, []byte{3})
 		next(improv.StateUUID, []byte{4})
 		// Independently encoded wire response: command, length, URL length, URL, sum.
@@ -144,10 +149,10 @@ func TestClosedAuthorizationDoesNotAuthorizeAndCallerCanCancel(t *testing.T) {
 		defer cancel()
 		auth := make(chan struct{})
 		close(auth)
-		writes := make(chan []byte, 1)
-		writes <- improv.WiFiFrame(improv.WiFi{SSID: "network"})
+		writes := make(chan improv.Write, 1)
+		writes <- improv.Write{Data: improv.WiFiFrame(improv.WiFi{SSID: "network"})}
 		var unauthorized bool
-		err := improv.Run(ctx, improv.Options{Authorize: auth, Join: func(context.Context, improv.WiFi) (string, error) {
+		_, err := improv.Run(ctx, improv.Options{Authorize: auth, Join: func(context.Context, improv.WiFi) (string, error) {
 			t.Error("closed channel authorized WiFi")
 			return "", nil
 		}}, writes, func(uuid string, b []byte) {
@@ -166,7 +171,7 @@ func TestHealthyUserWaitingIsUnlimitedButHealthFailureStopsOffer(t *testing.T) {
 		failure := errors.New("transport or button lost")
 		checks := 0
 		start := time.Now()
-		err := improv.Run(context.Background(), improv.Options{
+		_, err := improv.Run(context.Background(), improv.Options{
 			Authorize: make(chan struct{}),
 			Join: func(context.Context, improv.WiFi) (string, error) {
 				t.Fatal("joined without user credentials")
@@ -179,7 +184,7 @@ func TestHealthyUserWaitingIsUnlimitedButHealthFailureStopsOffer(t *testing.T) {
 				}
 				return nil
 			},
-		}, make(chan []byte), func(string, []byte) {})
+		}, make(chan improv.Write), func(string, []byte) {})
 		if !errors.Is(err, failure) || checks < 86400 {
 			t.Fatalf("checks=%d err=%v", checks, err)
 		}
@@ -191,11 +196,11 @@ func TestJoinHeartbeatsUntilDeadlineAndWaitsForCleanupBeforeRetry(t *testing.T) 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		auth := make(chan struct{}, 1)
-		writes := make(chan []byte, 1)
+		writes := make(chan improv.Write, 1)
 		auth <- struct{}{}
 		checks, attempts := 0, 0
 		cleaned := false
-		err := improv.Run(ctx, improv.Options{
+		_, err := improv.Run(ctx, improv.Options{
 			Authorize: auth,
 			Health:    func() error { checks++; return nil },
 			Join: func(ctx context.Context, _ improv.WiFi) (string, error) {
@@ -207,7 +212,7 @@ func TestJoinHeartbeatsUntilDeadlineAndWaitsForCleanupBeforeRetry(t *testing.T) 
 			},
 		}, writes, func(uuid string, b []byte) {
 			if uuid == improv.StateUUID && bytes.Equal(b, []byte{byte(improv.Authorized)}) && attempts == 0 {
-				writes <- improv.WiFiFrame(improv.WiFi{SSID: "network", Passphrase: "password"})
+				writes <- improv.Write{Data: improv.WiFiFrame(improv.WiFi{SSID: "network", Passphrase: "password"})}
 			}
 			if uuid == improv.ErrorUUID && bytes.Equal(b, []byte{byte(improv.ErrUnableToConnect)}) {
 				if !cleaned {

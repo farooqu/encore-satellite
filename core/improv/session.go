@@ -30,12 +30,20 @@ func (o Options) Capabilities() Capabilities {
 	return 0
 }
 
+// Write is one chunk from a transport peer. Peer is an opaque transport ID;
+// chunks from different peers never form one RPC.
+type Write struct {
+	Peer string
+	Data []byte
+}
+
 // Run handles bounded Improv RPCs, including fragmented ATT writes. update is
 // called serially with characteristic values. Transport must bound writes and
 // stop accepting them when ctx ends. No credentials are sent back to clients.
-func Run(ctx context.Context, options Options, writes <-chan []byte, update func(string, []byte)) error {
+// On successful provisioning it returns the Wi-Fi RPC's peer after the result dwell.
+func Run(ctx context.Context, options Options, writes <-chan Write, update func(string, []byte)) (string, error) {
 	if options.Join == nil || options.Authorize == nil {
-		return errors.New("improv: Join and physical authorization are required")
+		return "", errors.New("improv: Join and physical authorization are required")
 	}
 	// Waiting for a physically present user is not a provisioning failure.
 	// Authorization and individual joins remain bounded below.
@@ -51,7 +59,7 @@ func Run(ctx context.Context, options Options, writes <-chan []byte, update func
 		return nil
 	}
 	if err := checkHealth(); err != nil {
-		return err
+		return "", err
 	}
 	state := AuthorizationRequired
 	setState := func(s State) { state = s; update(StateUUID, []byte{byte(s)}) }
@@ -63,13 +71,14 @@ func Run(ctx context.Context, options Options, writes <-chan []byte, update func
 	defer authorization.Stop()
 	var authorizedUntil time.Time
 	var held []byte
+	var peer string
 	for {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return "", ctx.Err()
 		case <-health.C:
 			if err := checkHealth(); err != nil {
-				return err
+				return "", err
 			}
 		case <-authorization.C:
 			if state == Authorized {
@@ -85,16 +94,20 @@ func Run(ctx context.Context, options Options, writes <-chan []byte, update func
 				authorizedUntil = time.Now().Add(time.Minute)
 				authorization.Reset(time.Minute)
 			}
-		case b, ok := <-writes:
+		case write, ok := <-writes:
 			if !ok {
-				return nil
+				return "", nil
 			}
-			if len(held)+len(b) > 258 {
+			if write.Peer != peer {
+				held = nil
+				peer = write.Peer
+			}
+			if len(held)+len(write.Data) > 258 {
 				held = nil
 				setError(ErrInvalidRPC)
 				continue
 			}
-			held = append(held, b...)
+			held = append(held, write.Data...)
 			if len(held) < 2 || len(held) < int(held[1])+3 {
 				continue
 			}
@@ -157,7 +170,7 @@ func Run(ctx context.Context, options Options, writes <-chan []byte, update func
 						if healthErr := checkHealth(); healthErr != nil {
 							done()
 							<-result
-							return healthErr
+							return "", healthErr
 						}
 					}
 				}
@@ -166,7 +179,7 @@ func Run(ctx context.Context, options Options, writes <-chan []byte, update func
 				}
 				done()
 				if ctx.Err() != nil {
-					return ctx.Err()
+					return "", ctx.Err()
 				}
 				if err != nil {
 					setError(ErrUnableToConnect)
@@ -183,9 +196,9 @@ func Run(ctx context.Context, options Options, writes <-chan []byte, update func
 				select {
 				case <-ctx.Done():
 					timer.Stop()
-					return ctx.Err()
+					return "", ctx.Err()
 				case <-timer.C:
-					return nil
+					return peer, nil
 				}
 			default:
 				setError(ErrUnknownCommand)

@@ -8,7 +8,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"errors"
 	"os/exec"
 	"strings"
 	"testing"
@@ -64,6 +63,7 @@ func TestPeripheralAsBluetoothdSeesIt(t *testing.T) {
 	root := dbus.ObjectPath("/org/techo5/test")
 	p := &Peripheral{
 		conn:    server,
+		owner:   dbus.Sender(client.Names()[0]),
 		root:    root,
 		advert:  root + "/advert",
 		objects: map[dbus.ObjectPath]map[string]map[string]*prop.Prop{},
@@ -71,7 +71,7 @@ func TestPeripheralAsBluetoothdSeesIt(t *testing.T) {
 	}
 	err := p.export("0000aaaa-0000-1000-8000-00805f9b34fb", []CharSpec{
 		{UUID: "0000aaa1-0000-1000-8000-00805f9b34fb", Flags: []string{"read", "notify"}, Value: []byte("hello")},
-		{UUID: "0000aaa2-0000-1000-8000-00805f9b34fb", Flags: []string{"write"}, Write: func(b []byte) {
+		{UUID: "0000aaa2-0000-1000-8000-00805f9b34fb", Flags: []string{"write"}, Write: func(b []byte, _ dbus.ObjectPath) {
 			written = append(written, b)
 			got <- b
 		}},
@@ -207,6 +207,7 @@ type testPeripheralAdapter struct {
 	conn                *dbus.Conn
 	advertised          chan byte
 	application         chan dbus.Sender
+	appUnregistered     chan struct{}
 	advertUnregistered  chan struct{}
 	rejectUpdatedAdvert bool
 }
@@ -217,7 +218,12 @@ func (a *testPeripheralAdapter) RegisterApplication(_ dbus.ObjectPath, _ map[str
 	}
 	return nil
 }
-func (*testPeripheralAdapter) UnregisterApplication(dbus.ObjectPath) *dbus.Error { return nil }
+func (a *testPeripheralAdapter) UnregisterApplication(dbus.ObjectPath) *dbus.Error {
+	if a.appUnregistered != nil {
+		a.appUnregistered <- struct{}{}
+	}
+	return nil
+}
 func (a *testPeripheralAdapter) UnregisterAdvertisement(dbus.ObjectPath) *dbus.Error {
 	if a.advertUnregistered != nil {
 		a.advertUnregistered <- struct{}{}
@@ -237,6 +243,17 @@ func (a *testPeripheralAdapter) RegisterAdvertisement(path dbus.ObjectPath, _ ma
 	return nil
 }
 
+type testImprovPeer struct {
+	props        *prop.Properties
+	onDisconnect func()
+}
+
+func (p testImprovPeer) Disconnect() *dbus.Error {
+	p.onDisconnect()
+	p.props.SetMust(deviceIfc, "Connected", false)
+	return nil
+}
+
 func TestProvisionWithoutProxyOverDBus(t *testing.T) {
 	addr := privateBus(t)
 	t.Setenv("DBUS_SYSTEM_BUS_ADDRESS", addr)
@@ -252,7 +269,7 @@ func TestProvisionWithoutProxyOverDBus(t *testing.T) {
 	// advertisement after Action, while the central is using GATT.
 	a := &testPeripheralAdapter{
 		conn: server, advertised: make(chan byte, 8), application: make(chan dbus.Sender, 1),
-		advertUnregistered: make(chan struct{}, 8), rejectUpdatedAdvert: true,
+		appUnregistered: make(chan struct{}, 1), advertUnregistered: make(chan struct{}, 1), rejectUpdatedAdvert: true,
 	}
 	for _, ifc := range []string{gattMgrIfc, advertMgrIfc} {
 		if err := server.Export(a, adapter, ifc); err != nil {
@@ -265,7 +282,21 @@ func TestProvisionWithoutProxyOverDBus(t *testing.T) {
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	peer, other := adapter+"/dev_00_00_00_00_00_01", adapter+"/dev_00_00_00_00_00_02"
+	for _, path := range []dbus.ObjectPath{peer, other} {
+		props, err := prop.Export(server, path, prop.Map{deviceIfc: {"Connected": {Value: true}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := server.Export(testImprovPeer{props, func() {
+			if path != peer || len(a.appUnregistered) != 1 || len(a.advertUnregistered) != 1 {
+				t.Error("disconnected the wrong peer or disconnected before Improv teardown")
+			}
+		}}, path, deviceIfc); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 16*time.Second)
 	defer cancel()
 	auth := make(chan struct{}, 1)
 	joined := make(chan improv.WiFi, 1)
@@ -273,10 +304,10 @@ func TestProvisionWithoutProxyOverDBus(t *testing.T) {
 	// No proxy, Noise connection, scanner or GATT central is started. First
 	// boot's locally authorized peripheral role must remain independent.
 	go func() {
-		done <- Provision(ctx, "Encore Satellite Echo Dot", improv.Options{Name: "kitchen-dot", Authorize: auth, Join: func(_ context.Context, wifi improv.WiFi) (string, error) {
+		done <- Provision(ctx, "Encore Satellite Echo Dot", ProvisionOptions{DisconnectPeer: true, Options: improv.Options{Name: "kitchen-dot", Authorize: auth, Join: func(_ context.Context, wifi improv.WiFi) (string, error) {
 			joined <- wifi
 			return "http://192.0.2.23/", nil
-		}})
+		}}})
 	}()
 	var sender dbus.Sender
 	select {
@@ -343,19 +374,19 @@ func TestProvisionWithoutProxyOverDBus(t *testing.T) {
 			}
 		}
 	}
-	write := func(b []byte) {
+	write := func(path dbus.ObjectPath, b []byte) {
 		t.Helper()
-		if err := server.Object(string(sender), chars[improv.RPCCommandUUID]).CallWithContext(ctx, gattCharIfc+".WriteValue", 0, b, map[string]dbus.Variant{}).Err; err != nil {
+		if err := server.Object(string(sender), chars[improv.RPCCommandUUID]).CallWithContext(ctx, gattCharIfc+".WriteValue", 0, b, map[string]dbus.Variant{"device": dbus.MakeVariant(path)}).Err; err != nil {
 			t.Fatal(err)
 		}
 	}
 	readUntil(improv.CapabilitiesUUID, []byte{2}) // Device info only, not identify/scan.
 	readUntil(improv.StateUUID, []byte{1})
-	write([]byte{3, 0, 3}) // Device info keeps the per-unit name, not the public BLE label.
+	write(other, []byte{3, 0, 3}) // Device info keeps the per-unit name, not the public BLE label.
 	readUntil(improv.RPCResultUUID, improv.Result(improv.CmdDeviceInfo, "Encore Satellite", "", "", "kitchen-dot"))
 	// Independently encoded Wi-Fi request: command, payload length, strings, checksum.
 	frame := []byte{1, 8, 3, 'l', 'a', 'b', 3, 'p', 's', 'k', 0x8c}
-	write(frame)
+	write(peer, frame)
 	readUntil(improv.ErrorUUID, []byte{4})
 	select {
 	case <-joined:
@@ -365,8 +396,12 @@ func TestProvisionWithoutProxyOverDBus(t *testing.T) {
 	auth <- struct{}{}
 	readAdvertState(2)
 	readUntil(improv.StateUUID, []byte{2})
-	write(frame[:4])
-	write(frame[4:])
+	stranger := connect(t, addr)
+	if err := stranger.Object(string(sender), chars[improv.RPCCommandUUID]).CallWithContext(ctx, gattCharIfc+".WriteValue", 0, frame, map[string]dbus.Variant{"device": dbus.MakeVariant(other)}).Err; err == nil {
+		t.Fatal("a bus client impersonated BlueZ's Wi-Fi writer")
+	}
+	write(peer, frame[:4])
+	write(peer, frame[4:])
 	readAdvertState(3)
 	readAdvertState(4)
 	readUntil(improv.StateUUID, []byte{4})
@@ -378,11 +413,43 @@ func TestProvisionWithoutProxyOverDBus(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("authorized fragmented request never reached Join")
 	}
-	cancel() // Do not wait through the ten-second result window in this transport test.
-	if err := <-done; !errors.Is(err, context.Canceled) {
+	readUntil(improv.RPCResultUUID, improv.Result(improv.CmdWiFiSettings, "http://192.0.2.23/"))
+	connected := func(path dbus.ObjectPath) bool {
+		t.Helper()
+		value, err := server.Object(service, path).GetProperty(deviceIfc + ".Connected")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return value.Value().(bool)
+	}
+	if !connected(peer) {
+		t.Fatal("Wi-Fi writer disconnected before receiving the result")
+	}
+	write(other, []byte{3, 0, 3}) // A late write is not the successful Wi-Fi writer.
+	if err := <-done; err != nil {
 		t.Fatalf("provisioning shutdown: %v", err)
+	}
+	if connected(peer) || !connected(other) {
+		t.Fatal("enrollment must release the retained Wi-Fi link and leave other peers connected")
 	}
 	if len(a.advertised) != 1 || <-a.advertised != 1 || len(a.advertUnregistered) != 1 {
 		t.Fatal("advertisement must be registered once at startup and removed once at shutdown")
 	}
+}
+
+func TestImprovPeerAlreadyDisconnected(t *testing.T) {
+	addr := privateBus(t)
+	daemon, client := connect(t, addr), connect(t, addr)
+	peer := dbus.ObjectPath("/org/bluez/hci0/dev_00_00_00_00_00_01")
+	props, err := prop.Export(daemon, peer, prop.Map{deviceIfc: {"Connected": {Value: false}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := daemon.Export(testImprovPeer{props, func() {
+		t.Error("called Disconnect after the Improv peer already left")
+	}}, peer, deviceIfc); err != nil {
+		t.Fatal(err)
+	}
+	p := &Peripheral{conn: client, owner: dbus.Sender(daemon.Names()[0])}
+	p.disconnectImprovPeer(t.Context(), peer)
 }

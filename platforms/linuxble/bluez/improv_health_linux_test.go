@@ -40,7 +40,7 @@ func TestProvisionHealthFollowsRegistrationAndStopsOnAdapterLoss(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	checks := 0
-	err = Provision(ctx, "Setup", improv.Options{
+	err = Provision(ctx, "Setup", ProvisionOptions{Options: improv.Options{
 		Authorize: make(chan struct{}),
 		Join: func(context.Context, improv.WiFi) (string, error) {
 			t.Error("unexpected join")
@@ -61,7 +61,7 @@ func TestProvisionHealthFollowsRegistrationAndStopsOnAdapterLoss(t *testing.T) {
 			properties.SetMust(adapterIfc, "Powered", false)
 			return nil
 		},
-	})
+	}})
 	if err == nil || errors.Is(err, context.DeadlineExceeded) || checks != 1 {
 		t.Fatalf("adapter loss: health checks=%d, error=%v", checks, err)
 	}

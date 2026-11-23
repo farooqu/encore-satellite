@@ -143,8 +143,11 @@ Encore slot writes either stock system partition. If import fails, base and
 radios stay unavailable; USB rescue and `/run/encore/base.log` remain available.
 After `base-ready`, radio and networking start automatically. On a fresh
 install without saved Wi-Fi, Improv requires the physical Action button to
-authorize setup; otherwise the starter joins the saved network. After Wi-Fi is
-ready, the app starts regardless of the physical privacy state. The microphone
+authorize setup; otherwise the starter joins the saved network. After saving
+Wi-Fi, Improv leaves the result readable briefly, stops serving setup, and
+disconnects the provisioning client if it is still connected. The app still
+validates Bluetooth before accepting Action for Home Assistant pairing. It
+starts regardless of the physical privacy state. The microphone
 stays off while muted or while the state is unreadable; capture starts or
 resumes only after the driver confirms it is unmuted. The slots start `held`,
 not `good`; app startup spends an attempt and only stable app readiness can
@@ -152,6 +155,13 @@ commit a slot. App readiness does not require an active microphone: capture
 may be safely disabled by privacy. Failed health leaves USB available without
 rebooting. Persistent enrollment and runtime acceptance still require hardware
 verification.
+
+To check the first-boot handoff on hardware, start with neither saved Wi-Fi nor
+an ESPHome key. Use a BLE client that reads the Improv result but leaves its
+connection open. Without rebooting or disconnecting the client yourself, check
+for a live `/run/encore/ready` PID, then press Action and add the device to Home
+Assistant. Verify the encrypted ESPHome API reconnects on TCP 6053 and the
+Incubator service is listening on TCP 6055 on that same boot.
 
 ### Wi-Fi at install time
 
