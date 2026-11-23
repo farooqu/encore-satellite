@@ -74,11 +74,7 @@ def main():
         check_commits(*args.check_commits)
         return
 
-    release = identity(args.source)
-    # Owner is holding 0.2.0 and beyond. Keep identity calculation independent
-    # from this publication hold so a future unlock cannot change old identities.
-    if release[0].startswith("0.1."):
-        print(*release)
+    print(*identity(args.source))
 
 
 if __name__ == "__main__":

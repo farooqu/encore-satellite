@@ -246,5 +246,4 @@ and highest deployed versionCode before attempting replacement. Older builds wit
 an empty saved channel may need **Update channel → dev** selected once in Home
 Assistant to write it explicitly before they can receive their first OTA; the newer
 updater accepts either older representation of the default. No physical-device or
-production publication result is implied by local tests. Keep 0.2.0 on hold until
-Android self-update and Biscuit's separate persistent image and OTA are qualified.
+production publication result is implied by local tests.

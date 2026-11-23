@@ -17,12 +17,13 @@ main-derived receipts use `identity: main`, without a reservation. The old
 ledger is retained to verify historical receipts; do not allocate new entries.
 After the versioning cutover, `feat` advances the minor, a breaking change
 advances the major, and every other main commit advances the patch. Automatic
-builds remain on `0.1.x` while `0.2.0` is on hold; subsequent patches do not
-publish a held minor or major in disguise. After **CI · Repository checks**, one Dev
+Dev releases are not restricted to any version series. After successful
+**CI · Repository checks**, one Dev
 plan compares the push tip against each device's own last immutable published
 release on first-parent `main`. Shared package inputs select the targets that use them;
-device-only inputs select that device. An unpublished build, draft, or bare
-tag does not consume pending changes. A skipped target leaves its published
+device-only inputs select that device. Failed checks, an unpublished build, a
+draft, or a bare tag do not consume pending changes, so the next eligible
+green push can release them. A skipped target leaves its published
 release and feed untouched and can jump SemVer and OTA revision numbers on its
 next build. The APK and native seed/OTA identify the shared version they contain.
 

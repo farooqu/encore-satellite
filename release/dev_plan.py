@@ -129,9 +129,7 @@ def plan(source, releases, registry, armed):
     for target, name in TARGETS.items():
         section = [f"## {name}", ""]
         baseline = baselines.get(target)
-        if not version.startswith("0.1."):
-            reason = "this version is on hold"
-        elif target not in armed:
+        if target not in armed:
             reason = "automatic Dev is disabled"
         elif baseline and target not in affected(changed_paths(baseline, source), registry):
             reason = "no package changes since the last published release"

@@ -470,8 +470,15 @@ class PipelineTests(unittest.TestCase):
         publish("biscuit-0.1.7", shared_tip)
         build_inputs = commit("fix(build): pin shared Go modules", "go.sum")
         self.assertEqual(plan(build_inputs)["targets"], [android, biscuit])
-        held = plan(commit("feat(core): next minor", "core/session/session.go"))
-        self.assertEqual((held["version"], held["targets"]), ("0.2.0", []))
+        minor_tip = commit("feat(core): next minor", "core/session/session.go")
+        minor_plan = plan(minor_tip)
+        self.assertEqual((minor_plan["version"], minor_plan["targets"]), ("0.2.0", [android, biscuit]))
+        # If the feature's CI fails, the next green push still plans against
+        # the last published release, not the test fix's parent.
+        retry = plan(commit("test(core): stabilize CI", "core/session/session_test.go"))
+        self.assertEqual((retry["version"], retry["targets"]), ("0.2.1", [android, biscuit]))
+        for target in retry["targets"]:
+            self.assertIn("feat(core): next minor", retry["target_changelogs"][target])
 
         self.assertEqual((android_plan["version"], android_plan["revision"]), ("0.1.4", 1000000003))
         self.assertEqual((biscuit_plan["version"], biscuit_plan["revision"]), ("0.1.5", 1000000004))
@@ -574,7 +581,7 @@ class PipelineTests(unittest.TestCase):
         self.assertIn(invalid[:7], result.stderr)
         self.assertEqual(lint(invalid).returncode, 0)
 
-    def test_release_history_advances_lockstep_and_holds_minor(self):
+    def test_release_identity_advances_across_minor_and_major_versions(self):
         # Synthetic old anchor and one height-versioned commit before cutover.
         self.git("commit", "--allow-empty", "-qm", "last height-versioned source")
         base = self.git("rev-parse", "HEAD").strip()
@@ -589,8 +596,9 @@ class PipelineTests(unittest.TestCase):
             ("docs: explain feeds", "0.1.3 1000000002"),
             ("fix(core): fix shared startup", "0.1.4 1000000003"),
             ("perf(biscuit): reduce boot reads", "0.1.5 1000000004"),
-            ("feat(core): held minor bump", ""),
-            ("fix: do not leak a held minor through a patch", ""),
+            ("feat(core): next minor", "0.2.0 1000000005"),
+            ("test(core): stabilize CI", "0.2.1 1000000006"),
+            ("feat(core)!: next major", "1.0.0 1000000007"),
         ):
             self.git("commit", "--allow-empty", "-qm", subject)
             self.assertEqual(resolve(self.git("rev-parse", "HEAD").strip()), expected)
