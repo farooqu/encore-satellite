@@ -318,6 +318,7 @@ jobs:
   advance-dev:
     needs: [signed-candidate, retain-dev]
     permissions:
+      actions: read
       contents: write
       pages: write
       id-token: write

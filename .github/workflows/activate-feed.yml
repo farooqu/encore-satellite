@@ -65,6 +65,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
+      actions: read
       contents: write
       pages: write
       id-token: write
@@ -82,6 +83,7 @@ jobs:
       BISCUIT_PUBLIC_KEY: ${{ vars.BISCUIT_METADATA_PUBLIC_KEY_PEM }}
       EXPECTED_CERTIFICATE: ${{ vars.ANDROID_CERTIFICATE_SHA256 }}
       SETUP_APPROVED: ${{ vars.RELEASE_SETUP_APPROVED }}
+      PAGES_ARTIFACT: github-pages-${{ github.run_attempt }}
     steps:
       - name: Require owner-approved setup and explicit Stable promotion
         if: env.ACTIVATE == 'true'
@@ -178,7 +180,26 @@ jobs:
           git -C build/feed-site archive HEAD | tar -x -C "$RUNNER_TEMP/pages"
       - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
         if: env.ACTIVATE == 'true'
+        id: pages
         with:
+          name: ${{ env.PAGES_ARTIFACT }}
           path: ${{ runner.temp }}/pages
+      - name: Wait for the uploaded Pages artifact to appear in the run
+        if: env.ACTIVATE == 'true'
+        env:
+          ARTIFACT_ID: ${{ steps.pages.outputs.artifact_id }}
+        run: |
+          set -euo pipefail
+          for attempt in {1..10}; do
+            if gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?name=$PAGES_ARTIFACT" \
+              --jq '.artifacts[] | select(.expired == false) | .id' | grep -Fx "$ARTIFACT_ID" >/dev/null; then
+              exit 0
+            fi
+            if test "$attempt" -lt 10; then sleep 3; fi
+          done
+          echo "::error::Pages artifact $PAGES_ARTIFACT ($ARTIFACT_ID) did not become visible."
+          exit 1
       - uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
         if: env.ACTIVATE == 'true'
+        with:
+          artifact_name: ${{ env.PAGES_ARTIFACT }}

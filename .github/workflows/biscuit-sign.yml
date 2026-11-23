@@ -213,6 +213,7 @@ jobs:
     needs: [sign, retain-dev]
     if: ${{ !cancelled() && needs.sign.result == 'success' && needs.retain-dev.result == 'success' }}
     permissions:
+      actions: read
       contents: write
       pages: write
       id-token: write
