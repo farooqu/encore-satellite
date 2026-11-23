@@ -71,11 +71,23 @@ func TestESPHomeFirstPairing(t *testing.T) {
 	t.Cleanup(cancel)
 	action := make(chan struct{})
 	ready := make(chan struct{})
+	cues := make(chan setupCue, 4)
+	expectCue := func(want setupCue) {
+		t.Helper()
+		select {
+		case got := <-cues:
+			if got != want {
+				t.Fatalf("setup cue = %q, want %q", got, want)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("missing setup cue %q", want)
+		}
+	}
 	done := make(chan error, 1)
 	var loaded esphome.PSK
 	go func() {
 		var err error
-		loaded, err = waitForESPHomeKey(ctx, path, action, pairingInfo, ad, func() error { close(ready); return nil })
+		loaded, err = waitForESPHomeKey(ctx, path, action, pairingInfo, ad, func() error { close(ready); return nil }, func(cue setupCue) { cues <- cue })
 		done <- err
 	}()
 	select {
@@ -83,6 +95,7 @@ func TestESPHomeFirstPairing(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("unpaired runtime did not become ready for onboarding")
 	}
+	expectCue(haReady)
 	if c, err := net.DialTimeout("tcp", addr, time.Second); err == nil {
 		c.Close()
 		t.Fatal("ESPHome listened before Action")
@@ -92,6 +105,7 @@ func TestESPHomeFirstPairing(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("pairing did not wait for Action")
 	}
+	expectCue(pairingOpen)
 	buttonWait(t, "ESPHome listener did not open after Action", func() bool {
 		c, err := net.DialTimeout("tcp", addr, time.Second)
 		if err != nil {
@@ -190,10 +204,15 @@ func TestESPHomeFirstPairing(t *testing.T) {
 	if loaded != key {
 		t.Fatal("first pairing did not release the runtime with the saved key")
 	}
+	select {
+	case cue := <-cues:
+		t.Fatalf("bootstrap issued premature completion or timeout cue: %q", cue)
+	default:
+	}
 	stored, err := waitForESPHomeKey(t.Context(), path, nil, pairingInfo, ad, func() error {
 		t.Fatal("valid saved key unexpectedly entered onboarding")
 		return nil
-	})
+	}, func(cue setupCue) { t.Fatalf("saved key unexpectedly emitted %q", cue) })
 	if err != nil || stored != key {
 		t.Fatal("startup did not accept the exact saved HA key", err)
 	}

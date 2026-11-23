@@ -267,6 +267,10 @@ func (r *ringRenderer) update(s presentation.State, mic captureReading, now time
 		}
 		r.current, r.currentWritten = current, true
 	}
+	return r.writeFrame(frame)
+}
+
+func (r *ringRenderer) writeFrame(frame [36]byte) error {
 	if r.written && frame == r.last {
 		return nil
 	}

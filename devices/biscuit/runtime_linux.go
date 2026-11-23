@@ -51,15 +51,24 @@ func (d *biscuitControls) controlInfo(name string, mac net.HardwareAddr) esphome
 // Run opens the real host before exposing this package's sole Incubator backend. It does
 // not provision the base, start Wi-Fi, execute shell commands or run HTTP control.
 // ReadyPath is ephemeral startup readiness, NOT a hardware qualification result.
-func Run(parent context.Context, c Config, probeReference bool) error {
+func Run(parent context.Context, c Config, probeReference bool) (runErr error) {
 	_ = os.Remove(ReadyPath)
 	defer os.Remove(ReadyPath)
+	gate := linux.NewPrivacy(func() (bool, error) { return linux.ReadPrivacy(privacyState) })
+	mutedNow := func() bool { muted, _ := gate.Check(nil); return muted }
+	_, keyErr := os.Stat(KeyPath)
+	onboarding := errors.Is(keyErr, os.ErrNotExist)
+	startupComplete := false
+	defer func() {
+		if onboarding && !startupComplete && runErr != nil && parent.Err() == nil && wlanIPv4() != nil {
+			reportSetupStartupFailure(parent, mutedNow)
+		}
+	}()
 	if err := syscall.Sethostname([]byte(c.Name)); err != nil {
 		return fmt.Errorf("dot: setting configured hostname: %w", err)
 	}
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
-	gate := linux.NewPrivacy(func() (bool, error) { return linux.ReadPrivacy(privacyState) })
 	iface, err := net.InterfaceByName("wlan0")
 	if err != nil || len(iface.HardwareAddr) != 6 {
 		return errors.New("dot: wlan0 with a real six-byte MAC is required")
@@ -121,6 +130,8 @@ func Run(parent context.Context, c Config, probeReference bool) error {
 	for _, d := range devices {
 		start(func() error { return buttons(ctx, d, gate, buttonsAudio.Load, apiAction) })
 	}
+	feedback, stopFeedback := startSetupFeedback(ctx, mutedNow)
+	defer stopFeedback()
 	start(func() error {
 		t := time.NewTicker(50 * time.Millisecond)
 		defer t.Stop()
@@ -149,7 +160,7 @@ func Run(parent context.Context, c Config, probeReference bool) error {
 	workers.Go(func() {
 		// A functioning onboarding runtime is healthy even if the owner has
 		// not paired yet. Do not require capture to pass first-boot slot health.
-		key, err := waitForESPHomeKey(ctx, KeyPath, apiAction, apiInfo, apiAd, markReady)
+		key, err := waitForESPHomeKey(ctx, KeyPath, apiAction, apiInfo, apiAd, markReady, feedback.emit)
 		if err != nil {
 			failed <- err
 			return
@@ -171,8 +182,9 @@ func Run(parent context.Context, c Config, probeReference bool) error {
 		return nil
 	}
 	_ = os.Remove(ReadyPath)
+	stopFeedback() // Stop a stale prompt and release the setup-only speaker/ring.
 
-	// No ALSA I/O, voice listener, or normal ESPHome controls exist until
+	// No capture, voice listener, or normal ESPHome controls exist until
 	// the saved key has been validated and the pairing window has closed.
 	mixer, err := alsa.OpenMixer(0)
 	if err != nil {
@@ -183,8 +195,7 @@ func Run(parent context.Context, c Config, probeReference bool) error {
 	if err = configureMixer(mixer); err != nil {
 		return fmt.Errorf("dot: speaker routing: %w", err)
 	}
-	// Keep the wake threshold 5 ms below the refill target.
-	pcm, err := alsa.OpenPlayback(0, 23, alsa.Config{Channels: 2, Rate: 48000, Format: alsa.FormatS16_LE, Bits: 16, PeriodSize: speakerPeriodFrames, Periods: speakerPeriods, PlaybackWakeLead: speakerLeadFrames - 240})
+	pcm, err := openSpeakerPCM()
 	if err != nil {
 		return err
 	}
@@ -212,10 +223,7 @@ func Run(parent context.Context, c Config, probeReference bool) error {
 	if err != nil {
 		return err
 	}
-	ring := &ringRenderer{volume: player.volumeFeedback, write: func(frame []byte) error {
-		// The kernel latches quarter current with every scaled frame.
-		return os.WriteFile(ringPath+"scaled_frame", scaledRingFrame(frame), 0644)
-	}}
+	ring := &ringRenderer{volume: player.volumeFeedback, write: writeScaledRing}
 	if err = ring.update(engine.Snapshot(), captureReading{}, time.Now(), ringPolicy.snapshot()); err != nil {
 		return err
 	}
@@ -283,14 +291,19 @@ func Run(parent context.Context, c Config, probeReference bool) error {
 		}
 	})
 	apiAd.Encrypted, apiAd.Provisionable = true, false
+	apiStarted := make(chan struct{})
 	start(func() error {
-		return serveAdvertisedAPI(apiAd, func(l net.Listener) error { return controls.Serve(ctx, l, apiInfo, key) })
+		return serveAdvertisedAPI(apiAd, func(l net.Listener) error {
+			close(apiStarted)
+			return controls.Serve(ctx, l, apiInfo, key)
+		})
 	})
 	voice := &incubator.Server{Engine: engine, Name: c.Name, MAC: mac.String(), Version: "0.1.0-dev.0", EnableModels: true, CallAEC: true, MonitorAEC: true}
 	start(func() error {
 		return voice.Serve(ctx, voiceListener)
 	})
 	meter := &captureMeter{origin: time.Now()}
+	var completeCue atomic.Pointer[setupEvent]
 	start(func() error {
 		t := time.NewTicker(50 * time.Millisecond)
 		defer t.Stop()
@@ -302,6 +315,15 @@ func Run(parent context.Context, c Config, probeReference bool) error {
 				now := time.Now()
 				reading := meter.snapshot(now)
 				state := voice.Snapshot(reading.ready)
+				if cue := completeCue.Load(); cue != nil && now.Sub(cue.at) < setupFlash {
+					muted := state.Muted || mutedNow()
+					if mode := ringMode(state); muted || mode == "idle" || mode == "unavailable" || mode == "queued" || mode == "output" && state.Output.Owner == "announcement" {
+						if e := ring.writeFrame(cue.frame(now, muted, ringPolicy.snapshot())); e != nil {
+							return e
+						}
+						continue
+					}
+				}
 				if e := ring.update(state, reading, now, ringPolicy.snapshot()); e != nil {
 					return e
 				}
@@ -320,12 +342,17 @@ func Run(parent context.Context, c Config, probeReference bool) error {
 	start(func() error {
 		return capture(ctx, mic, loss, gate, voice, meter, probe, aec, func() { ready <- struct{}{} }, player.SetMusicPrivacy, controls.microphone.SetMuted)
 	})
+	apiReady := (<-chan struct{})(apiStarted)
+	captureReady := false
 	for {
 		select {
+		case <-apiReady:
+			apiReady = nil
 		case <-ready:
 			if err = markReady(); err != nil {
 				return err
 			}
+			captureReady = true
 			log.Printf("Encore %s ready (Incubator package); Action or app-pushed MixedNet wake models", c.Name)
 			if probe != nil {
 				workers.Go(func() {
@@ -342,6 +369,17 @@ func Run(parent context.Context, c Config, probeReference bool) error {
 			return err
 		case <-ctx.Done():
 			return nil
+		}
+		if !startupComplete && apiReady == nil && captureReady {
+			startupComplete = true
+			if onboarding {
+				completeCue.Store(&setupEvent{pairingComplete, time.Now()})
+				workers.Go(func() {
+					clipCtx, cancel := context.WithTimeout(ctx, setupSpeechLimit)
+					defer cancel()
+					_, _ = engine.Announce(clipCtx, pairingComplete.stream)
+				})
+			}
 		}
 	}
 }

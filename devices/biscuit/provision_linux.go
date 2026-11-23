@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/farooqu/encore-satellite/core/improv"
+	"github.com/farooqu/encore-satellite/platforms/linux"
 	"github.com/farooqu/encore-satellite/platforms/linux/input"
 	"github.com/farooqu/encore-satellite/platforms/linuxble/bluez"
 )
@@ -160,6 +161,12 @@ func PrepareNetwork(ctx context.Context, c Config) error {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithCancel(ctx)
 		defer cancel()
+		gate := linux.NewPrivacy(func() (bool, error) { return linux.ReadPrivacy(privacyState) })
+		feedback, stopFeedback := startSetupFeedback(ctx, func() bool {
+			muted, _ := gate.Check(nil)
+			return muted
+		})
+		defer stopFeedback()
 		generation, err := os.ReadFile("/run/encore/bluetooth-ready")
 		if err != nil {
 			return err
@@ -184,6 +191,9 @@ func PrepareNetwork(ctx context.Context, c Config) error {
 						cancel() // A lost Action button is not healthy user waiting.
 						return
 					}
+					if e.Type == input.EvKey && e.Code == 113 && e.Value == 1 {
+						gate.Inhibit(500 * time.Millisecond) // Same driver-report lag as the app.
+					}
 					if e.Type == input.EvKey && e.Code == 138 && e.Value == 1 {
 						select {
 						case auth <- struct{}{}:
@@ -194,8 +204,18 @@ func PrepareNetwork(ctx context.Context, c Config) error {
 			})
 		}
 		log.Print("First setup: press Action to authorize Improv Wi-Fi; proxy remains off")
+		announceReady := sync.OnceFunc(func() { feedback.emit(improvReady) })
 		if err = bluez.Provision(ctx, "Encore Satellite Echo Dot", bluez.ProvisionOptions{DisconnectPeer: true, Options: improv.Options{
-			Name: c.Name, Version: "0.1.0-dev.0", Hardware: "Echo Dot 2", Authorize: auth, Join: joinWiFi,
+			Name: c.Name, Version: "0.1.0-dev.0", Hardware: "Echo Dot 2", Authorize: auth,
+			Join: func(joinCtx context.Context, w improv.WiFi) (string, error) {
+				url, err := joinWiFi(joinCtx, w)
+				if err == nil {
+					feedback.emit(wifiConnected)
+				} else if ctx.Err() == nil {
+					feedback.emit(wifiFailed)
+				}
+				return url, err
+			},
 			Health: func() error {
 				if err := ctx.Err(); err != nil {
 					return err
@@ -204,7 +224,11 @@ func PrepareNetwork(ctx context.Context, c Config) error {
 				if err != nil || string(current) != string(generation) {
 					return errors.New("dot: Bluetooth supervisor changed during provisioning")
 				}
-				return writePrivate(provisioningReady, fmt.Appendf(nil, "%d %d\n", os.Getpid(), time.Now().Unix()))
+				if err := writePrivate(provisioningReady, fmt.Appendf(nil, "%d %d\n", os.Getpid(), time.Now().Unix())); err != nil {
+					return err
+				}
+				announceReady()
+				return nil
 			},
 		}}); err != nil {
 			return err

@@ -18,7 +18,8 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-const window = 2 * time.Minute
+// Window is the lifetime of an authorized pairing listener.
+const Window = 2 * time.Minute
 
 // RefuseKey overrides the library's default in-memory key setter on an
 // authenticated endpoint. First pairing does not authorize future rotation.
@@ -29,7 +30,7 @@ func RefuseKey(esphome.PSK) error {
 // Serve owns l for the authorized window. save must durably store the supplied
 // key without replacing an existing key and return only non-secret errors.
 func Serve(ctx context.Context, l net.Listener, info esphome.Info, save func(esphome.PSK) error) error {
-	ctx, cancel := context.WithTimeout(ctx, window)
+	ctx, cancel := context.WithTimeout(ctx, Window)
 	defer cancel()
 	bootstrap := &bootstrapListener{Listener: l, conns: make(map[net.Conn]struct{})}
 	defer bootstrap.Close()
