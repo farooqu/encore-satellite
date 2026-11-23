@@ -172,7 +172,11 @@ class EncoreScreenTest {
                 { SatelliteSetup(step, current, AndroidSetupStatus(home = false, remoteInstalls = "Off"),
                     onMicrophone = {}, onAppPermissions = null, onNotifications = {}, onSkipNotifications = { notificationsReviewed.value = true },
                     onPair = { state.value = current.copy(esphome = "waiting") },
-                    onVoiceContinue = { stage.value = SetupStage.BLUETOOTH }, onBluetooth = {}, onExtras = { stage.value = SetupStage.EXTRAS },
+                    onVoiceContinue = { stage.value = SetupStage.MUSIC },
+                    onMusicEnable = { state.value = current.copy(music = MusicState(enabled = true, awaitingServer = true)) },
+                    onMusicDisable = { state.value = current.copy(music = MusicState()) },
+                    onMusicContinue = { stage.value = SetupStage.BLUETOOTH },
+                    onBluetooth = {}, onExtras = { stage.value = SetupStage.EXTRAS },
                     onChooseHome = {}, onRemoteInstalls = {}, onDone = { stage.value = SetupStage.DONE }) }
             } else null
             EncoreScreen(current, {}, {}, {}, {}, { "" }, { "" }, {}, {}, {}, {}, dashboardContent = content,
@@ -190,10 +194,15 @@ class EncoreScreenTest {
         compose.onNodeWithText("Pair with Home Assistant").performClick()
         compose.onNodeWithText("two minutes", substring = true).assertIsDisplayed()
         capture("android-first-run-pairing")
-        compose.runOnIdle { state.value = state.value.copy(esphome = "paired", voiceKnown = true) }
+        compose.runOnIdle { state.value = state.value.copy(esphome = "paired", voiceKnown = true,
+            music = MusicState(enabled = true, awaitingServer = true)) }
         compose.onNodeWithText("Voice Incubator not connected").assertIsDisplayed()
         capture("android-first-run-voice")
         compose.onNodeWithText("Continue setup").performClick()
+        compose.onNodeWithText("Music (optional)").assertIsDisplayed()
+        compose.onNodeWithText("Turn off music").assertIsDisplayed()
+        capture("android-first-run-music-enabled")
+        compose.onNodeWithText("Continue setup").performClick() // No server has been discovered yet.
         compose.onNodeWithText("Set up Bluetooth proxy").assertIsDisplayed()
         compose.onNodeWithText("Not now").performClick()
         compose.onNodeWithText("Finish setup").assertIsDisplayed()
@@ -211,6 +220,15 @@ class EncoreScreenTest {
         compose.onNodeWithTag("display-clock").assertIsDisplayed()
         compose.onNodeWithText("Allow notifications").assertDoesNotExist()
         compose.onNodeWithText("Set up Bluetooth proxy").assertDoesNotExist()
+        compose.onNodeWithText("Music (optional)").assertDoesNotExist()
+
+        compose.runOnIdle { stage.value = SetupStage.MUSIC }
+        compose.onNodeWithText("Turn off music").performClick()
+        compose.onNodeWithText("Enable music").assertIsDisplayed()
+        capture("android-first-run-music-disabled")
+        compose.onNodeWithText("Continue setup").performClick()
+        compose.onNodeWithText("Set up Bluetooth proxy").assertIsDisplayed()
+        assertFalse(state.value.music.enabled)
     }
 
     @Test fun remoteRequestWaitsForDrawnIndicatorAndFreshSamples() {

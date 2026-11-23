@@ -538,7 +538,7 @@ class RecoveryTests(unittest.TestCase):
         self.assert_preseeded_wifi()
         self.assertEqual(sorted(x.name for x in state.iterdir()), ["config.json", "wpa_supplicant.conf"])
         self.assertEqual(json.loads((state / "config.json").read_bytes()),
-                         {"schema": 1, "name": "native-dot", "bluetooth_proxy": True})
+                         {"schema": 1, "name": "native-dot", "bluetooth_proxy": True, "sendspin": True})
         for slot, number, old in (("a", 10, a), ("b", 11, b)):
             image = files[f"boot_{slot}.img"]
             self.assertEqual((p / f"mmcblk0p{number}").read_bytes(), image + old[len(image):])
@@ -632,6 +632,7 @@ class RecoveryTests(unittest.TestCase):
             self.passphrase.assert_not_called()
         config = json.loads((self.device / "data/encore/config.json").read_bytes())
         self.assertIs(config["bluetooth_proxy"], True)
+        self.assertIs(config["sendspin"], True)
 
     def test_arm64_transition_publishes_only_after_flash_readback(self):
         self.check_arm64_transition(corrupt_readback=False)

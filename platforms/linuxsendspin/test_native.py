@@ -25,7 +25,7 @@ PARSER.add_argument("--runner")
 PARSER.add_argument("--protocol", action="store_true")
 ARGS, REST = PARSER.parse_known_args()
 EXE = ([ARGS.runner] if ARGS.runner else []) + [str(ARGS.binary.resolve())]
-IPC_VERSION = 3
+IPC_VERSION = 4
 READY, PLAYING, STOPPED = 1 << 31, 1 << 30, 1 << 29
 
 
@@ -154,7 +154,6 @@ class Companion(unittest.TestCase):
         sdk_logger = logging.getLogger("aiosendspin")
         self.addCleanup(sdk_logger.setLevel, sdk_logger.level)
         sdk_logger.setLevel(logging.CRITICAL + 1)
-        token = decode_psk_token(self.token_text().decode("ascii"))
         loop = asyncio.get_running_loop()
         store = InMemoryServerPairingStore()
         server = SendspinServer(loop, Identity.generate(), "test-server", pairing_store=store,
@@ -162,6 +161,14 @@ class Companion(unittest.TestCase):
         app = web.Application()
         app.router.add_get("/sendspin", server.on_client_connect)
         header = struct.Struct("<4sHHQQII")
+
+        async def credentials(ipc):
+            packet = await asyncio.wait_for(loop.sock_recv(ipc, 16384 + header.size), 5)
+            self.assertEqual(header.unpack_from(packet), (b"ESPN", IPC_VERSION, 9, 0, 0, 150, 0))
+            payload = packet[header.size:]
+            token = decode_psk_token(payload[43:].decode("ascii"))
+            self.assertEqual(payload[:43].decode("ascii"), token.client_id)
+            return token
 
         async def connected():
             async with asyncio.timeout(10):
@@ -224,6 +231,7 @@ class Companion(unittest.TestCase):
                 url = f"ws://127.0.0.1:{web_server.port}/sendspin"
                 p, ipc = self.child(url)
                 ipc.setblocking(False)
+                token = await credentials(ipc)
                 client = await connected()
                 self.assertNotEqual(client.connection_security.psk_category, PskCategory.LONG_TERM)
                 with self.assertRaises(TimeoutError):
@@ -266,9 +274,10 @@ class Companion(unittest.TestCase):
                 await readiness(ipc, 0, after=regrouped)
                 self.assertEqual(await child_status(p), 75)
 
-                # New SDK process, same private state, no fresh pairing token.
+                # New SDK process, same private state, no new pairing exchange.
                 p, ipc = self.child(url)
                 ipc.setblocking(False)
+                self.assertEqual((await credentials(ipc)).client_id, token.client_id)
                 client = await connected()
                 self.assertEqual(client.connection_security.psk_category, PskCategory.LONG_TERM)
                 controller = client.group.group_role("controller")

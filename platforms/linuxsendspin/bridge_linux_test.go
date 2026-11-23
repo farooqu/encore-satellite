@@ -8,12 +8,17 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"golang.org/x/sys/unix"
 )
+
+const fixtureClientID = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
+
+var fixtureToken = "SP:0" + strings.Repeat("A", 103)
 
 // The test binary is also a deterministic companion protocol peer. It receives
 // the same inherited endpoint as the real SDK process, without env/argv tokens.
@@ -53,6 +58,7 @@ func TestMain(m *testing.M) {
 		send(packet{kind: msgStart, epoch: 1})
 		switch mode {
 		case "commands":
+			send(packet{kind: msgPairing, data: []byte(fixtureClientID + fixtureToken)})
 			send(packet{kind: msgReady, epoch: 1, id: 1, value: readyBit | playingBit | commandBit(Play)})
 			if p := read(); p.kind != msgCommand || p.epoch != 1 || p.value != uint32(Play) {
 				os.Exit(97)
@@ -393,6 +399,8 @@ func TestCommandsAreFencedByReadinessGeneration(t *testing.T) {
 	opt := options(t, "commands", o)
 	cmds := make(chan CommandRequest, 2)
 	states := make(chan Readiness, 4)
+	credentials := make(chan bool, 1)
+	opt.OnPairing = func(id, token string) { credentials <- id == fixtureClientID && token == fixtureToken }
 	opt.Commands = cmds
 	opt.OnReadiness = func(s Readiness) { states <- s }
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
@@ -411,6 +419,14 @@ func TestCommandsAreFencedByReadinessGeneration(t *testing.T) {
 	}
 	if s := state(); !s.Supports(Play) || s.Supports(Next) || s.Generation != 1 || s.Group != 1 || !s.Playing || s.Stopped {
 		t.Fatalf("bad initial state: %+v", s)
+	}
+	select {
+	case valid := <-credentials:
+		if !valid {
+			t.Fatal("IPC did not preserve the Sendspin credential")
+		}
+	default:
+		t.Fatal("credential was not delivered before readiness")
 	}
 	cmds <- CommandRequest{Play, 1}
 	if s := state(); s.Ready || s.Supports(Play) || s.Generation != 2 || s.Group != 0 || s.Playing || s.Stopped {

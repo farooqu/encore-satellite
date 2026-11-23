@@ -94,9 +94,7 @@ class MainActivity : ComponentActivity() {
                 onStopAlert = { service?.stopAlert(it) },
                 onMuted = { if (it) service?.setMuted(true) else requestMicrophone(true) },
                 noiseKey = { service?.noiseKey().orEmpty() }, musicToken = { service?.musicToken().orEmpty() },
-                onMusicEnable = { server ->
-                    startForegroundService(Intent(this, EncoreService::class.java).setAction("music").putExtra("manual_server", server))
-                },
+                onMusicEnable = ::enableMusic,
                 onMusicDisconnect = { service?.disconnectMusic() },
                 onMusicCommand = { service?.musicCommand(it) },
                 onMusicRevoke = { service?.revokeMusic() },
@@ -117,7 +115,10 @@ class MainActivity : ComponentActivity() {
                         onNotifications = { notifications.launch(Manifest.permission.POST_NOTIFICATIONS) },
                         onSkipNotifications = ::reviewNotifications,
                         onPair = { service?.pairHomeAssistant() },
-                        onVoiceContinue = { saveSetupStage(if (bluetoothPending == true) SetupStage.BLUETOOTH else SetupStage.EXTRAS) },
+                        onVoiceContinue = { saveSetupStage(SetupStage.MUSIC) },
+                        onMusicEnable = { enableMusic(null) },
+                        onMusicDisable = { service?.disconnectMusic() },
+                        onMusicContinue = { saveSetupStage(if (bluetoothPending == true) SetupStage.BLUETOOTH else SetupStage.EXTRAS) },
                         onBluetooth = { bluetoothSetup.launch(Intent(this, BluetoothActivity::class.java)) },
                         onExtras = { saveSetupStage(SetupStage.EXTRAS) },
                         onChooseHome = { openAndroidSettings(Settings.ACTION_HOME_SETTINGS) },
@@ -129,6 +130,10 @@ class MainActivity : ComponentActivity() {
                 } },
                 onMonitorOverlay = { id, visible -> connectedService?.setMonitorOverlay(id, visible) })
         }
+    }
+
+    private fun enableMusic(server: String?) {
+        startForegroundService(Intent(this, EncoreService::class.java).setAction("music").putExtra("manual_server", server))
     }
 
     private fun openAndroidSettings(action: String, data: Uri? = null, extras: Bundle? = null) {
@@ -196,7 +201,7 @@ class MainActivity : ComponentActivity() {
 
     private fun startIfPermitted() {
         val connected = service ?: return
-        val mayStart = microphonePermissionGranted || connected.musicEnabled()
+        val mayStart = microphonePermissionGranted || connected.startForSavedMusic()
         val needsStart = !connected.state.value.running || (microphonePermissionGranted && connected.awaitingUpdateMicrophone)
         if (!startRequested && mayStart && needsStart) startSatellite(false)
     }

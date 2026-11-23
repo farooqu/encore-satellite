@@ -17,6 +17,10 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+type sendspinRequests chan bool
+
+func (c sendspinRequests) RequestSendspinEnabled(enabled bool) { c <- enabled }
+
 func TestHomeAssistantKeyEnablesEncryptedControlsAfterReopen(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "encore.json"), []byte(`{"mac":"02:13:24:35:0a:b2"}`), 0600); err != nil {
@@ -28,6 +32,10 @@ func TestHomeAssistantKeyEnablesEncryptedControlsAfterReopen(t *testing.T) {
 	}
 	r.ConfigureHardware("  ACME Inc. ", " Tab\t10.1  Pro ")
 	r.ConfigureUpdates(make(updateRequests, 1), " 1.2.3-dev.4 ")
+	musicRequests := make(sendspinRequests, 1)
+	if err := r.ConfigureSendspin(musicRequests, true); err != nil {
+		t.Fatal(err)
+	}
 	r.UpdateStatus("dev", r.UpdateGeneration(), "1.2.4", "Update available", true, false, "", "")
 	if err := r.Start(); err != nil {
 		t.Fatal(err)
@@ -63,6 +71,13 @@ func TestHomeAssistantKeyEnablesEncryptedControlsAfterReopen(t *testing.T) {
 		}
 	}
 	checkInfo(bootstrap, "1.2.3-dev.4", true)
+	const clientID, token = "test-sendspin-client", "SP:0fixture"
+	r.SetSendspinPairing(clientID, token)
+	capabilities := &api.DeviceCapabilitiesResponse{}
+	bootstrap(&api.DeviceCapabilitiesRequest{}, capabilities)
+	if capabilities.GetSendspin() != nil {
+		t.Fatal("unprovisioned listener advertised Sendspin handoff")
+	}
 	assertVoiceClosed()
 	request := &api.NoiseEncryptionSetKeyRequest{Key: []byte(first.String())}
 	response := &api.NoiseEncryptionSetKeyResponse{}
@@ -96,6 +111,73 @@ func TestHomeAssistantKeyEnablesEncryptedControlsAfterReopen(t *testing.T) {
 	}
 	paired := pairingNoisePeer(t, first)
 	checkInfo(paired, "1.2.3-dev.4", false)
+	checkMusicPairing := func(status api.SendspinPairingTokenStatus, wantID, wantToken string) {
+		t.Helper()
+		capabilities := &api.DeviceCapabilitiesResponse{}
+		paired(&api.DeviceCapabilitiesRequest{}, capabilities)
+		if got := capabilities.GetSendspin(); got.GetFeatureFlags() != esphome.SendspinFeaturePairingToken || got.GetClientId() != wantID {
+			t.Fatal("wrong Sendspin capability or identity")
+		}
+		credential := &api.SendspinPairingTokenResponse{}
+		paired(&api.SendspinPairingTokenRequest{}, credential)
+		if credential.GetStatus() != status || credential.GetToken() != wantToken {
+			t.Fatal("wrong Sendspin credential response")
+		}
+	}
+	send, receive := noisePeer(t, "127.0.0.1:6053", first)
+	send(&api.ListEntitiesRequest{})
+	var musicKey uint32
+listing:
+	for {
+		switch entity := receive().(type) {
+		case *api.ListEntitiesSwitchResponse:
+			if entity.ObjectId == "sendspin" && entity.Name == "Sendspin music" {
+				musicKey = entity.Key
+			}
+		case *api.ListEntitiesDoneResponse:
+			break listing
+		}
+	}
+	if musicKey == 0 {
+		t.Fatal("paired tablet did not expose the music switch")
+	}
+	checkMusicState := func(want bool) {
+		t.Helper()
+		for {
+			if state, ok := receive().(*api.SwitchStateResponse); ok && state.Key == musicKey {
+				if state.State != want {
+					t.Fatalf("music switch = %v, want %v", state.State, want)
+				}
+				return
+			}
+		}
+	}
+	toggle := func(enabled bool) {
+		t.Helper()
+		send(&api.SwitchCommandRequest{Key: musicKey, State: enabled})
+		select {
+		case got := <-musicRequests:
+			if got != enabled {
+				t.Fatalf("music setting request = %v, want %v", got, enabled)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("music switch did not reach the Android host")
+		}
+		r.SetSendspinEnabled(enabled) // The host confirms after saving the setting.
+		checkMusicState(enabled)
+	}
+	send(&api.SubscribeStatesRequest{})
+	checkMusicState(true)
+	checkMusicPairing(api.SendspinPairingTokenStatus_SENDSPIN_PAIRING_TOKEN_STATUS_NOT_READY, "", "")
+	r.SetSendspinPairing(clientID, token)
+	checkMusicPairing(api.SendspinPairingTokenStatus_SENDSPIN_PAIRING_TOKEN_STATUS_OK, clientID, token)
+	toggle(false)
+	r.SetSendspinPairing(clientID, token) // A stale player cannot publish while off.
+	checkMusicPairing(api.SendspinPairingTokenStatus_SENDSPIN_PAIRING_TOKEN_STATUS_DISABLED, "", "")
+	toggle(true)
+	checkMusicPairing(api.SendspinPairingTokenStatus_SENDSPIN_PAIRING_TOKEN_STATUS_NOT_READY, "", "")
+	r.SetSendspinPairing(clientID, token)
+	checkMusicPairing(api.SendspinPairingTokenStatus_SENDSPIN_PAIRING_TOKEN_STATUS_OK, clientID, token)
 	paired(&api.NoiseEncryptionSetKeyRequest{Key: []byte((esphome.PSK{6, 3}).String())}, response)
 	if response.Success {
 		t.Fatal("paired endpoint accepted a replacement key")

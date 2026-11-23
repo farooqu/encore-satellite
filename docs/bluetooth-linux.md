@@ -22,7 +22,7 @@ with the proxy OFF; forwarding advertisements does not provision Wi-Fi.
   Encore reports scan failure rather than stopping the other client. Mode
   changes release only the scan session, not GATT links or the controller.
 - `backends/bluetooth` implements the ESPHome native proxy protocol against
-  `go-esphome-device v0.0.18`. Capability mask 47 is scan, active connections,
+  `go-esphome-device v0.0.21`. Capability mask 47 is scan, active connections,
   remote service caching, pairing, and raw advertisements. Biscuit adds
   `FEATURE_STATE_AND_MODE` (64) when the scanner supports both modes. Biscuit
   starts in active mode until the subscriber requests another mode. Home

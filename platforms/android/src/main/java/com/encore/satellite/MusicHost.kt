@@ -72,6 +72,7 @@ internal class MusicHost(context: Context, private val key: SecretKey = loadMusi
         override fun rotatePairingPsk(newPsk: ByteArray, claimedPskIds: Set<String>) = PairingConfigStore.RotateResult.Invalid
     }
 
+    val pairingClientId: String get() = identity.clientId
     fun pairingToken(): String = PairingToken.encode(identity.publicKey, config.pairingPsk)
 
     /** Retire this host after shutting down playback. Keep the device's public identity. */

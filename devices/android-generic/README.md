@@ -215,10 +215,11 @@ these devices, acoustic timings or model-backed enrollment/training.
    and confirm you hear a reply. Then assign a wake word in Incubator and try it
    separately. If Talk works but wake doesn't, check model assignment and mic
    readiness rather than repeating ESPHome pairing.
-   First-run setup then offers the Bluetooth proxy on supported hardware; it
-   defaults On but needs local access and scan approval. Dashboard, Android Home
-   and remote installs are optional. Choose **Done** to use Encore without a
-   dashboard; **Settings → Device setup** reopens the checklist.
+   First-run setup then offers Sendspin music and, on supported hardware, the
+   Bluetooth proxy. The proxy defaults On but needs local access
+   and scan approval. Dashboard, Android Home and remote installs are optional.
+   Choose **Done** to use Encore without a dashboard; **Settings → Device setup**
+   reopens the checklist.
 4. Tap the Encore display, then open **Settings → Dashboards**. Enter the Home
    Assistant server address (for example `https://home.example`) and tap **Choose dashboards**.
    Sign in on the tablet, then select up to five Home Assistant dashboard views
@@ -258,21 +259,29 @@ these devices, acoustic timings or model-backed enrollment/training.
      sign out from that tablet's dashboard. No need to re-pair ESPHome.
    Manual sign-in still works, including when the QR flow is unavailable. The
    tablet WebView permits only same-origin navigation (no external-IdP allowlist).
-5. Sendspin is off by default. In **Settings → Connection details**, choose
-   **Enable music**. Encore automatically browses for `_sendspin-server._tcp.`
+5. Sendspin is on by default after pairing with Home Assistant. On a fresh
+   tablet, choose **Continue setup** at **Music (optional)** to keep it on, or
+   **Turn off music** if you don't want it. You can change this later in
+   **Settings → Connection details** on the tablet or with **Sendspin music**
+   under the tablet's ESPHome device configuration in Home Assistant.
+   With [automatic pairing](../../docs/sendspin-targets.md#automatic-pairing-through-home-assistant)
+   configured, Music Assistant pairs without token entry, and you can finish
+   tablet setup without waiting for it to connect.
+   Encore automatically browses for `_sendspin-server._tcp.`
    on the local network and connects when it finds exactly one compatible server.
    If none or more than one are found, it waits and tries again. Choose
    **Specify server** at any time to connect to a `host:port` with an optional
    path (default `/sendspin`). The app remembers the address until you choose
    **Connect by auto-discovery**. This setting is local to Android, not exposed
-   through ESPHome. Neither connection method grants trust. Reveal the
-   independent pairing token locally and enter it in the **Noise-capable**
-   server's pairing UI. The app stores
+   through ESPHome. Neither connection method grants trust. For an encrypted
+   server without auto-pairing, **Reveal Sendspin pairing token** in connection
+   details and enter it in the server's pairing UI. The app stores
    identity and trust with Android Keystore encryption. Unpaired playback and
    plaintext-only servers are not supported.
    **Turn off music** stops discovery and playback, and keeps trust;
    **Revoke all Sendspin trust** also removes trusted servers and rotates the
-   token without replacing the device identity. Keep the token private.
+   token without replacing the device identity. Keep the token private. Leave
+   music off if you don't want a connected Music Assistant to auto-pair again.
 
    Use Music Assistant for queues and grouping. The clock page becomes
    **Now Playing** with the time, large album art when supplied, play/pause,

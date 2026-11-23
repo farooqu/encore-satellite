@@ -65,7 +65,8 @@ does not need this rename for physical preflight; no device migration is perform
   output to card 0/device 23, filtered voice interpolation and source-scoped drain.
 - On images with the official Sendspin SDK companion installed, authenticated
   Music Assistant playback uses the same production ALSA output as voice.
-  Sendspin is off by default and independent of the Incubator voice backend.
+  Sendspin is on by default on fresh ARM64 installs and independent of the
+  Incubator voice backend.
 - Authoritative hardware privacy-state reads around acquisition/delivery, buffer
   invalidation on mute, Action start/stop, volume buttons and a full-ring renderer.
   Driver-first mute is not toggled a second time. Never read `power_button_state`.
@@ -418,16 +419,20 @@ Home Assistant integration for music queues, grouping and ongoing playback.
 Music being off or the server being absent does not stop voice, BLE or first-boot
 Improv.
 
-1. Enable the Sendspin provider on a Music Assistant version that supports
-   encrypted Sendspin and the device pairing-token setup. Leave **Sendspin
-   music** off on Biscuit. On the physical USB console, privately run
-   `encore-sendspin pairing-token --state /data/encore/sendspin`.
-2. Enable **Sendspin music** on Biscuit. It automatically discovers the
-   Sendspin provider on Wi-Fi. Plaintext and guest playback are not allowed.
-3. When the receiver appears in Music Assistant's player settings, open its
-   setup and paste the token from step 1 into the pairing-token prompt. After
-   pairing completes, press **Resume music** on Biscuit, then choose it as the
-   player in Music Assistant to start a queue.
+1. Add Biscuit to Home Assistant as an encrypted ESPHome device and set up
+   [automatic pairing](../../docs/sendspin-targets.md#automatic-pairing-through-home-assistant)
+   with the Home Assistant and Sendspin providers in Music Assistant.
+2. **Sendspin music** is already on on a fresh ARM64 install. If you turned it
+   off, turn it back on in Biscuit's ESPHome controls. Biscuit discovers the
+   Sendspin server on Wi-Fi and Home Assistant supplies the pairing token to
+   Music Assistant. There's no token to copy or setup prompt to complete.
+3. Once paired, choose Biscuit in Music Assistant to start a queue. If its
+   output is locally stopped, **Resume music** releases the local Stop latch.
+
+For an older or standalone encrypted Sendspin server without auto-pairing,
+turn **Sendspin music** off and privately run `encore-sendspin pairing-token
+--state /data/encore/sendspin` on the physical USB console. Turn music back on
+and paste the token into the player's setup prompt in Music Assistant.
 
 Biscuit browses `_sendspin-server._tcp.local.` on Wi-Fi for the
 advertised IPv4 address, SRV port and `path=/sendspin`. It connects only when it
@@ -443,6 +448,8 @@ same exclusive lock as the player. Revocation retains the receiver identity,
 removes all trusted servers, rotates the token and requires pairing again. Trust
 survives rootfs-slot updates in the private `/data/encore/sendspin` directory.
 Corrupt state fails closed. Losing that directory loses the receiver identity.
+If you don't want the connected Music Assistant to pair again, leave Sendspin
+off or disconnect its Home Assistant provider before re-enabling music.
 
 The companion is a separate C++20 process connected only by an inherited,
 versioned Unix packet socket. No HTTP PCM sink or new network control listener

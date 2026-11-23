@@ -76,6 +76,13 @@ class EncoreService : Service() {
             Mobile.openWithBluetoothDefault(filesDir.resolve("engine").absolutePath, audio, bluetooth.supported).also {
                 it.configureHardware(Build.MANUFACTURER.orEmpty(), Build.MODEL.orEmpty())
                 it.configureDashboard()
+                it.configureSendspin({ enabled ->
+                    scope.launch {
+                        if (mutable.value.running && enabled != musicEnabled()) {
+                            if (enabled) enableMusic(mutable.value.manualMusicServer) else disconnectMusic()
+                        }
+                    }
+                }, musicEnabled())
             }
         }
             .onSuccess {
@@ -293,7 +300,10 @@ class EncoreService : Service() {
             .onFailure { problem("Could not start Home Assistant pairing. Try again.") }
     }
     private fun musicProblem(message: String) { mutable.value = mutable.value.copy(musicProblem = message) }
-    internal fun musicEnabled() = musicPrefs.getBoolean("enabled", false)
+    private fun musicEnabled() = musicPrefs.getBoolean("enabled", true)
+    // A first-run default does not bypass microphone setup to start the service.
+    // Once the paired player has started, it can reopen without the microphone.
+    internal fun startForSavedMusic() = musicPrefs.getBoolean("enabled", false)
     fun musicToken(): String = runCatching { host().pairingToken() }
         .getOrElse { musicProblem("Sendspin secure storage unavailable"); "" }
     private fun host(): MusicHost = musicHost ?: MusicHost(this).also { musicHost = it }
@@ -310,12 +320,14 @@ class EncoreService : Service() {
         runCatching {
             check(musicPrefs.edit().remove("address").putString("manual_server", endpoint?.setting).putBoolean("enabled", true).commit())
             mutable.value = mutable.value.copy(manualMusicServer = endpoint?.setting)
+            runtime?.setSendspinEnabled(true)
             startMusic()
         }.onFailure { musicProblem("Could not save Sendspin setting") }
     }
     private fun startMusic() {
         // Keep discovery and connections off until initial ESPHome pairing succeeds.
         if (!mutable.value.running || mutable.value.esphome != "paired") return
+        if (!musicPrefs.contains("enabled")) musicPrefs.edit().putBoolean("enabled", true).apply()
         closeMusic()
         musicProblem("")
         val server = mutable.value.manualMusicServer
@@ -351,7 +363,8 @@ class EncoreService : Service() {
     }
     private fun connectMusic(endpoint: MusicEndpoint) {
         runCatching {
-            MusicPlayer(mutable.value.name, host(), ::retryMusic) { next ->
+            val pairingHost = host()
+            MusicPlayer(mutable.value.name, pairingHost, ::retryMusic) { next ->
                 mutable.value = mutable.value.copy(music = next)
                 focus.update(mutable.value.voiceActive || (next.playing && !next.stopped))
                 music?.interrupted(!focus.focused)
@@ -360,6 +373,7 @@ class EncoreService : Service() {
                 it.interrupted(!focus.focused)
                 it.stopped(musicPrefs.getBoolean("stopped", false) || musicPrefs.getBoolean("privacy", false))
                 it.duck(mutable.value.voiceActive)
+                runtime?.setSendspinPairing(pairingHost.pairingClientId, pairingHost.pairingToken())
                 it.connect(endpoint)
             }
         }.onFailure {
@@ -369,6 +383,7 @@ class EncoreService : Service() {
         }
     }
     private fun closeMusic() {
+        runtime?.setSendspinPairing("", "")
         musicRetry?.cancel()
         musicRetry = null
         musicDiscovery.stop()
@@ -379,12 +394,16 @@ class EncoreService : Service() {
     }
     fun disconnectMusic() {
         closeMusic()
-        musicProblem(if (musicPrefs.edit().putBoolean("enabled", false).commit()) "" else "Could not save Sendspin setting")
+        if (musicPrefs.edit().putBoolean("enabled", false).commit()) {
+            runtime?.setSendspinEnabled(false)
+            musicProblem("")
+        } else musicProblem("Could not save Sendspin setting")
     }
     fun revokeMusic() {
         closeMusic()
         runCatching {
             check(musicPrefs.edit().putBoolean("enabled", false).commit())
+            runtime?.setSendspinEnabled(false)
             host().revokeAll()
             musicHost = null
             musicProblem("")

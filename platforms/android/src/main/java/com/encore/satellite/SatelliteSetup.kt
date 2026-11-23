@@ -14,8 +14,8 @@ import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 
-internal enum class SetupStage { NEW, CORE, BLUETOOTH, EXTRAS, DONE }
-internal enum class SetupStep { MICROPHONE, NOTIFICATIONS, PAIR, VOICE, BLUETOOTH, EXTRAS }
+internal enum class SetupStage { NEW, CORE, MUSIC, BLUETOOTH, EXTRAS, DONE }
+internal enum class SetupStep { MICROPHONE, NOTIFICATIONS, PAIR, VOICE, MUSIC, BLUETOOTH, EXTRAS }
 
 internal data class AndroidSetupStatus(val notifications: Boolean = false, val home: Boolean? = null, val remoteInstalls: String? = null)
 
@@ -43,6 +43,7 @@ internal fun setupStep(stage: SetupStage, state: EncoreState, microphone: Boolea
             offerNotifications && state.esphome != "waiting" && state.esphome != "expired" -> SetupStep.NOTIFICATIONS
             else -> SetupStep.PAIR
         }
+        stage == SetupStage.MUSIC -> SetupStep.MUSIC
         stage == SetupStage.BLUETOOTH && bluetoothPending != false -> SetupStep.BLUETOOTH
         else -> SetupStep.EXTRAS
     }
@@ -50,7 +51,8 @@ internal fun setupStep(stage: SetupStage, state: EncoreState, microphone: Boolea
 
 @Composable internal fun SatelliteSetup(step: SetupStep, state: EncoreState, android: AndroidSetupStatus,
     onMicrophone: () -> Unit, onAppPermissions: (() -> Unit)?, onNotifications: () -> Unit, onSkipNotifications: () -> Unit,
-    onPair: () -> Unit, onVoiceContinue: () -> Unit, onBluetooth: () -> Unit, onExtras: () -> Unit,
+    onPair: () -> Unit, onVoiceContinue: () -> Unit, onMusicEnable: () -> Unit, onMusicDisable: () -> Unit, onMusicContinue: () -> Unit,
+    onBluetooth: () -> Unit, onExtras: () -> Unit,
     onChooseHome: () -> Unit, onRemoteInstalls: () -> Unit, onDone: () -> Unit) {
     BackHandler(enabled = step == SetupStep.EXTRAS, onBack = onDone)
     BoxWithConstraints(Modifier.fillMaxSize().systemBarsPadding(), contentAlignment = Alignment.Center) {
@@ -63,6 +65,7 @@ internal fun setupStep(stage: SetupStage, state: EncoreState, microphone: Boolea
                 SetupStep.NOTIFICATIONS -> "Notifications (optional)"
                 SetupStep.PAIR -> "Home Assistant setup"
                 SetupStep.VOICE -> "Connect voice"
+                SetupStep.MUSIC -> "Music (optional)"
                 SetupStep.BLUETOOTH -> "Bluetooth proxy"
                 SetupStep.EXTRAS -> "Finish setup"
             }
@@ -102,6 +105,20 @@ internal fun setupStep(stage: SetupStage, state: EncoreState, microphone: Boolea
                     SetupText(state.voiceReadiness, Modifier.semantics { liveRegion = LiveRegionMode.Polite })
                     SetupText("When voice is ready, use the assistant button to test a turn. You can continue setup before voice connects.")
                     Button(onClick = onVoiceContinue) { Text("Continue setup") }
+                }
+                SetupStep.MUSIC -> {
+                    SetupText("Use this tablet as a Music Assistant player with Sendspin. When Music Assistant is connected to Home Assistant and supports automatic pairing, there’s no token to enter.")
+                    SetupText(if (state.music.enabled) "Music is on. You can continue without waiting for it to connect."
+                        else "Music is off. You can turn it on here or later in Settings.")
+                    Button(onClick = onMusicContinue) { Text("Continue setup") }
+                    if (state.music.enabled) {
+                        TextButton(onClick = onMusicDisable) { Text("Turn off music") }
+                    } else {
+                        TextButton(onClick = onMusicEnable, enabled = state.running && state.esphome == "paired") { Text("Enable music") }
+                    }
+                    if (state.musicProblem.isNotEmpty()) {
+                        SetupText(state.musicProblem, Modifier.semantics { liveRegion = LiveRegionMode.Polite })
+                    }
                 }
                 SetupStep.BLUETOOTH -> {
                     SetupText("This satellite can relay nearby Bluetooth advertisements to Home Assistant. The proxy is On for this fresh install, but it won't scan until you allow access and scanning.")

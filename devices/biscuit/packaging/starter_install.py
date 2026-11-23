@@ -141,7 +141,7 @@ def install_native_locked(adb, args, manifest, files, name, *, wifi=None):
     for slot in "ab":
         adb.write(f"{store}/slots/{slot}/rootfs.tar.gz", files["rootfs.tar.gz"])
     adb.write(f"{store}/highest-revision", f"{manifest['package_revision']}\n".encode())
-    adb.write(f"{next_data}/config.json", json.dumps({"schema": 1, "name": name, "bluetooth_proxy": True}).encode() + b"\n")
+    adb.write(f"{next_data}/config.json", json.dumps({"schema": 1, "name": name, "bluetooth_proxy": True, "sendspin": True}).encode() + b"\n")
     if wifi is not None:
         adb.write(f"{next_data}/wpa_supplicant.conf", wifi)
     adb.shell(f"mv {next_data} {STATE}; sync")
@@ -398,7 +398,10 @@ def install_locked(adb, args, manifest, rootfs, recovery, name, *, wifi=None):
         adb.write(f"{pending}/slots/{slot}.state", b"held\n")
     adb.write(f"{pending}/recovery.img", recovery)
     adb.write(f"{pending}/manifest.json", json.dumps(manifest, sort_keys=True).encode() + b"\n")
-    adb.write(f"{next_data}/config.json", json.dumps({"schema": 1, "name": name, "bluetooth_proxy": True}).encode() + b"\n")
+    config = {"schema": 1, "name": name, "bluetooth_proxy": True}
+    if fresh:
+        config["sendspin"] = True
+    adb.write(f"{next_data}/config.json", json.dumps(config).encode() + b"\n")
     if wifi is not None:
         adb.write(f"{next_data}/wpa_supplicant.conf", wifi)
     if key is not None:

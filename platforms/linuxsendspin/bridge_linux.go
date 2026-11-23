@@ -77,13 +77,16 @@ type Options struct {
 	// OnReadiness runs on the IPC reader. It must return promptly and receives
 	// a zero snapshot when the reader exits.
 	OnReadiness func(Readiness)
+	// OnPairing runs once on the IPC reader when the SDK has loaded its identity.
+	// The token is a secret and must not be logged.
+	OnPairing func(clientID, token string)
 }
 
 // Epochs passed to Output never repeat when the host retries Run.
 var outputEpoch atomic.Uint64
 
 const (
-	ipcVersion  = 3
+	ipcVersion  = 4
 	headerSize  = 32
 	maxPCM      = 16384
 	msgStart    = 1
@@ -94,6 +97,7 @@ const (
 	msgPlayed   = 6
 	msgCommand  = 7
 	msgReady    = 8
+	msgPairing  = 9
 	readyBit    = uint32(1 << 31)
 	playingBit  = uint32(1 << 30)
 	stoppedBit  = uint32(1 << 29)
@@ -325,6 +329,7 @@ func Run(ctx context.Context, o Options) error {
 			}
 		}()
 		var last, lastRequest, lastReady uint64
+		var pairingReceived bool
 		for {
 			b := make([]byte, headerSize+maxPCM)
 			n, _, flags, _, e := conn.ReadMsgUnix(b, nil)
@@ -343,6 +348,16 @@ func Run(ctx context.Context, o Options) error {
 			}
 			valid := false
 			switch p.kind {
+			case msgPairing:
+				const clientIDSize, tokenSize = 43, 107
+				valid = !pairingReceived && p.epoch == 0 && p.id == 0 && p.value == 0 &&
+					len(p.data) == clientIDSize+tokenSize && string(p.data[clientIDSize:clientIDSize+4]) == "SP:0"
+				if valid {
+					pairingReceived = true
+					if o.OnPairing != nil {
+						o.OnPairing(string(p.data[:clientIDSize]), string(p.data[clientIDSize:]))
+					}
+				}
 			case msgReady:
 				ready := p.value&readyBit != 0
 				playback := p.value & (playingBit | stoppedBit)

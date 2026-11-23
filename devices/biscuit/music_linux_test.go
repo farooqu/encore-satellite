@@ -332,6 +332,7 @@ func TestMusicSwitchLifecycleAndIndependentPersistence(t *testing.T) {
 	player := newSpeaker(&speakerPCM{})
 	defer player.Close()
 	m := newMusic(c, s, player)
+	const clientID, token = "fixture-sendspin-id", "SP:0fixture"
 	url := "ws://192.0.2.4:8931/sendspin"
 	m.discover = func(context.Context) (string, error) { return url, nil }
 	started := make(chan string, 8)
@@ -342,14 +343,39 @@ func TestMusicSwitchLifecycleAndIndependentPersistence(t *testing.T) {
 			maximum.Store(n)
 		}
 		defer live.Add(-1)
+		o.OnPairing(clientID, token)
 		started <- o.URL
 		<-ctx.Done()
 		return ctx.Err()
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() { defer close(done); m.Run(ctx) }()
-	defer func() { cancel(); <-done }()
+	ctx, cancel := context.WithCancel(t.Context())
+	key, err := esphome.GeneratePSK()
+	if err != nil {
+		t.Fatal(err)
+	}
+	l, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &biscuitControls{Proxy: bluetooth.New(managementRadio{}, bluetooth.Options{}), player: player, music: m}
+	done := make(chan error, 1)
+	go func() { done <- d.Serve(ctx, l, esphome.Info{Name: c.Name}, key) }()
+	defer func() { cancel(); l.Close(); <-done }()
+	peer := newManagementPeer(t, l.Addr().String(), key)
+	checkPairing := func(status api.SendspinPairingTokenStatus, wantID, wantToken string) {
+		t.Helper()
+		peer.send(&api.DeviceCapabilitiesRequest{})
+		caps := peer.receive().(*api.DeviceCapabilitiesResponse).GetSendspin()
+		if caps.GetFeatureFlags() != esphome.SendspinFeaturePairingToken || caps.GetClientId() != wantID {
+			t.Fatal("wrong Sendspin capability or identity")
+		}
+		peer.send(&api.SendspinPairingTokenRequest{})
+		response := peer.receive().(*api.SendspinPairingTokenResponse)
+		if response.GetStatus() != status || response.GetToken() != wantToken {
+			t.Fatal("wrong Sendspin credential response")
+		}
+	}
+	checkPairing(api.SendspinPairingTokenStatus_SENDSPIN_PAIRING_TOKEN_STATUS_DISABLED, "", "")
 	select {
 	case <-started:
 		t.Fatal("default off started music")
@@ -375,6 +401,7 @@ func TestMusicSwitchLifecycleAndIndependentPersistence(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("music did not start")
 	}
+	checkPairing(api.SendspinPairingTokenStatus_SENDSPIN_PAIRING_TOKEN_STATUS_OK, clientID, token)
 	got, err := LoadConfig(s.path)
 	if err != nil || !got.BluetoothProxy || !got.Sendspin || got.Name != c.Name {
 		t.Fatalf("independent setting lost: %+v %v", got, err)
@@ -382,6 +409,7 @@ func TestMusicSwitchLifecycleAndIndependentPersistence(t *testing.T) {
 	if err := m.configure(false); err != nil {
 		t.Fatal(err)
 	}
+	checkPairing(api.SendspinPairingTokenStatus_SENDSPIN_PAIRING_TOKEN_STATUS_DISABLED, "", "")
 	until := time.Now().Add(time.Second)
 	for live.Load() != 0 {
 		if time.Now().After(until) {

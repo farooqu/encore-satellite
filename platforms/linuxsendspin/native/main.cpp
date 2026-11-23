@@ -249,7 +249,7 @@ public:
 
 // 32-byte little-endian header: ESPN, u16 version, u16 type,
 // u64 epoch, u64 request/timestamp, u32 payload bytes, u32 value.
-static constexpr uint16_t ipc_version = 3;
+static constexpr uint16_t ipc_version = 4;
 static Bytes frame(uint16_t kind, uint64_t epoch = 0, uint64_t id = 0,
                    uint32_t value = 0, const uint8_t *data = nullptr,
                    size_t n = 0) {
@@ -571,6 +571,16 @@ int main(int argc, char **argv) {
       client.stop();
       return 0;
     }
+    // Give the local host the pairing credential before connecting to Music
+    // Assistant. It never goes on the discovery or unpaired network connection.
+    const auto token = client.client_pairing_token();
+    check(token.has_value() && client.client_id().size() == 43);
+    std::string pairing = client.client_id();
+    pairing.append(token->data(), token->size());
+    const auto credentials = frame(9, 0, 0, 0,
+        reinterpret_cast<const uint8_t *>(pairing.data()), pairing.size());
+    check(send(3, credentials.data(), credentials.size(), MSG_DONTWAIT | MSG_NOSIGNAL) ==
+          ssize_t(credentials.size()));
     IPCWorker worker(sink, client, controller);
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(45);
     bool admitted = false;

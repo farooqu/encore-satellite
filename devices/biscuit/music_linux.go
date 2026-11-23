@@ -63,6 +63,7 @@ type musicService struct {
 
 type musicWorker struct {
 	revision     uint64
+	pairing      esphome.SendspinPairing // guarded by musicService.mu
 	ready        linuxsendspin.Readiness // guarded by musicService.mu
 	commands     chan linuxsendspin.CommandRequest
 	pausePending time.Time // physical Pause must be followed promptly by Stopped
@@ -90,6 +91,19 @@ func (m *musicService) snapshot() (bool, uint64) {
 	defer m.mu.Unlock()
 	return m.enabled, m.revision
 }
+
+func (m *musicService) sendspinPairing() esphome.SendspinPairing {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.enabled {
+		return esphome.SendspinPairing{Status: api.SendspinPairingTokenStatus_SENDSPIN_PAIRING_TOKEN_STATUS_DISABLED}
+	}
+	if w := m.worker; w != nil && w.revision == m.revision {
+		return w.pairing
+	}
+	return esphome.SendspinPairing{}
+}
+
 func (m *musicService) configure(enabled bool) error {
 	m.configMu.Lock()
 	defer m.configMu.Unlock()
@@ -255,6 +269,13 @@ func (m *musicService) Run(ctx context.Context) {
 			cancel = childCancel
 			done = make(chan error, 1)
 			opts := linuxsendspin.Options{Name: m.name, StateDir: musicStateDir, Executable: musicExecutable, Output: m.player, Commands: w.commands,
+				OnPairing: func(clientID, token string) {
+					m.mu.Lock()
+					defer m.mu.Unlock()
+					if m.worker == w && w.revision == m.revision && childCtx.Err() == nil {
+						w.pairing = esphome.SendspinPairing{ClientID: clientID, Token: token}
+					}
+				},
 				OnReadiness: func(ready linuxsendspin.Readiness) {
 					m.mu.Lock()
 					defer m.mu.Unlock()
@@ -678,6 +699,9 @@ func (d *biscuitControls) Serve(ctx context.Context, l net.Listener, info esphom
 	defer func() { cancel(); <-done }()
 	info.BluetoothFeatures = d.Features()
 	info.VoiceFeatures = 0 // Common controls are not a second Assist voice endpoint.
+	if d.music != nil {
+		info.Sendspin = d.music.sendspinPairing
+	}
 	return (&esphome.Server{Info: info, PSK: &key, Handler: d, WriteTimeout: 2 * time.Second,
 		OnSetEncryptionKey: esphomepairing.RefuseKey,
 	}).Serve(ctx, l)

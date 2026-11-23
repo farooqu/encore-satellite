@@ -58,6 +58,11 @@ type Runtime struct {
 	engine              *session.Engine
 	voice               *incubator.Server
 	control             *esphome.Server
+	sendspinHost        SendspinHost
+	sendspinEnabled     bool
+	sendspinChanges     chan struct{}
+	sendspinStateMu     sync.Mutex
+	sendspinPairing     esphome.SendspinPairing
 	announcements       *announcements.Player
 	announcementStateMu sync.Mutex
 	running             context.Context
@@ -224,6 +229,9 @@ func (r *Runtime) startPaired(ctx context.Context, key esphome.PSK) error {
 	r.serveListener(ctx, vl, r.voice.Serve)
 	info := r.controlInfo()
 	info.BluetoothFeatures = r.proxy.Features()
+	if r.sendspinHost != nil {
+		info.Sendspin = r.musicPairing
+	}
 	control := &esphome.Server{Info: info, PSK: &key, Handler: r, WriteTimeout: 2 * time.Second,
 		OnSetEncryptionKey: esphomepairing.RefuseKey}
 	r.control = control
@@ -236,6 +244,8 @@ func (r *Runtime) startPaired(ctx context.Context, key esphome.PSK) error {
 				return
 			case <-r.announcements.Changes():
 				_ = r.sendAnnouncementState(control.Broadcast)
+			case <-r.sendspinChanges:
+				_ = r.sendMusicState(control.Broadcast)
 			}
 		}
 	})
@@ -344,6 +354,7 @@ func (r *Runtime) Close() {
 	if cancel != nil {
 		cancel()
 		r.control = nil
+		r.sendspinPairing = esphome.SendspinPairing{}
 		r.pairing = ""
 		r.engine.SetMuted(true)
 		// Shutdown gates this runtime without changing the saved preference.
@@ -488,7 +499,14 @@ func (r *Runtime) writable() controls.Bindings {
 	r.mu.Lock()
 	dashboard := r.dashboard
 	hasUpdater := r.updater != nil
+	musicHost := r.sendspinHost
 	r.mu.Unlock()
+	if musicHost != nil {
+		bindings = append(bindings, controls.Sendspin.Bind(func(_ *esphome.Conn, m *api.SwitchCommandRequest) error {
+			musicHost.RequestSendspinEnabled(m.State)
+			return nil
+		}))
+	}
 	if dashboard != nil {
 		bindings = append(bindings, controls.ReloadDashboard.Bind(func(_ *esphome.Conn, _ *api.ButtonCommandRequest) error {
 			r.mu.Lock()
@@ -561,6 +579,9 @@ func (r *Runtime) Handle(ctx context.Context, c *esphome.Conn, msg proto.Message
 			return err
 		}
 		if err := r.sendAnnouncementState(c.Send); err != nil {
+			return err
+		}
+		if err := r.sendMusicState(c.Send); err != nil {
 			return err
 		}
 		return r.proxy.Handle(ctx, c, msg)

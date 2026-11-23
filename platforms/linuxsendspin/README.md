@@ -134,19 +134,19 @@ cancellation/bounded-lifecycle contract. The child environment is reduced to
 `LANG=C`/`LC_ALL=C`; no host credential environment is forwarded. SDK stdout and
 stderr are not forwarded, to prevent future upstream secret logging.
 
-## IPC v3
+## IPC v4
 
 One inherited **AF_UNIX SOCK_SEQPACKET fd 3**, no filesystem socket or listener.
-Version 3 adds group playback and membership to Readiness without changing PCM
+Version 4 adds the private pairing credential packet without changing PCM
 framing or the on-disk trust format. The Go runtime and companion ship together
-in the same Biscuit rootfs; replace or roll them back together. Mixed v2/v3
+in the same Biscuit rootfs; replace or roll them back together. Mixed-version
 binaries fail closed on the version mismatch, not on existing pairing state.
 All packets have a 32-byte little-endian header:
 
 | Offset | Field |
 |---|---|
 | 0 | `ESPN` magic (4 bytes) |
-| 4 | version u16 = 3 |
+| 4 | version u16 = 4 |
 | 6 | kind u16 |
 | 8 | stream or controller generation u64 |
 | 16 | request ID / timestamp / opaque group membership revision u64 |
@@ -166,6 +166,10 @@ mask, group playback, or group identity advances the controller generation.
 Commands and readiness use a separate generation from PCM; both ends discard
 commands for old controller generations. Neither frame contains a payload;
 Command `id` is always zero. Pairing-only connections are not ready.
+Kind 9 carries the 43-byte Sendspin client ID followed by its 107-byte pairing
+token; metadata fields are all zero. The companion sends it once after SDK
+startup before connecting. The inherited local socket is the only destination
+in `run` mode; the device host may use it for the authenticated ESPHome handoff.
 Maximum accepted packet is 16 KiB PCM + header; native
 writes are at most **480 frames / 1920 bytes (10 ms)** each. The SDK callback
 accepts into a four-block native queue (at most 40 ms including the block in
@@ -185,10 +189,10 @@ truncated packets, queue saturation, output faults, and lost critical state fail
 closed. Fixed exit codes: 70 state/startup/other failure, 71 socket send failure,
 72 acceptance ACK deadline lost, 73 negotiated format mismatch, 74 malformed IPC,
 75 connection lost or not admitted within 45 seconds. A connected receiver
-waiting for an operator to pair stays online. The host owns retries.
+waiting for pairing stays online. The host owns retries.
 Run errors retain child exit status without forwarding SDK logs.
 
-## Pairing and revocation (maintenance only)
+## Manual pairing and revocation (maintenance only)
 
 Stop the receiver/supervisor first. These commands take the same nonblocking
 exclusive file lock as `run`; they refuse to operate while a companion is active.
