@@ -76,6 +76,7 @@ func Open(directory string, output Audio) (*Runtime, error) {
 	return &Runtime{voice: &incubator.Server{
 		Engine: session.New(androidhost.NewPlayback(output)), Name: name, MAC: mac.String(),
 		Version: "0.1.0-personal", EnableModels: true,
+		EarlyTranscript: true, ReplyChunks: true, TimerNames: true,
 	}}, nil
 }
 

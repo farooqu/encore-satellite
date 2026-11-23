@@ -16,7 +16,7 @@ data class MusicState(
     val artwork: Bitmap? = null,
 )
 
-data class TimerCountdown(val seconds: Long) {
+data class TimerCountdown(val seconds: Long, val name: String = "") {
     val label: String get() {
         val hours = seconds / 3600
         val tail = (seconds % 60).toString().padStart(2, '0')
@@ -25,7 +25,7 @@ data class TimerCountdown(val seconds: Long) {
     }
 }
 
-data class RingingAlert(val sequence: Long, val name: String, val count: Int)
+data class RingingAlert(val sequence: Long, val name: String, val count: Int, val names: List<String> = emptyList())
 
 data class EncoreState(
     val running: Boolean = false,
@@ -143,9 +143,14 @@ data class EncoreState(
                 muted = voice.getBoolean("muted"), models = data.getInt("models"),
                 heard = voice.optString("heard"), reply = voice.optString("reply"), alert = voice.getBoolean("alert"),
                 timers = (0 until (timers?.length() ?: 0)).mapNotNull { i ->
-                    timers?.optJSONObject(i)?.optLong("seconds")?.takeIf { it > 0 }?.let(::TimerCountdown)
+                    val timer = timers?.optJSONObject(i) ?: return@mapNotNull null
+                    timer.optLong("seconds").takeIf { it > 0 }?.let { TimerCountdown(it, timer.optString("name")) }
                 },
-                ring = ring?.let { RingingAlert(it.optLong("sequence"), it.optString("name"), it.optInt("count")) },
+                ring = ring?.let {
+                    val names = it.optJSONArray("names")
+                    RingingAlert(it.optLong("sequence"), it.optString("name"), it.optInt("count"),
+                        (0 until (names?.length() ?: 0)).map { i -> names?.optString(i).orEmpty() })
+                },
                 generation = voice.optLong("generation"), turn = voice.optLong("turn"), monitorId = voice.optLong("monitor_id"),
                 voiceActive = voice.optBoolean("active"), announcing = voice.optBoolean("announcing"), inhibited = voice.optBoolean("inhibited"),
                 talkAllowed = voice.optBoolean("talk_allowed"),

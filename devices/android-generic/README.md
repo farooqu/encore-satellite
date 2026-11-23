@@ -356,6 +356,11 @@ Home support on Portal.
   slow wake decision gets only a small, silent cue; a rejected or lost wake
   never opens the panel. Listening gives way to what Encore heard, the reply,
   and any server-requested follow-ups from that call.
+- With the [native display extensions](https://github.com/farooqu/voice-incubator/blob/9a1bcf59060c315e2d3c2cccc3893daf493bb483/voice_incubator/protocol.py),
+  the panel can show Heard before final recognition and update the reply as
+  text arrives. Reply text can end at a prefix; it does not signal playback.
+  The timer sheet uses supplied countdown and ringing names without changing
+  Stop. Older servers still show their single reply and legacy timer labels.
 - The panel grows to fit, up to half the screen, then scrolls under a fixed
   header. **×** or **Back** stops an active turn, including playback drain;
   after normal completion, the transcript stays for six seconds or until

@@ -50,6 +50,8 @@ internal class MicScreen(
     private val endpoint: TextView
     private val problem: TextView
     private val transcript: TextView
+    private val ringing: TextView
+    private val countdowns: TextView
     private var assistant: Button? = null
 
     var serverAddress: String
@@ -80,6 +82,10 @@ internal class MicScreen(
         guidance = mic.label("", 15f, onAccentCard, margin = 5)
         talk = mic.action("Talk", filled = true, margin = 16, onTalk)
         transcript = mic.label("", 15f, onAccentCard, margin = 14)
+        ringing = mic.label("", 15f, onAccentCard, margin = 14, medium = true).apply {
+            accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
+        }
+        countdowns = mic.label("", 15f, onAccentCard, margin = 14)
         problem = mic.label("", 14f, onAccentCard, margin = 12, medium = true).apply {
             accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
         }
@@ -144,6 +150,8 @@ internal class MicScreen(
         })
         problem.show(localProblem.ifEmpty { state.problem })
         transcript.show(state.transcript)
+        ringing.show(state.ringing)
+        countdowns.show(state.countdowns)
         endpoint.show(if (state.armed) state.endpoint else "")
         connection.visibility = if (!state.armed || state.endpoint.isNotEmpty()) View.VISIBLE else View.GONE
         setup.visibility = if (state.armed) View.GONE else View.VISIBLE

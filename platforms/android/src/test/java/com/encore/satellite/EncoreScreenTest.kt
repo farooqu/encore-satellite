@@ -433,15 +433,28 @@ class EncoreScreenTest {
         compose.onNodeWithContentDescription("Encore Satellite").assertIsDisplayed()
         oldIndicator.assertDoesNotExist()
         capture("tablet-local-listening")
+        val early = "What’s on my…"
         val question = "What’s on my calendar?"
+        val prefix = "You have dinner with Sam"
         val reply = "You have dinner with Sam at seven. Want me to set a reminder?"
-        compose.runOnIdle { state.value = state.value.copy(phase = "working", input = "", heard = question) }
+        compose.runOnIdle { state.value = state.value.copy(phase = "working", input = "", heard = early) }
         advance(64)
         compose.onNodeWithText("Listening…").assertDoesNotExist()
+        compose.onNodeWithContentDescription("You: $early").assertIsDisplayed()
+        assertVoiceStatusIsAccessibleOnly("Processing")
+        capture("tablet-early-transcript")
+        compose.runOnIdle { state.value = state.value.copy(phase = "speaking", outputState = "queued", outputOwner = "voice", heard = question, reply = prefix) }
+        advance(64)
+        compose.onNodeWithContentDescription("You: $early").assertDoesNotExist()
         compose.onNodeWithContentDescription("You: $question").assertIsDisplayed()
-        compose.runOnIdle { state.value = state.value.copy(phase = "speaking", outputState = "queued", outputOwner = "voice", reply = reply) }
+        compose.onNodeWithContentDescription("Encore: $prefix").assertIsDisplayed()
+        assertVoiceStatusIsAccessibleOnly("Waiting for response audio")
+        capture("tablet-streaming-reply")
+        compose.runOnIdle { state.value = state.value.copy(reply = reply) }
         advance(64)
         compose.onNodeWithContentDescription("Encore: $reply").assertIsDisplayed()
+        compose.onNodeWithContentDescription("Encore: $prefix").assertDoesNotExist()
+        assertVoiceStatusIsAccessibleOnly("Waiting for response audio")
         assertTrue(panel.fetchSemanticsNode().boundsInRoot.height > compact.height)
         compose.runOnIdle { state.value = state.value.copy(turn = 4, invocation = "follow_up", phase = "listening",
             input = "listening", accepted = false, outputState = "", outputOwner = "", heard = "", reply = "") }
@@ -574,7 +587,9 @@ class EncoreScreenTest {
             talkAllowed = false, talkReady = false, wakeReady = false)
         val ringing = idle.copy(alert = true, voiceActive = true, outputOwner = "alert", outputState = "playing",
             ring = RingingAlert(41, "Pasta", 2))
-        val state = mutableStateOf(ringing)
+        val state = mutableStateOf(ringing.copy(
+            ring = RingingAlert(40, "Tea", 3, listOf("Pasta", "", "Tea")),
+            timers = listOf(TimerCountdown(278, "Rice"), TimerCountdown(552, "Roast"))))
         val stops = mutableListOf<Long>()
         compose.setContent {
             EncoreScreen(state.value, { fail("Opened microphone") }, { fail("Started voice turn") },
@@ -585,6 +600,19 @@ class EncoreScreenTest {
                 onStopAlert = { stops += it; state.value = muted })
         }
         compose.onNodeWithTag("voice-edge-glow").assertIsDisplayed()
+        for ((name, time) in listOf("Rice" to "4:38", "Roast" to "9:12")) {
+            val rowLabel = compose.onNodeWithText(name).assertIsDisplayed().fetchSemanticsNode().boundsInRoot
+            val rowTime = compose.onNodeWithText(time).assertIsDisplayed().fetchSemanticsNode().boundsInRoot
+            assertEquals("$name should label $time", rowTime.center.y, rowLabel.center.y, 1f)
+        }
+        compose.onNodeWithText("Pasta, Timer, Tea").assertIsDisplayed()
+        compose.onNodeWithText("3 alerts ringing").assertIsDisplayed()
+        compose.onNodeWithTag("stop-alert").assertIsDisplayed()
+        capture("android-timer-ringing-named")
+        compose.runOnIdle { state.value = ringing }
+        compose.onNodeWithText("Pasta, Timer, Tea").assertDoesNotExist()
+        compose.onNodeWithText("Rice").assertDoesNotExist()
+        compose.onNodeWithText("Roast").assertDoesNotExist()
         compose.onNodeWithText("Pasta").assertIsDisplayed()
         compose.onNodeWithText("2 alerts ringing").assertIsDisplayed()
         compose.onNodeWithText("9:12").assertIsDisplayed()
@@ -609,7 +637,7 @@ class EncoreScreenTest {
     }
 
     @Test fun runningCountdownsShareTheListeningSheet() {
-        val idle = ready().copy(timers = listOf(TimerCountdown(93), TimerCountdown(3725)))
+        val idle = ready().copy(timers = listOf(TimerCountdown(93, "Tea"), TimerCountdown(3725)))
         val state = mutableStateOf(idle)
         compose.setContent {
             EncoreScreen(state.value, {}, {}, { fail("Closing timers cancelled a voice turn") }, {}, { "" }, { "" }, {}, {}, {}, {})
@@ -618,6 +646,8 @@ class EncoreScreenTest {
         compose.onNodeWithText("1:33 · 2 timers").assertIsDisplayed()
         capture("android-timer-chip")
         chip.performTouchInput { click() }
+        compose.onNodeWithText("Tea").assertIsDisplayed()
+        compose.onNodeWithText("Timer").assertIsDisplayed()
         compose.onNodeWithText("1:02:05").assertIsDisplayed()
         capture("android-timer-running")
         compose.runOnIdle { state.value = idle.copy(timers = listOf(TimerCountdown(92), TimerCountdown(3724))) }
@@ -651,6 +681,9 @@ class EncoreScreenTest {
         val timerState = parse(""""phase":"speaking","timers":[{"seconds":92},{"seconds":0}],"ring":{"sequence":4,"name":"Pasta","count":2}""")
         assertEquals(listOf(TimerCountdown(92)), timerState.timers)
         assertEquals(RingingAlert(4, "Pasta", 2), timerState.ring)
+        val named = parse(""""phase":"idle","timers":[{"seconds":0,"name":"Expired"},{"seconds":91,"name":"Tea"},{"seconds":77}],"ring":{"sequence":5,"name":"Bread","count":3,"names":["Pasta","","Bread"]}""")
+        assertEquals(listOf(TimerCountdown(91, "Tea"), TimerCountdown(77)), named.timers)
+        assertEquals(RingingAlert(5, "Bread", 3, listOf("Pasta", "", "Bread")), named.ring)
         val work = parse(""""phase":"working","active":true,"accepted":true,"capture_ready":true,"night":"off","speaker":{"name":"Fixture","color_known":true,"rgb":[255,0,0]}""")
         assertTrue(work.accepted)
         assertEquals(listOf(255, 0, 0), work.speakerRGB)

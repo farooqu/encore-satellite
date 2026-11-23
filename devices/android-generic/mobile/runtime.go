@@ -128,7 +128,10 @@ func OpenWithBluetoothDefault(directory string, output Audio, supported bool) (*
 	r.microphone = sensors.NewMicrophone(r.config.Muted)
 	// Live Monitor uses the primary capture and the foreground indicator gate.
 	// Keep the separate wire AEC and intercom capabilities off.
-	r.voice = &incubator.Server{Engine: r.engine, Name: r.Name(), MAC: r.config.MAC, Version: "0.1.0-android", EnableModels: true, Monitor: true}
+	r.voice = &incubator.Server{
+		Engine: r.engine, Name: r.Name(), MAC: r.config.MAC, Version: "0.1.0-android", EnableModels: true, Monitor: true,
+		EarlyTranscript: true, ReplyChunks: true, TimerNames: true,
+	}
 	r.proxy = r.newBluetooth(nil)
 	return r, nil
 }

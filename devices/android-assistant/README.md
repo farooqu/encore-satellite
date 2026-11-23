@@ -111,6 +111,25 @@ Automatic wake UI does not turn on the display or show over
 the lock screen. Actual window behavior and power-button mapping vary by phone
 and need device testing.
 
+### Native display events
+
+Personal Mic keeps native protocol 2 and advertises `early_transcript`,
+`reply_chunks`, and `timer_names` in HELLO. The [fork’s protocol at `9a1bcf5`](https://github.com/farooqu/voice-incubator/blob/9a1bcf59060c315e2d3c2cccc3893daf493bb483/voice_incubator/protocol.py)
+allows an early Heard line and incremental, best-effort reply text. The final
+recognition result replaces the early line. Reply text appends to the one
+`responding` event and may remain a prefix at hangup; neither display event
+changes how audio is played or acknowledged. The main screen shows countdowns
+and ringing names while the satellite is connected. Older servers still show
+their single reply, unnamed countdowns and legacy ringing name/count.
+
+Voice PE at `8ba314e` uses `responding` to change its LED effect and arm spoken
+Stop, and uses timer events for countdown LEDs and the ringing effect. Its ring
+doesn't display text. Personal Mic uses the phone screen for these optional
+captions and names without changing Stop, playback, or the manual-only
+connection lifetime below. The native TCP tests cover captions around PCM and
+drain, turn fences, and legacy timers; the Personal Mic UI tests cover the
+rendered labels and captions.
+
 ### Voice PE comparison and route check
 
 [Voice PE firmware `8ba314e`](https://github.com/OHF-Voice/firmware-voice-incubator/blob/8ba314e68ff4a23b5c08b78fa21926104bbabba2/PROTOCOL.md)

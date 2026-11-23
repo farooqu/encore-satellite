@@ -78,13 +78,18 @@ func TestPersonalMicTrustedPeerAndVoice(t *testing.T) {
 		return body
 	}
 	var hello struct {
-		MAC        string `json:"mac"`
-		WakeFormat string `json:"wake_format"`
-		Monitor    bool   `json:"monitor"`
-		MonitorAEC bool   `json:"monitor_aec"`
-		Intercom   bool   `json:"intercom"`
+		Protocol        int    `json:"protocol"`
+		MAC             string `json:"mac"`
+		WakeFormat      string `json:"wake_format"`
+		Monitor         bool   `json:"monitor"`
+		MonitorAEC      bool   `json:"monitor_aec"`
+		Intercom        bool   `json:"intercom"`
+		EarlyTranscript bool   `json:"early_transcript"`
+		ReplyChunks     bool   `json:"reply_chunks"`
+		TimerNames      bool   `json:"timer_names"`
 	}
-	if err := json.Unmarshal(receive(1), &hello); err != nil || hello.MAC != r.MAC() || hello.WakeFormat != "mixednet" || hello.Monitor || hello.MonitorAEC || hello.Intercom {
+	if err := json.Unmarshal(receive(1), &hello); err != nil || hello.Protocol != 2 || hello.MAC != r.MAC() || hello.WakeFormat != "mixednet" ||
+		hello.Monitor || hello.MonitorAEC || hello.Intercom || !hello.EarlyTranscript || !hello.ReplyChunks || !hello.TimerNames {
 		t.Fatalf("wrong advertised capabilities: %+v (%v)", hello, err)
 	}
 	var snapshot presentation.State
@@ -199,17 +204,21 @@ func TestPersonalMicTrustedPeerAndVoice(t *testing.T) {
 	if !r.voice.Engine.Snapshot().Accepted {
 		t.Fatal("stale overlay stop cancelled a newer wake")
 	}
+	send(0x12, []byte(`{"type":"transcript","data":{"text":"Turn on the light"}}`))
 	send(0x12, []byte(`{"type":"recognized","data":{"text":"Turn on the porch light"}}`))
-	send(0x12, []byte(`{"type":"responding","data":{"text":"The light is on"}}`))
+	send(0x12, []byte(`{"type":"responding","data":{"text":""}}`))
+	send(0x12, []byte(`{"type":"reply_chunk","data":{"text":"The light is on"}}`))
 	send(0x13, []byte(`{"reason":"done","listen":true}`))
 	if call := receive(2); !bytes.Contains(call, []byte(`"wake_word":"follow_up"`)) {
 		t.Fatalf("missing follow-up call: %s", call)
 	}
-	heard, reply, follow := readPresentation(), readPresentation(), readPresentation()
-	if heard.Turn != winner.Turn || heard.Heard != "Turn on the porch light" || heard.Reply != "" ||
-		reply.Turn != winner.Turn || reply.Heard != heard.Heard || reply.Reply != "The light is on" ||
+	early, heard, responding, reply, follow := readPresentation(), readPresentation(), readPresentation(), readPresentation(), readPresentation()
+	if early.Turn != winner.Turn || early.Heard != "Turn on the light" || early.Output.State != "" ||
+		heard.Turn != winner.Turn || heard.Heard != "Turn on the porch light" || heard.Reply != "" ||
+		responding.Reply != "" || responding.Output.State != "queued" ||
+		reply.Turn != winner.Turn || reply.Heard != heard.Heard || reply.Reply != "The light is on" || reply.Output != responding.Output ||
 		follow.Generation != winner.Generation || follow.Turn <= winner.Turn || follow.Invocation != "follow_up" || follow.Heard != "" || follow.Reply != "" {
-		t.Fatalf("transcript snapshots lost or out of order: heard=%+v reply=%+v follow=%+v", heard, reply, follow)
+		t.Fatalf("transcript snapshots lost or out of order: early=%+v heard=%+v responding=%+v reply=%+v follow=%+v", early, heard, responding, reply, follow)
 	}
 	send(0x13, []byte(`{"reason":"done"}`))
 	if state := readPresentation(); state.Active || state.Reason != "done" || state.Turn != follow.Turn {

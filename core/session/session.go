@@ -5,6 +5,8 @@ package session
 import (
 	"context"
 	"errors"
+	"reflect"
+	"slices"
 	"sync"
 	"time"
 
@@ -46,8 +48,18 @@ type Event struct {
 	Active  bool
 	Speaker presentation.Speaker
 	Night   *bool
-	Timers  []time.Duration // nil means no valid progress update; empty clears the list
+	Timers  []TimerProgress // nil means no valid progress update; empty clears the list
 	Ring    presentation.Ring
+}
+
+type TimerProgress struct {
+	Left time.Duration
+	Name string
+}
+
+type timerDeadline struct {
+	at   time.Time
+	name string
 }
 
 var (
@@ -63,12 +75,13 @@ type Engine struct {
 	generation                      uint64
 	turn                            uint64
 	ringSequence                    uint64
-	timerDeadlines                  []time.Time
+	timerDeadlines                  []timerDeadline
 	callTimer                       *time.Timer
 	monitorSerial                   uint64
 	monitorVisible                  bool
 	intercom                        bool
 	invocation                      string
+	heardFinal                      bool
 	responsePending                 bool
 	outputOwner                     string
 	outputAccepted, outputDraining  bool
@@ -105,7 +118,9 @@ func New(player audio.Playback) *Engine {
 func (e *Engine) Snapshot() presentation.State {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return e.snapshot()
+	s := e.snapshot()
+	s.Ring.Names = slices.Clone(s.Ring.Names)
+	return s
 }
 
 func (e *Engine) snapshot() presentation.State {
@@ -117,8 +132,8 @@ func (e *Engine) snapshot() presentation.State {
 	if len(e.timerDeadlines) != 0 {
 		now, row := time.Now(), 0
 		for _, deadline := range e.timerDeadlines {
-			if left := deadline.Sub(now); left > 0 {
-				s.Timers[row].Seconds = int64((left-1)/time.Second + 1)
+			if left := deadline.at.Sub(now); left > 0 {
+				s.Timers[row] = presentation.Timer{Seconds: int64((left-1)/time.Second + 1), Name: deadline.name}
 				row++
 			}
 		}
@@ -201,8 +216,9 @@ func (e *Engine) publishActivity() {
 		}
 	}
 	if e.presentationChanged != nil {
-		if state := e.snapshot(); state != e.lastPresentation {
+		if state := e.snapshot(); !reflect.DeepEqual(state, e.lastPresentation) {
 			e.lastPresentation = state
+			state.Ring.Names = slices.Clone(state.Ring.Names)
 			e.presentationChanged(state)
 		}
 	}
@@ -579,6 +595,7 @@ func (e *Engine) start(detection wake.Detection, pre []int16) error {
 	}
 	e.resetOutput()
 	e.state.Heard, e.state.Reply, e.state.Reason = "", "", ""
+	e.heardFinal = false
 	e.state.Speaker = presentation.Speaker{}
 	e.turn++
 	e.invocation = "wake"
@@ -773,8 +790,8 @@ func (e *Engine) Handle(generation uint64, event Event) error {
 		if event.Timers != nil {
 			now := time.Now()
 			e.timerDeadlines = e.timerDeadlines[:0]
-			for _, left := range event.Timers[:min(len(event.Timers), presentation.TimerSlots)] {
-				e.timerDeadlines = append(e.timerDeadlines, now.Add(left))
+			for _, timer := range event.Timers[:min(len(event.Timers), presentation.TimerSlots)] {
+				e.timerDeadlines = append(e.timerDeadlines, timerDeadline{at: now.Add(timer.Left), name: timer.Name})
 			}
 		}
 		return nil
@@ -863,6 +880,7 @@ func (e *Engine) Handle(generation uint64, event Event) error {
 		e.ringSequence++
 		e.state.Alert = true
 		e.state.Ring = event.Ring
+		e.state.Ring.Names = slices.Clone(event.Ring.Names)
 		e.state.Ring.Sequence = e.ringSequence
 	case "timer_stopped":
 		e.state.Alert = false
@@ -886,19 +904,31 @@ func (e *Engine) Handle(generation uint64, event Event) error {
 		}
 		e.state.Phase = "working"
 		e.state.Speaker = event.Speaker
+	case "transcript":
+		// A local CALL_START is not acceptance, and final recognition wins.
+		if e.active && e.runStarted && !e.heardFinal && e.state.Phase != "speaking" && e.state.Phase != "error" {
+			e.state.Heard = event.Text
+		}
 	case "recognized":
 		if e.active {
 			e.state.Heard = event.Text
+			e.heardFinal = true
 		}
 	case "responding":
 		if e.active {
 			e.state.Phase, e.state.Reply = "speaking", event.Text
 			e.responsePending = !e.outputOpen
 		}
+	case "reply_chunk":
+		// Speaking is set by responding, not PCM. Chunks may outlast drain.
+		if e.active && e.runStarted && e.state.Phase == "speaking" {
+			e.state.Reply += event.Text
+		}
 	case "not_recognized", "wake_rejected":
 		if e.active {
-			if event.Kind == "not_recognized" && event.Text != "" {
+			if event.Kind == "not_recognized" {
 				e.state.Heard = event.Text
+				e.heardFinal = true
 			}
 			e.state.Phase, e.state.Reason = "error", event.Kind
 			e.state.Speaker = presentation.Speaker{}

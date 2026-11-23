@@ -22,6 +22,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
 import android.os.SystemClock
+import android.text.format.DateUtils
 import com.encore.engine.mobile.Mobile
 import com.encore.engine.mobile.PresentationObserver
 import com.encore.engine.mobile.Runtime
@@ -33,7 +34,30 @@ internal data class MicState(
     val endpoint: String = "", val problem: String = "", val status: String = "Ready to talk",
     val canTalk: Boolean = false, val active: Boolean = false, val transcript: String = "", val armed: Boolean = false,
     val wakeWord: Boolean = false, val pendingTalk: Boolean = false,
+    val countdowns: String = "", val ringing: String = "",
 )
+
+internal fun MicState.withTimers(snapshot: JSONObject): MicState {
+    val timers = snapshot.optJSONArray("timers")
+    val countdowns = (0 until (timers?.length() ?: 0)).mapNotNull { i ->
+        val timer = timers?.optJSONObject(i) ?: return@mapNotNull null
+        val seconds = timer.optLong("seconds")
+        if (seconds <= 0) return@mapNotNull null
+        "${timer.optString("name").ifBlank { "Timer" }} · ${DateUtils.formatElapsedTime(seconds)}"
+    }.joinToString("\n")
+    val ring = snapshot.optJSONObject("ring")
+    val names = ring?.optJSONArray("names")
+    val ringing = if (!snapshot.optBoolean("alert")) "" else if (names != null && names.length() > 0) {
+        val labels = (0 until names.length()).joinToString(", ") { names.optString(it).ifBlank { "Timer" } }
+        "Timers ringing: $labels"
+    } else {
+        val count = ring?.optInt("count") ?: 0
+        val label = if (count > 1) "$count timers ringing" else "Timer ringing"
+        val name = ring?.optString("name").orEmpty()
+        if (name.isBlank()) label else "$label: $name"
+    }
+    return copy(countdowns = countdowns, ringing = ringing)
+}
 
 @Suppress("DEPRECATION") // Include physical Wi-Fi when a VPN is the default network.
 internal fun ConnectivityManager.wifiAddress(address: String? = null): Pair<Network, Inet4Address>? =
@@ -274,7 +298,7 @@ class MicService : Service() {
                     snapshot.optInt("wake_models") == 0 -> "No wake model · Talk is available"
                     else -> "Preparing wake detection"
                 }, transcript = if (active) listOf(snapshot.optString("heard"), snapshot.optString("reply"))
-                    .filter { it.isNotEmpty() }.joinToString("\n\n") else "")
+                    .filter { it.isNotEmpty() }.joinToString("\n\n") else "").withTimers(snapshot)
             handler.postDelayed(this, 150)
         }
     }

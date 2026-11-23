@@ -27,6 +27,7 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.Switch
 import android.widget.TextView
+import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -182,13 +183,18 @@ class MicActivityTest {
             layout(root)
             overlay.touchablePanel(region)
             assertEquals("Working without a transcript should stay compact", listeningHeight, region.bounds.height())
-            overlay.render(OverlayMode.PANEL, accepted.copy(phase = "working", heard = "Turn on the porch light."))
-            capture(root, "overlay-working")
-            val copy = overlay.descendants().filterIsInstance<TextView>().single { it.isShown && it.text == "Turn on the porch light." }
+            val early = accepted.copy(phase = "working", heard = "Turn on the light.")
+            overlay.render(OverlayMode.PANEL, early)
+            capture(root, "overlay-early-transcript")
+            val copy = overlay.descendants().filterIsInstance<TextView>().single { it.isShown && it.text == early.heard }
             assertFalse(label.isShown)
             assertEquals(textStart, position(copy)[0])
             assertTrue(brand.isShown)
             val answered = accepted.copy(phase = "speaking", heard = "Turn on the porch light.", reply = "The porch light is on.")
+            val streaming = answered.copy(reply = "The porch light")
+            overlay.render(OverlayMode.PANEL, streaming)
+            capture(root, "overlay-streaming-reply")
+            assertEquals(listOf(answered.heard, streaming.reply), transcriptText())
             overlay.render(OverlayMode.PANEL, answered)
             capture(root, "overlay-replying")
             assertEquals(listOf(answered.heard, answered.reply), transcriptText())
@@ -313,6 +319,36 @@ class MicActivityTest {
             server.setText("192.168.1.258")
             talk.performClick()
             assertTrue(root.descendants().filterIsInstance<TextView>().any { it.text.startsWith("Enter the Incubator") })
+        }
+    }
+
+    @Test fun timerDisplayKeepsNamesInOrderAndFallsBackForOldServers() {
+        Robolectric.buildActivity(MicActivity::class.java).create().use { controller ->
+            val activity = controller.get()
+            val root = activity.findViewById<View>(android.R.id.content)
+            fun shown() = root.descendants().filterIsInstance<TextView>().filter { it.visibility == View.VISIBLE }.map { it.text.toString() }.toList()
+            val connected = MicState(armed = true, wakeWord = true, endpoint = "Server: 192.168.1.20", status = "Listening for your wake word")
+            val countdowns = "Tea · 00:34\nRoast · 01:13"
+            val ringing = "Timers ringing: Laundry, Timer, Bread"
+            activity.render(connected.copy(active = true, status = "Working").withTimers(JSONObject("""
+                {"alert":true,"timers":[{"name":"Tea","seconds":34},{"name":"Roast","seconds":73},{"seconds":0}],
+                 "ring":{"name":"Bread","count":3,"names":["Laundry","","Bread"]}}
+            """)))
+            capture(root, "named-timers")
+            assertTrue(countdowns in shown())
+            assertTrue(ringing in shown())
+
+            activity.render(connected.copy(active = true, status = "Working").withTimers(JSONObject("""
+                {"alert":true,"timers":[{"seconds":124}],"ring":{"name":"Laundry","count":2}}
+            """)))
+            capture(root, "legacy-timers")
+            assertTrue("Timer · 02:04" in shown())
+            assertTrue("2 timers ringing: Laundry" in shown())
+            assertFalse(ringing in shown())
+
+            activity.render(connected.copy(canTalk = true).withTimers(JSONObject("""{"alert":false}""")))
+            capture(root, "no-timers")
+            assertFalse(shown().any { it.contains("ringing") || it.startsWith("Timer ·") })
         }
     }
 

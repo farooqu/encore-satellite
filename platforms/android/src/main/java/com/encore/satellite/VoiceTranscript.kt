@@ -40,9 +40,7 @@ internal fun VoiceTranscript?.update(state: EncoreState, local: Boolean, active:
     val unelected = local && state.invocation == "wake" && !state.accepted && !sameTurn
     // A speculative wake must not erase a completed transcript unless it wins.
     if (declined || unelected) return prior?.takeIf { it.finished && !sameTurn && (!active || local) }
-    val turn = VoiceTranscript.Turn(state.turn,
-        state.heard.ifBlank { if (sameTurn) prior?.current?.heard.orEmpty() else "" },
-        state.reply.ifBlank { if (sameTurn) prior?.current?.reply.orEmpty() else "" })
+    val turn = VoiceTranscript.Turn(state.turn, state.heard, state.reply)
     if (!active) {
         // The engine retains the final text after drain. Never treat an idle snapshot
         // as a new conversation, or keep a cancelled or interrupted turn on screen.
@@ -81,6 +79,7 @@ internal fun VoiceTranscript?.update(state: EncoreState, local: Boolean, active:
 
 @Composable internal fun SatelliteSheet(call: VoiceTranscript?, state: EncoreState, timers: List<TimerCountdown>,
     ringing: Boolean, pendingWake: Boolean, modifier: Modifier, onClose: () -> Unit, onStopAlert: () -> Unit) {
+    val ringingNames = state.ring?.names.orEmpty().takeIf { ringing }.orEmpty()
     val lines = buildList {
         if (call != null) for (turn in call.earlier + call.current) {
             val current = turn === call.current && !call.finished
@@ -121,7 +120,7 @@ internal fun VoiceTranscript?.update(state: EncoreState, local: Boolean, active:
                 if (ringing) {
                     val count = state.ring?.count ?: 0
                     val title = if (count > 1) "$count alerts ringing" else "Alert ringing"
-                    val name = state.ring?.name.orEmpty().ifBlank { title }
+                    val name = if (ringingNames.isEmpty()) state.ring?.name.orEmpty().ifBlank { title } else title
                     Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         Column(Modifier.weight(1f).semantics { liveRegion = LiveRegionMode.Assertive }) {
@@ -145,6 +144,10 @@ internal fun VoiceTranscript?.update(state: EncoreState, local: Boolean, active:
                     }
                 }
                 Column(Modifier.weight(1f, fill = false).verticalScroll(scroll)) {
+                    if (ringingNames.isNotEmpty()) {
+                        Text(ringingNames.joinToString(", ") { it.ifBlank { "Timer" } }, Modifier.padding(bottom = 8.dp),
+                            style = MaterialTheme.typography.bodyLarge)
+                    }
                     if (timers.isNotEmpty()) {
                         Text(if (timers.size == 1) "1 running timer" else "${timers.size} running timers",
                             Modifier.padding(top = 4.dp, bottom = 4.dp).semantics { heading() },
@@ -152,7 +155,7 @@ internal fun VoiceTranscript?.update(state: EncoreState, local: Boolean, active:
                         timers.forEach { timer ->
                             HorizontalDivider(color = colors.outlineVariant)
                             Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                                Text("Timer", Modifier.weight(1f), color = colors.onSurfaceVariant)
+                                Text(timer.name.ifBlank { "Timer" }, Modifier.weight(1f).padding(end = 12.dp), color = colors.onSurfaceVariant)
                                 Text(timer.label, style = MaterialTheme.typography.titleMedium)
                             }
                         }

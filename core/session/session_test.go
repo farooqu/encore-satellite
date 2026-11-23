@@ -3,6 +3,7 @@ package session_test
 import (
 	"context"
 	"errors"
+	"reflect"
 	"slices"
 	"sync/atomic"
 	"testing"
@@ -371,6 +372,14 @@ func TestPrivacyAndReconnectFenceStaleReader(t *testing.T) {
 	if err := e.Output(g, []int16{9}); err != nil || p.writes != 0 {
 		t.Fatalf("late audio: %v", err)
 	}
+	for _, kind := range []string{"transcript", "reply_chunk"} {
+		if err := e.Handle(g, session.Event{Kind: kind, Text: "late"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if s := e.Snapshot(); s.Heard != "" || s.Reply != "" || s.Active || s.Output.State != "" {
+		t.Fatal("late text revived the muted turn", s)
+	}
 	if err := e.StartManual(); !errors.Is(err, session.ErrUnavailable) {
 		t.Fatal("started while muted")
 	}
@@ -387,6 +396,11 @@ func TestPrivacyAndReconnectFenceStaleReader(t *testing.T) {
 	}
 	if err := e.Handle(g, session.Event{Kind: "timer_ringing"}); !errors.Is(err, session.ErrStale) {
 		t.Fatal("stale alert accepted")
+	}
+	for _, kind := range []string{"transcript", "reply_chunk"} {
+		if err := e.Handle(g, session.Event{Kind: kind, Text: "obsolete"}); err != session.ErrStale {
+			t.Fatal("stale reader still owns captions", kind, err)
+		}
 	}
 	if listen, stop, monitor := e.WakeState(g); listen || stop || monitor != 0 {
 		t.Fatal("stale model execution armed")
@@ -525,10 +539,15 @@ func TestStopInterruptsDrainAndRejectsLateAudio(t *testing.T) {
 	if err := e.StartManual(); err != nil {
 		t.Fatal(err)
 	}
+	_ = e.Handle(g, session.Event{Kind: "listening"})
+	_ = e.Handle(g, session.Event{Kind: "transcript", Text: "original query"})
+	_ = e.Handle(g, session.Event{Kind: "responding", Text: "original reply"})
 	_ = e.Stop()
 	_ = e.Output(g, []int16{4, 5})
 	_ = e.Handle(g, session.Event{Kind: "responding", Text: "late"})
-	if p.writes != 3 || e.Snapshot().Reply != "" {
+	_ = e.Handle(g, session.Event{Kind: "transcript", Text: "late query"})
+	_ = e.Handle(g, session.Event{Kind: "reply_chunk", Text: "late reply"})
+	if s := e.Snapshot(); p.writes != 3 || s.Heard != "" || s.Reply != "" || s.Active || s.Output.State != "" {
 		t.Fatal("late output revived cancelled turn")
 	}
 	_ = e.EndOutput(g)
@@ -771,7 +790,7 @@ func TestIncubatorElectionAndFollowUp(t *testing.T) {
 		t.Fatal("follow-up replays wake audio")
 	}
 	before := e.Snapshot()
-	if err := e.Handle(g, session.Event{Kind: "hangup", Listen: true}); err != nil || e.Snapshot() != before || len(l.commands) != 2 {
+	if err := e.Handle(g, session.Event{Kind: "hangup", Listen: true}); err != nil || !reflect.DeepEqual(e.Snapshot(), before) || len(l.commands) != 2 {
 		t.Fatal("duplicate HANGUP changed the listening follow-up", err, e.Snapshot(), l.commands)
 	}
 	_ = e.Handle(g, session.Event{Kind: "responding", Text: ""})
@@ -807,7 +826,7 @@ func TestFollowUpRequiresCurrentResponse(t *testing.T) {
 				}
 			}
 			before, count := e.Snapshot(), len(l.commands)
-			if err := e.Handle(g, session.Event{Kind: "hangup", Reason: "done", Listen: true}); err != nil || e.Snapshot() != before {
+			if err := e.Handle(g, session.Event{Kind: "hangup", Reason: "done", Listen: true}); err != nil || !reflect.DeepEqual(e.Snapshot(), before) {
 				t.Fatal("unowned HANGUP changed the session", err, e.Snapshot())
 			}
 			if !before.InputOpen {

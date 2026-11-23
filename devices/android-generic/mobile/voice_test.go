@@ -61,6 +61,9 @@ func TestAndroidOffersPrimaryMonitorOnlyAfterVisibleIndicator(t *testing.T) {
 		hello["monitor"] != true || hello["monitor_result"] != true {
 		t.Fatalf("missing local wake/stop, listen or monitor capability: %v", hello)
 	}
+	if hello["protocol"] != float64(2) || hello["early_transcript"] != true || hello["reply_chunks"] != true || hello["timer_names"] != true {
+		t.Fatalf("missing display capability or changed protocol: %v", hello)
+	}
 	for _, flag := range []string{"aec", "monitor_aec", "intercom"} {
 		if hello[flag] != false {
 			t.Fatalf("unqualified %s advertised: %v", flag, hello)

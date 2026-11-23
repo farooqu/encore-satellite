@@ -153,10 +153,14 @@ func receive(t *testing.T, c net.Conn, kind byte) []byte {
 }
 
 func TestNativeTimerDisplayKeepsCountdownsAndRingSeparate(t *testing.T) {
-	e, addr := start(t, &speaker{})
+	e := session.New(&speaker{})
+	addr := serveTest(t, &incubator.Server{Engine: e, Name: "test", MAC: "02:00:00:00:00:01", TimerNames: true})
 	e.SetMuted(true)
 	c := connect(t, addr)
-	_ = receive(t, c, 0x01)
+	hello := object(t, receive(t, c, 0x01))
+	if hello["timer_names"] != true || hello["early_transcript"] != nil || hello["reply_chunks"] != nil {
+		t.Fatal("timer capability must be independent", hello)
+	}
 	wait := func(check func(presentation.State) bool) presentation.State {
 		t.Helper()
 		for deadline := time.Now().Add(time.Second); ; time.Sleep(time.Millisecond) {
@@ -170,21 +174,23 @@ func TestNativeTimerDisplayKeepsCountdownsAndRingSeparate(t *testing.T) {
 		}
 	}
 	// A very short timer vanishes locally; none of the countdowns implies a ring.
-	send(t, c, 0x12, []byte(`{"type":"timer_progress","data":{"shown":1,"count":3,"left0":0.02,"left1":33.5,"left2":72.5}}`))
+	send(t, c, 0x12, []byte(`{"type":"timer_progress","data":{"shown":1,"count":4,"left0":0.02,"name0":"Tea","left1":33.5,"left2":72.5,"name2":"Bread","left3":154.5,"name3":"Roast"}}`))
 	wait(func(s presentation.State) bool {
-		return s.Timers[0].Seconds == 34 && s.Timers[1].Seconds == 73 && !s.Alert
+		return s.Timers[0] == (presentation.Timer{Seconds: 34}) && s.Timers[1] == (presentation.Timer{Seconds: 73, Name: "Bread"}) &&
+			s.Timers[2] == (presentation.Timer{Seconds: 155, Name: "Roast"}) && !s.Alert
 	})
 	send(t, c, 0x12, []byte(`{"type":"timer_progress","data":{"shown":1,"remaining":"invalid"}}`))
-	send(t, c, 0x12, []byte(`{"type":"timer_ringing","data":{"name":"Pasta","timers":2}}`))
+	send(t, c, 0x12, []byte(`{"type":"timer_ringing","data":{"name":"Pasta","timers":3,"names":["Tea","","Pasta"]}}`))
 	first := wait(func(s presentation.State) bool { return s.Alert })
-	if !first.Muted || first.Timers[1].Seconds < 72 || first.Ring.Name != "Pasta" || first.Ring.Count != 2 || first.Ring.Sequence == 0 {
+	if !first.Muted || first.Timers[1].Seconds < 72 || first.Ring.Name != "Pasta" || first.Ring.Count != 3 || first.Ring.Sequence == 0 ||
+		!slices.Equal(first.Ring.Names, []string{"Tea", "", "Pasta"}) {
 		t.Fatal("ring replaced countdowns or dropped metadata", first)
 	}
 	send(t, c, 0x12, []byte(`{"type":"timer_stopped"}`))
-	send(t, c, 0x12, []byte(`{"type":"timer_ringing"}`))
+	send(t, c, 0x12, []byte(`{"type":"timer_ringing","data":{"name":"Laundry","timers":2}}`))
 	second := wait(func(s presentation.State) bool { return s.Alert && s.Ring.Sequence != first.Ring.Sequence })
-	if second.Ring.Name != "" || second.Ring.Count != 0 {
-		t.Fatal("new ring reused the previous label", second.Ring)
+	if second.Ring.Name != "Laundry" || second.Ring.Count != 2 || len(second.Ring.Names) != 0 {
+		t.Fatal("legacy ring lost its label or inherited names", second.Ring)
 	}
 	send(t, c, 0x10, []byte{1, 0, 2, 0})
 	wait(func(s presentation.State) bool { return s.Output.Owner == "alert" && s.Output.State == "playing" })
@@ -200,9 +206,11 @@ func TestNativeTimerDisplayKeepsCountdownsAndRingSeparate(t *testing.T) {
 		t.Fatal("dismissing the ring changed mic or timers", s)
 	}
 	send(t, c, 0x12, []byte(`{"type":"timer_progress","data":{"shown":0}}`))
-	wait(func(s presentation.State) bool { return s.Timers[0].Seconds == 0 })
+	wait(func(s presentation.State) bool { return s.Timers == [presentation.TimerSlots]presentation.Timer{} })
 	send(t, c, 0x12, []byte(`{"type":"timer_progress","data":{"shown":1,"remaining":123.5,"total":180}}`))
-	wait(func(s presentation.State) bool { return s.Timers[0].Seconds == 124 && s.Timers[1].Seconds == 0 })
+	wait(func(s presentation.State) bool {
+		return s.Timers[0] == (presentation.Timer{Seconds: 124}) && s.Timers[1].Seconds == 0
+	})
 	_ = c.Close()
 	wait(func(s presentation.State) bool { return !s.Connected && s.Timers[0].Seconds == 0 })
 }
@@ -563,6 +571,89 @@ func TestNativeWireEvidenceEndpointingDrainAndFollowUp(t *testing.T) {
 	send(t, c, 0x12, []byte(`{"type":"not_recognized","data":{"heard":"Unmatched upstream words"}}`))
 	if state := waitFor(func(s presentation.State) bool { return s.Phase == "error" }); state.Heard != "Unmatched upstream words" || state.Reply != "" {
 		t.Fatal("discarded the unrecognized transcript", state)
+	}
+}
+
+func TestNativeDisplayTextDoesNotOwnPlayback(t *testing.T) {
+	e := session.New(&speaker{})
+	addr := serveTest(t, &incubator.Server{Engine: e, Name: "test", MAC: "02:00:00:00:01", EarlyTranscript: true, ReplyChunks: true})
+	c := connect(t, addr)
+	hello := object(t, receive(t, c, 0x01))
+	if hello["protocol"] != float64(2) || hello["early_transcript"] != true || hello["reply_chunks"] != true || hello["timer_names"] != nil {
+		t.Fatal("display capabilities changed protocol or claimed timer names", hello)
+	}
+	event := func(kind, text string) {
+		t.Helper()
+		send(t, c, 0x12, fmt.Appendf(nil, `{"type":%q,"data":{"text":%q}}`, kind, text))
+	}
+	wait := func(check func(presentation.State) bool) presentation.State {
+		t.Helper()
+		for deadline := time.Now().Add(time.Second); ; time.Sleep(time.Millisecond) {
+			s := e.Snapshot()
+			if check(s) {
+				return s
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("missing native display state", s)
+			}
+		}
+	}
+	if err := e.StartManual(); err != nil {
+		t.Fatal(err)
+	}
+	receive(t, c, 0x02)
+	event("transcript", "Old turn")
+	event("reply_chunk", "Old reply")
+	event("listening", "")
+	if state := wait(func(s presentation.State) bool { return s.Accepted }); state.Heard != "" || state.Reply != "" {
+		t.Fatal("tentative turn accepted display text", state)
+	}
+	event("processing", "")
+	event("reply_chunk", "Before responding")
+	event("transcript", "Play some")
+	event("transcript", "Play some piano")
+	if state := wait(func(s presentation.State) bool { return s.Heard == "Play some piano" }); state.Phase != "working" || state.Output != (presentation.Output{}) || state.Reply != "" {
+		t.Fatal("early text changed voice state or admitted a premature chunk", state)
+	}
+	event("recognized", "Play some jazz")
+	event("transcript", "Late provisional text")
+	event("responding", "")
+	event("reply_chunk", "Playing")
+	queued := presentation.Output{State: "queued", Owner: "voice"}
+	if state := wait(func(s presentation.State) bool { return s.Reply == "Playing" }); state.Heard != "Play some jazz" || state.Output != queued || state.Phase != "speaking" {
+		t.Fatal("chunk changed queued playback or early text replaced final text", state)
+	}
+	send(t, c, 0x10, []byte{17, 0, 173, 255})
+	send(t, c, 0x12, []byte(`{"type":"reply_chunk","data":{"text":42}}`))
+	event("reply_chunk", "  jazz\n")
+	if state := wait(func(s presentation.State) bool { return s.Reply == "Playing  jazz\n" }); state.Output != (presentation.Output{State: "playing", Owner: "voice", Received: true}) {
+		t.Fatal("chunk changed actual playback state", state)
+	}
+	send(t, c, 0x11, nil)
+	receive(t, c, 0x06) // First write back since CALL_START: no ACKs for text.
+	event("reply_chunk", "on")
+	if state := wait(func(s presentation.State) bool { return s.Reply == "Playing  jazz\non" }); state.Output != (presentation.Output{}) || state.Phase != "speaking" {
+		t.Fatal("text after drain restarted playback", state)
+	}
+	send(t, c, 0x13, []byte(`{"reason":"done","listen":true}`))
+	receive(t, c, 0x02)
+	event("reply_chunk", " late")
+	event("transcript", "Old transcript")
+	event("listening", "")
+	if state := wait(func(s presentation.State) bool { return s.Accepted && s.Invocation == "follow_up" }); state.Heard != "" || state.Reply != "" {
+		t.Fatal("previous display text leaked into follow-up", state)
+	}
+	event("transcript", "Maybe blues")
+	send(t, c, 0x12, []byte(`{"type":"not_recognized","data":{"heard":"Maybe blues?"}}`))
+	if state := wait(func(s presentation.State) bool { return s.Phase == "error" }); state.Heard != "Maybe blues?" || state.Output != (presentation.Output{}) {
+		t.Fatal("final unrecognized text did not supersede early text", state)
+	}
+	send(t, c, 0x13, []byte(`{"reason":"not_recognized"}`))
+	event("transcript", "After hangup")
+	event("reply_chunk", "After hangup")
+	send(t, c, 0x12, []byte(`{"type":"night","data":{"on":true}}`))
+	if state := wait(func(s presentation.State) bool { return s.Night == "on" }); state.Active || state.Heard != "Maybe blues?" || state.Reply != "" {
+		t.Fatal("post-hangup display text revived the call", state)
 	}
 }
 

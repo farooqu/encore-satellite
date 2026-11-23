@@ -36,8 +36,10 @@ type Server struct {
 	// MonitorAEC adds the AEC monitor route and intercom and requires CallAEC.
 	// Like Monitor, it requires a host that confirms the recording indicator.
 	MonitorAEC bool
-	captureMu  sync.RWMutex
-	models     *modelSession
+	// Display capabilities are opt-in by the host that renders the snapshots.
+	EarlyTranscript, ReplyChunks, TimerNames bool
+	captureMu                                sync.RWMutex
+	models                                   *modelSession
 }
 
 type link struct {
@@ -207,6 +209,15 @@ func (s *Server) serveConn(ctx context.Context, conn net.Conn) error {
 		"preroll_ms": audio.PreRollSamples * 1000 / audio.SampleRate,
 		"listen":     true, "aec": s.CallAEC, "monitor": monitor, "monitor_aec": monitorAEC, "intercom": monitorAEC,
 	}
+	if s.EarlyTranscript {
+		hello["early_transcript"] = true
+	}
+	if s.ReplyChunks {
+		hello["reply_chunks"] = true
+	}
+	if s.TimerNames {
+		hello["timer_names"] = true
+	}
 	if monitor {
 		hello["monitor_result"] = true
 	}
@@ -348,7 +359,7 @@ func (s *Server) serveConn(ctx context.Context, conn net.Conn) error {
 			var event struct {
 				Type string `json:"type"`
 				Data struct {
-					Text    string          `json:"text"`
+					Text    json.RawMessage `json:"text"`
 					Heard   string          `json:"heard"`
 					Active  bool            `json:"active"`
 					Speaker json.RawMessage `json:"speaker"`
@@ -358,13 +369,28 @@ func (s *Server) serveConn(ctx context.Context, conn net.Conn) error {
 					B       json.RawMessage `json:"b"`
 					On      json.RawMessage `json:"on"`
 					Name    json.RawMessage `json:"name"`
+					Names   json.RawMessage `json:"names"`
 					Timers  json.RawMessage `json:"timers"`
 				} `json:"data"`
 			}
 			if err = json.Unmarshal(data, &event); err != nil {
 				return fmt.Errorf("incubator: invalid event: %w", err)
 			}
-			incoming := session.Event{Kind: event.Type, Text: event.Data.Text, Active: event.Data.Active}
+			incoming := session.Event{Kind: event.Type, Active: event.Data.Active}
+			var text *string
+			if raw := event.Data.Text; raw != nil {
+				if err := json.Unmarshal(raw, &text); err != nil {
+					if event.Type == "transcript" || event.Type == "reply_chunk" {
+						continue // Bad optional captions must not interrupt playback.
+					}
+					return fmt.Errorf("incubator: invalid event text: %w", err)
+				}
+			}
+			if text != nil {
+				incoming.Text = *text
+			} else if event.Type == "transcript" || event.Type == "reply_chunk" {
+				continue
+			}
 			if event.Type == "not_recognized" {
 				// Incubator sends the final transcript under a different key on this path.
 				incoming.Text = event.Data.Heard
@@ -400,6 +426,9 @@ func (s *Server) serveConn(ctx context.Context, conn net.Conn) error {
 			} else if event.Type == "timer_ringing" {
 				_ = json.Unmarshal(event.Data.Name, &incoming.Ring.Name)
 				_ = json.Unmarshal(event.Data.Timers, &incoming.Ring.Count)
+				if json.Unmarshal(event.Data.Names, &incoming.Ring.Names) != nil {
+					incoming.Ring.Names = nil
+				}
 			}
 			err = s.Engine.Handle(generation, incoming)
 		case 0x13:
@@ -448,7 +477,7 @@ func (s *Server) serveConn(ctx context.Context, conn net.Conn) error {
 	}
 }
 
-func timerProgress(data []byte) []time.Duration {
+func timerProgress(data []byte) []session.TimerProgress {
 	var event struct {
 		Data map[string]json.RawMessage `json:"data"`
 	}
@@ -460,7 +489,7 @@ func timerProgress(data []byte) []time.Duration {
 		return nil
 	}
 	if *shown == 0 {
-		return []time.Duration{}
+		return []session.TimerProgress{}
 	}
 	count := 1 // Older servers only send the soonest timer.
 	if raw := event.Data["count"]; raw != nil {
@@ -468,9 +497,10 @@ func timerProgress(data []byte) []time.Duration {
 			return nil
 		}
 	}
-	left := make([]time.Duration, min(count, presentation.TimerSlots))
-	for i := range left {
-		raw := event.Data["left"+strconv.Itoa(i)]
+	timers := make([]session.TimerProgress, min(count, presentation.TimerSlots))
+	for i := range timers {
+		slot := strconv.Itoa(i)
+		raw := event.Data["left"+slot]
 		if raw == nil && i == 0 {
 			raw = event.Data["remaining"]
 		}
@@ -478,7 +508,8 @@ func timerProgress(data []byte) []time.Duration {
 		if json.Unmarshal(raw, &seconds) != nil || seconds == nil || *seconds < 0 || *seconds >= float64(math.MaxInt64)/float64(time.Second) {
 			return nil // Optional visual metadata must not break a voice session.
 		}
-		left[i] = time.Duration(*seconds * float64(time.Second))
+		timers[i].Left = time.Duration(*seconds * float64(time.Second))
+		_ = json.Unmarshal(event.Data["name"+slot], &timers[i].Name)
 	}
-	return left
+	return timers
 }

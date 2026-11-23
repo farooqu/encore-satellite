@@ -22,16 +22,18 @@ type Output struct {
 }
 
 type Timer struct {
-	Seconds int64 `json:"seconds"`
+	Seconds int64  `json:"seconds"`
+	Name    string `json:"name,omitempty"`
 }
 
 // TimerSlots is the number of countdowns in the native display projection.
 const TimerSlots = 6
 
 type Ring struct {
-	Sequence uint64 `json:"sequence"` // local alert occurrence, not an upstream timer ID
-	Name     string `json:"name,omitempty"`
-	Count    int    `json:"count,omitempty"`
+	Sequence uint64   `json:"sequence"` // local alert occurrence, not an upstream timer ID
+	Name     string   `json:"name,omitempty"`
+	Count    int      `json:"count,omitempty"`
+	Names    []string `json:"names,omitempty"`
 }
 
 type State struct {
