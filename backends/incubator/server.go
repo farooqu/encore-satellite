@@ -106,6 +106,21 @@ func (s *Server) Snapshot(captureReady bool) presentation.State {
 	return state
 }
 
+// SetWakeWordEnabled fences queued model input as well as the engine's pre-roll.
+func (s *Server) SetWakeWordEnabled(enabled bool) {
+	s.captureMu.Lock()
+	defer s.captureMu.Unlock()
+	m := s.models
+	if m != nil {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+	}
+	if s.Engine.SetWakeWordEnabled(enabled) && m != nil {
+		m.epoch.Add(1)
+		m.reset()
+	}
+}
+
 // Serve refuses competing clients. The caller owns mDNS advertisement and the
 // listener address; this adapter never opens a microphone or a LAN control API.
 func (s *Server) Serve(ctx context.Context, listener net.Listener) error {

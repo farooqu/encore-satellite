@@ -114,7 +114,7 @@ class PersonalSessionService : VoiceInteractionSessionService() {
 }
 
 // Android requires a recognizer component in the assistant metadata. This app
-// only sends audio on its own explicitly armed Incubator connection.
+// only sends audio for a voice request on its own Incubator connection.
 class NoDeviceRecognition : RecognitionService() {
     override fun onStartListening(intent: Intent, listener: Callback) { listener.error(SpeechRecognizer.ERROR_CLIENT) }
     override fun onStopListening(listener: Callback) = Unit

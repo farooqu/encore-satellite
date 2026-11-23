@@ -1,6 +1,7 @@
 package com.encore.personal
 
 import android.app.Activity
+import android.app.role.RoleManager
 import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.Canvas
@@ -12,6 +13,8 @@ import android.graphics.drawable.AdaptiveIconDrawable
 import android.graphics.drawable.ColorDrawable
 import android.os.Handler
 import android.os.Looper
+import android.os.Process
+import android.provider.Settings
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -22,6 +25,7 @@ import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
+import android.widget.Switch
 import android.widget.TextView
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -34,6 +38,8 @@ import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
 import org.robolectric.Shadows.shadowOf
+import org.robolectric.shadows.ShadowAlertDialog
+import org.robolectric.shadows.ShadowRoleManager
 import java.io.File
 import java.time.Duration
 
@@ -142,18 +148,18 @@ class MicActivityTest {
             val region = Region()
             val candidate = VoiceTurn(TurnKey(1, 2), "wake", "tentative", false, "", "")
 
-            overlay.render(OverlayMode.CUE, candidate, true)
+            overlay.render(OverlayMode.CUE, candidate)
             capture(root, "overlay-cue")
             overlay.touchablePanel(region)
             assertTrue(region.isEmpty)
 
-            overlay.render(OverlayMode.HIDDEN, null, true)
+            overlay.render(OverlayMode.HIDDEN, null)
             capture(root, "overlay-dismissed")
             overlay.touchablePanel(region)
             assertTrue(region.isEmpty)
 
             val accepted = candidate.copy(accepted = true, phase = "listening")
-            overlay.render(OverlayMode.PANEL, accepted, true)
+            overlay.render(OverlayMode.PANEL, accepted)
             capture(root, "overlay-listening")
             overlay.touchablePanel(region)
             val listeningHeight = region.bounds.height()
@@ -172,35 +178,35 @@ class MicActivityTest {
             val textStart = position(label)[0]
             assertTrue(position(phaseIcon)[0] + phaseIcon.width <= textStart)
 
-            overlay.render(OverlayMode.PANEL, accepted.copy(phase = "working"), true)
+            overlay.render(OverlayMode.PANEL, accepted.copy(phase = "working"))
             layout(root)
             overlay.touchablePanel(region)
             assertEquals("Working without a transcript should stay compact", listeningHeight, region.bounds.height())
-            overlay.render(OverlayMode.PANEL, accepted.copy(phase = "working", heard = "Turn on the porch light."), true)
+            overlay.render(OverlayMode.PANEL, accepted.copy(phase = "working", heard = "Turn on the porch light."))
             capture(root, "overlay-working")
             val copy = overlay.descendants().filterIsInstance<TextView>().single { it.isShown && it.text == "Turn on the porch light." }
             assertFalse(label.isShown)
             assertEquals(textStart, position(copy)[0])
             assertTrue(brand.isShown)
             val answered = accepted.copy(phase = "speaking", heard = "Turn on the porch light.", reply = "The porch light is on.")
-            overlay.render(OverlayMode.PANEL, answered, true)
+            overlay.render(OverlayMode.PANEL, answered)
             capture(root, "overlay-replying")
             assertEquals(listOf(answered.heard, answered.reply), transcriptText())
             overlay.touchablePanel(region)
             assertTrue("A short exchange should only grow to fit", region.bounds.height() in (listeningHeight + 1)..779)
 
             val follow = accepted.copy(key = TurnKey(1, 3), invocation = "follow_up")
-            overlay.render(OverlayMode.PANEL, follow, true, listOf(answered))
+            overlay.render(OverlayMode.PANEL, follow, listOf(answered))
             capture(root, "overlay-follow-up")
             assertEquals(listOf(answered.heard, answered.reply, "Listening…"), transcriptText())
             val second = follow.copy(phase = "speaking", heard = "What about the garage?", reply = "The garage door is closed.")
-            overlay.render(OverlayMode.PANEL, second, true, listOf(answered), finished = true)
+            overlay.render(OverlayMode.PANEL, second, listOf(answered), finished = true)
             capture(root, "overlay-complete")
             assertEquals(listOf(answered.heard, answered.reply, second.heard, second.reply), transcriptText())
 
             val longReply = (1..25).joinToString("\n") { "$it. Check the porch light and close the garage door." }
             val long = answered.copy(reply = longReply)
-            overlay.render(OverlayMode.PANEL, long, true)
+            overlay.render(OverlayMode.PANEL, long)
             capture(root, "overlay-long-reply")
             overlay.touchablePanel(region)
             assertEquals(780, region.bounds.height())
@@ -208,7 +214,7 @@ class MicActivityTest {
             assertFalse("New transcript text follows the bottom", scroll.canScrollVertically(1))
             val brandTop = position(brand)[1]
             scroll.scrollTo(0, 96)
-            overlay.render(OverlayMode.PANEL, follow, true, listOf(long))
+            overlay.render(OverlayMode.PANEL, follow, listOf(long))
             layout(root)
             assertEquals("Follow-up doesn't pull a reader away from history", 96, scroll.scrollY)
             scroll.scrollTo(0, scroll.getChildAt(0).height)
@@ -222,12 +228,16 @@ class MicActivityTest {
             layout(root, height = 640)
             overlay.touchablePanel(region)
             assertEquals("Cap follows the available height", 320, region.bounds.height())
-            overlay.render(OverlayMode.UNAVAILABLE, null, false)
-            capture(root, "overlay-paused")
+            overlay.render(OverlayMode.CONNECTING, null)
+            assertEquals(listOf("Connecting to Incubator…"), transcriptText())
+            capture(root, "overlay-connecting")
+            overlay.render(OverlayMode.UNAVAILABLE, null, problem = "Save an Incubator server in Encore first.")
+            assertEquals(listOf("Voice unavailable", "Save an Incubator server in Encore first."), transcriptText())
+            capture(root, "overlay-setup")
 
-            overlay.render(OverlayMode.HIDDEN, null, false)
+            overlay.render(OverlayMode.HIDDEN, null)
             assertTrue(transcriptText().isEmpty())
-            overlay.render(OverlayMode.PANEL, accepted, true)
+            overlay.render(OverlayMode.PANEL, accepted)
             fun listeningLabel() = overlay.descendants().filterIsInstance<TextView>().single { it.isShown && it.text == "Listening…" }
             fun listeningIcon() = overlay.descendants().filterIsInstance<ImageView>().last()
             assertEquals(context.getColor(android.R.color.system_neutral2_700), listeningLabel().currentTextColor)
@@ -246,53 +256,110 @@ class MicActivityTest {
             overlay.touchablePanel(region)
             assertEquals(listeningHeight, region.bounds.height())
 
-            overlay.render(OverlayMode.PANEL, second, true, listOf(answered), finished = true)
+            overlay.render(OverlayMode.PANEL, second, listOf(answered), finished = true)
             capture(root, "overlay-dark-complete")
-            overlay.render(OverlayMode.CUE, candidate, true)
+            overlay.render(OverlayMode.CUE, candidate)
             capture(root, "overlay-dark-cue")
-            overlay.render(OverlayMode.UNAVAILABLE, null, false)
-            capture(root, "overlay-dark-paused")
         }
     }
 
-    @Test fun pauseAndTalkAreSeparateAndReadinessControlsWhatIsAvailable() {
+    @Test fun talkAndWakeListeningAreIndependent() {
         Robolectric.buildActivity(MicActivity::class.java).create().use { controller ->
             val activity = controller.get()
             val root = activity.findViewById<View>(android.R.id.content)
             val controls = root.descendants().filterIsInstance<Button>().toList()
             val server = root.descendants().filterIsInstance<EditText>().single()
-            val (arm, talk) = controls
-            assertEquals("Arm mic", arm.text)
+            val discover = controls.single { it.text == "Discover on home Wi-Fi" }
+            val wake = root.descendants().filterIsInstance<Switch>().single { it.text == "Listen for wake word" }
+            val talk = controls.single { it.text == "Talk" }
             assertEquals(View.VISIBLE, server.visibility)
-            assertEquals(View.GONE, talk.visibility)
-            capture(root, "paused")
-
-            val connected = MicState(endpoint = "encore-personal-a1b2c3 · 192.168.1.71:6055", status = "Waiting for Incubator")
-            activity.render(connected)
-            assertEquals("Pause mic", arm.text)
-            assertEquals(View.GONE, server.visibility)
             assertEquals(View.VISIBLE, talk.visibility)
-            assertFalse(talk.isEnabled)
-
-            activity.render(connected.copy(canTalk = true, status = "Listening for your wake word"))
-            assertEquals("Talk", talk.text)
             assertTrue(talk.isEnabled)
-            capture(root, "armed")
+            assertFalse(wake.isChecked)
+            capture(root, "setup-light")
+
+            discover.performClick()
+            val confirmation = ShadowAlertDialog.getLatestAlertDialog()
+            assertEquals("On trusted home Wi-Fi?", shadowOf(confirmation).title)
+            confirmation.getButton(android.content.DialogInterface.BUTTON_NEGATIVE).performClick()
+            assertEquals("", server.text.toString())
+
+            val waiting = MicState(armed = true, wakeWord = true, endpoint = "Server: 192.168.1.20", status = "Waiting for Incubator")
+            activity.render(waiting)
+            assertTrue(wake.isChecked && wake.isEnabled)
+            assertEquals(View.GONE, server.visibility)
+            assertEquals(View.GONE, discover.visibility)
+            assertEquals(View.VISIBLE, talk.visibility)
+            assertTrue(talk.isEnabled)
+            capture(root, "reconnecting")
+
+            val connected = waiting.copy(endpoint = "encore-personal-a1b2c3 · 192.168.1.71:6055\nServer: 192.168.1.20", wakeWord = false)
+            activity.render(connected.copy(pendingTalk = true))
+            assertEquals("Cancel", talk.text)
+            assertTrue(talk.isEnabled)
+            capture(root, "manual-connecting")
 
             activity.render(connected.copy(active = true, status = "Replying", transcript = "What’s on my list?\n\nYou have two items."))
             assertEquals("Stop", talk.text)
             assertTrue(talk.isEnabled)
-            assertEquals("Pause mic", arm.text)
+            assertFalse(wake.isChecked)
             capture(root, "replying")
 
             activity.render(MicState())
-            assertEquals("Arm mic", arm.text)
-            assertEquals(View.GONE, talk.visibility)
+            assertFalse(wake.isChecked)
+            assertEquals("Talk", talk.text)
             assertFalse(root.descendants().filterIsInstance<TextView>().any { it.text.contains("two items") })
 
             server.setText("192.168.1.258")
-            arm.performClick()
+            talk.performClick()
             assertTrue(root.descendants().filterIsInstance<TextView>().any { it.text.startsWith("Enter the Incubator") })
+        }
+    }
+
+    @Test
+    @Config(qualifiers = "w393dp-h780dp-night-xhdpi")
+    fun assistantShortcutExplainsAndManagesTheAndroidRoleInDarkMode() {
+        Robolectric.buildActivity(MicActivity::class.java).create().use { controller ->
+            val activity = controller.get()
+            val root = activity.findViewById<View>(android.R.id.content)
+            val action = root.descendants().filterIsInstance<Button>().single { it.text == "Set as default assistant" }
+            assertTrue(root.descendants().filterIsInstance<TextView>().any {
+                it.text.contains("This replaces your current default assistant.")
+            })
+            capture(root, "setup-dark")
+
+            val roles = activity.getSystemService(RoleManager::class.java)
+            shadowOf(roles).addAvailableRole(RoleManager.ROLE_ASSISTANT)
+            action.performClick()
+            assertTrue(roles.createRequestRoleIntent(RoleManager.ROLE_ASSISTANT)
+                .filterEquals(shadowOf(activity).nextStartedActivityForResult.intent))
+
+            ShadowRoleManager.addRoleHolder(RoleManager.ROLE_ASSISTANT, activity.packageName, Process.myUserHandle())
+            controller.start().resume()
+            assertEquals("Manage default assistant", action.text)
+            action.performClick()
+            assertEquals(Settings.ACTION_MANAGE_DEFAULT_APPS_SETTINGS, shadowOf(activity).nextStartedActivity.action)
+        }
+    }
+
+    @Test fun providedAddressIsReusedWithoutWifiSetup() {
+        val app = RuntimeEnvironment.getApplication()
+        shadowOf(app).grantPermissions(android.Manifest.permission.RECORD_AUDIO, android.Manifest.permission.POST_NOTIFICATIONS)
+        Robolectric.buildActivity(MicActivity::class.java).create().use { controller ->
+            val root = controller.get().findViewById<View>(android.R.id.content)
+            root.descendants().filterIsInstance<EditText>().single().setText("100.101.20.11")
+            root.descendants().filterIsInstance<Button>().single { it.text == "Talk" }.performClick()
+            val intent = shadowOf(app).nextStartedService
+            assertEquals(MicService.TALK, intent.action)
+            assertEquals("100.101.20.11", intent.getStringExtra(MicService.SERVER_IP))
+        }
+        Robolectric.buildActivity(MicActivity::class.java).create().use { controller ->
+            val root = controller.get().findViewById<View>(android.R.id.content)
+            assertEquals("100.101.20.11", root.descendants().filterIsInstance<EditText>().single().text.toString())
+            root.descendants().filterIsInstance<Switch>().single().performClick()
+            val intent = shadowOf(app).nextStartedService
+            assertEquals(MicService.WAKE_WORD, intent.action)
+            assertEquals("100.101.20.11", intent.getStringExtra(MicService.SERVER_IP))
         }
     }
 

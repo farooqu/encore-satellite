@@ -27,11 +27,33 @@ import com.encore.engine.mobile.PresentationObserver
 import com.encore.engine.mobile.Runtime
 import com.encore.satellite.AudioIo
 import org.json.JSONObject
+import java.net.Inet4Address
 
 internal data class MicState(
-    val endpoint: String = "", val problem: String = "", val status: String = "Mic paused",
-    val canTalk: Boolean = false, val active: Boolean = false, val transcript: String = "",
+    val endpoint: String = "", val problem: String = "", val status: String = "Ready to talk",
+    val canTalk: Boolean = false, val active: Boolean = false, val transcript: String = "", val armed: Boolean = false,
+    val wakeWord: Boolean = false, val pendingTalk: Boolean = false,
 )
+
+@Suppress("DEPRECATION") // Include physical Wi-Fi when a VPN is the default network.
+internal fun ConnectivityManager.wifiAddress(address: String? = null): Pair<Network, Inet4Address>? =
+    allNetworks.firstNotNullOfOrNull { network ->
+        val capabilities = getNetworkCapabilities(network)
+        if (capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) != true ||
+            !capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)) return@firstNotNullOfOrNull null
+        getLinkProperties(network)?.linkAddresses?.map { it.address }?.filterIsInstance<Inet4Address>()
+            ?.firstOrNull { !it.isLinkLocalAddress && (address == null || it.hostAddress == address) }
+            ?.let { network to it }
+    }
+
+internal fun Runtime.incubatorService(network: Network) = NsdServiceInfo().apply {
+    serviceName = name()
+    serviceType = "_voice-incubator._tcp."
+    port = Mobile.Port.toInt()
+    setAttribute("mac", mac())
+    setAttribute("protocol", "2")
+    if (Build.VERSION.SDK_INT >= 33) setNetwork(network)
+}
 
 class MicService : Service() {
     inner class LocalBinder : Binder() { val service get() = this@MicService }
@@ -49,19 +71,30 @@ class MicService : Service() {
     private var audio: AudioIo? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private var registration: NsdManager.RegistrationListener? = null
+    private var advertisedNetwork: Network? = null
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
+    private var peer = ""
+    private var localAddress = ""
     private var lastHealthy = 0L
+    private var talkDeadline = 0L
+    private var capturing = false
     internal var state = MicState()
         private set
 
     override fun onBind(intent: Intent) = binder
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action != ARM) {
+        val action = intent?.action
+        if (action != WAKE_WORD && action != TALK && action != SHORTCUT) {
             pause()
-        } else if (runtime == null) {
+        } else {
+            if (action == SHORTCUT && PersonalAssistant.ready?.session?.awaitTalk(this, intent!!.getLongExtra(SHORTCUT_ID, 0)) != true) {
+                if (runtime == null) stopSelf()
+                return START_NOT_STICKY
+            }
             try {
-                arm(intent.getStringExtra(SERVER_IP).orEmpty())
+                if (runtime == null) openVoice(intent?.getStringExtra(SERVER_IP).orEmpty(), wakeWord = action == WAKE_WORD)
+                if (action == WAKE_WORD) setWakeWord(true) else talk()
             } catch (error: Exception) {
                 pause(error.message ?: "Could not start the assistant microphone")
             } catch (_: LinkageError) {
@@ -71,9 +104,8 @@ class MicService : Service() {
         return START_NOT_STICKY
     }
 
-    private fun arm(peer: String) {
-        val network = checkNotNull(connectivity.activeNetwork) { "Connect to trusted home Wi-Fi first" }
-        val wifi = checkNotNull(wifiAddress(network)) { "Connect to trusted home Wi-Fi with a private IPv4 address first" }
+    private fun openVoice(peer: String, wakeWord: Boolean) {
+        check(peer.isNotEmpty()) { "Set up an Incubator server first" }
         check(getSystemService(NotificationManager::class.java).areNotificationsEnabled()) {
             "Enable notifications so you can pause the microphone from outside the app"
         }
@@ -84,30 +116,27 @@ class MicService : Service() {
 
         val io = AudioIo(this).also { audio = it }
         val engine = Mobile.open(noBackupFilesDir.resolve("voice").absolutePath, io).also { runtime = it }
+        engine.setWakeWordEnabled(wakeWord)
+        this.peer = peer
         val callback = object : ConnectivityManager.NetworkCallback() {
-            private fun verify() = handler.post {
-                if (networkCallback === this && (connectivity.activeNetwork != network || wifiAddress(network) != wifi)) {
-                    pause("Wi-Fi changed. Arm again on your trusted network.")
+            private fun retry() {
+                handler.post {
+                    if (networkCallback === this) {
+                        handler.removeCallbacks(refreshRoute)
+                        handler.post(refreshRoute)
+                    }
                 }
             }
-            override fun onLost(network: Network) { verify() }
-            override fun onLinkPropertiesChanged(network: Network, properties: LinkProperties) { verify() }
-            override fun onCapabilitiesChanged(network: Network, capabilities: NetworkCapabilities) { verify() }
+            override fun onAvailable(network: Network) { retry() }
+            override fun onLost(network: Network) { retry() }
+            override fun onLinkPropertiesChanged(network: Network, properties: LinkProperties) { retry() }
         }
         connectivity.registerDefaultNetworkCallback(callback)
         networkCallback = callback
-        check(connectivity.activeNetwork == network && wifiAddress(network) == wifi) { "Wi-Fi changed; try again" }
-        engine.start(wifi, peer)
-        advertise(engine)
-        // Match the explicit arm lifetime, including when the screen is off.
+        // Keep an explicit wake session alive while the screen is off.
         wakeLock = getSystemService(PowerManager::class.java)
-            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "$packageName:armed").apply { acquire() }
-        io.startCapture({ pcm ->
-            // A peer can disconnect during a write; the protocol fences the old link.
-            runCatching { engine.capture(pcm) }
-        }, { handler.post { if (audio === io) pause("Microphone stopped. Check Android privacy settings and arm again.") } })
-        lastHealthy = SystemClock.elapsedRealtime()
-        state = MicState(endpoint = "${engine.name()} · $wifi:${Mobile.Port}", status = "Waiting for Incubator")
+            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "$packageName:voice").apply { acquire() }
+        state = MicState(armed = true, wakeWord = wakeWord, status = "Waiting for Incubator")
         armedMic = this
         engine.observePresentation(PresentationObserver { observed ->
             handler.post {
@@ -115,19 +144,37 @@ class MicService : Service() {
                     // Keep wake/focus decisions live, but deliver transcript snapshots in order.
                     val current = snapshot()
                     refreshVoice(current)
-                    PersonalAssistant.ready?.session?.update(this, JSONObject(observed), VoiceTurn.from(current))
+                    val live = VoiceTurn.from(current)
+                    if (talkDeadline != 0L && live?.canPresent == true) {
+                        talkDeadline = 0
+                        state = state.copy(pendingTalk = false)
+                        PersonalAssistant.ready?.session?.beginTalk(this, live)
+                    }
+                    PersonalAssistant.ready?.session?.update(this, JSONObject(observed), live)
                 }
             }
         })
+        handler.post(refreshRoute)
         handler.post(tick)
     }
 
-    private fun wifiAddress(network: Network): String? {
-        val capabilities = connectivity.getNetworkCapabilities(network) ?: return null
-        if (!capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
-            !capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)) return null
-        return connectivity.getLinkProperties(network)?.linkAddresses?.firstNotNullOfOrNull {
-            it.address.hostAddress?.takeIf(Mobile::isPrivateIPv4)
+    private val refreshRoute = object : Runnable {
+        override fun run() {
+            val engine = runtime ?: return
+            val result = runCatching { engine.refreshRoute(peer) }
+            val address = result.getOrDefault("")
+            val wifi = address.takeIf { it.isNotEmpty() }?.let { connectivity.wifiAddress(it)?.first }
+            if (address != localAddress || wifi != advertisedNetwork) {
+                unadvertise()
+                state = state.copy(problem = "")
+                localAddress = address
+                advertisedNetwork = wifi
+                if (wifi != null) advertise(engine, wifi)
+            }
+            state = state.copy(endpoint = if (address.isEmpty()) "Server: $peer" else
+                "${engine.name()} · $address:${Mobile.Port}\nServer: $peer")
+            if (result.isFailure) state = state.copy(problem = "Could not open the voice connection. Retrying…")
+            handler.postDelayed(this, 5000)
         }
     }
 
@@ -140,13 +187,13 @@ class MicService : Service() {
         val open = PendingIntent.getActivity(this, 0, Intent(this, MicActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
         val pause = PendingIntent.getService(this, 1, Intent(this, MicService::class.java).setAction(PAUSE), PendingIntent.FLAG_IMMUTABLE)
         return Notification.Builder(this, "mic").setSmallIcon(R.drawable.ic_mic)
-            .setContentTitle(getString(R.string.assistant_armed))
-            .setContentText("Microphone on for local wake detection. Pause to turn it off.")
+            .setContentTitle("Encore voice is active")
+            .setContentText("Tap Stop voice to end the request or turn off wake-word listening.")
             .setVisibility(Notification.VISIBILITY_PRIVATE).setContentIntent(open).setDeleteIntent(pause).setOngoing(true)
-            .addAction(Notification.Action.Builder(null, "Pause mic", pause).build()).build()
+            .addAction(Notification.Action.Builder(null, "Stop voice", pause).build()).build()
     }
 
-    private fun advertise(engine: Runtime) {
+    private fun advertise(engine: Runtime, network: Network) {
         val listener = object : NsdManager.RegistrationListener {
             override fun onServiceRegistered(info: NsdServiceInfo) {}
             override fun onServiceUnregistered(info: NsdServiceInfo) {}
@@ -155,14 +202,15 @@ class MicService : Service() {
             }
             override fun onUnregistrationFailed(info: NsdServiceInfo, code: Int) {}
         }
-        getSystemService(NsdManager::class.java).registerService(NsdServiceInfo().apply {
-            serviceName = engine.name()
-            serviceType = "_voice-incubator._tcp."
-            port = Mobile.Port.toInt()
-            setAttribute("mac", engine.mac())
-            setAttribute("protocol", "2")
-        }, NsdManager.PROTOCOL_DNS_SD, listener)
-        registration = listener
+        runCatching {
+            getSystemService(NsdManager::class.java).registerService(engine.incubatorService(network), NsdManager.PROTOCOL_DNS_SD, listener)
+            registration = listener
+        }.onFailure { state = state.copy(problem = "Discovery unavailable. Add the phone by address.") }
+    }
+
+    private fun unadvertise() {
+        registration?.let { runCatching { getSystemService(NsdManager::class.java).unregisterService(it) } }
+        registration = null
     }
 
     private val tick = object : Runnable {
@@ -174,25 +222,55 @@ class MicService : Service() {
             if (ready) lastHealthy = now
             if (!getSystemService(NotificationManager::class.java).areNotificationsEnabled() ||
                 getSystemService(NotificationManager::class.java).getNotificationChannel("mic")?.importance == NotificationManager.IMPORTANCE_NONE) {
-                pause("Listening notification disabled. Mic paused.")
+                pause("The mic was turned off because its notification is disabled.")
                 return
             }
-            if (now - lastHealthy > 2000) {
-                pause("${io.captureProblem}. Mic paused.")
+            if (capturing && now - lastHealthy > 2000) {
+                pause("${io.captureProblem}. The mic is off.")
                 return
             }
             val snapshot = JSONObject(engine.snapshot(ready))
+            if (!capturing && (state.wakeWord || (talkDeadline != 0L && snapshot.optBoolean("connected")))) {
+                capturing = true
+                lastHealthy = now
+                try {
+                    io.startCapture({ pcm -> runCatching { engine.capture(pcm) } },
+                        { handler.post { if (audio === io) pause("Microphone unavailable. Check Android privacy settings.") } })
+                } catch (_: Exception) {
+                    pause("Microphone unavailable. Check Android privacy settings.")
+                    return
+                }
+            }
+            if (talkDeadline != 0L && now >= talkDeadline) {
+                cancelPendingTalk("Couldn't reach Incubator. Try again when connected.")
+                if (runtime !== engine) return
+            }
+            if (talkDeadline != 0L && snapshot.optBoolean("talk_ready")) {
+                startTalk(engine)
+                if (runtime === engine) handler.post(this)
+                return
+            }
+            if (!state.wakeWord && talkDeadline == 0L && !snapshot.optBoolean("active")) {
+                // The observer has already queued the turn's final transcript under the engine lock.
+                handler.post {
+                    if (runtime === engine && !state.wakeWord && talkDeadline == 0L && !snapshot().optBoolean("active"))
+                        pause(keepTranscript = true)
+                }
+                handler.postDelayed(this, 150)
+                return
+            }
             val active = refreshVoice(snapshot)
             state = state.copy(active = active, canTalk = snapshot.optBoolean("talk_ready"),
                 status = when {
-                    !ready -> "Waiting for microphone"
                     !snapshot.optBoolean("connected") -> "Waiting for Incubator"
+                    !ready -> "Waiting for microphone"
                     active -> when (snapshot.optString("phase")) {
                         "tentative", "listening" -> "Listening to your request"
                         "speaking" -> "Replying"
                         else -> "Working"
                     }
                     snapshot.optBoolean("wake_ready") -> "Listening for your wake word"
+                    !state.wakeWord -> "Ready to talk"
                     snapshot.optInt("wake_models") == 0 -> "No wake model · Talk is available"
                     else -> "Preparing wake detection"
                 }, transcript = if (active) listOf(snapshot.optString("heard"), snapshot.optString("reply"))
@@ -231,31 +309,64 @@ class MicService : Service() {
 
     internal fun voiceTurn(): VoiceTurn? = VoiceTurn.from(snapshot())
 
-    internal fun talk() {
-        if (!snapshot().optBoolean("talk_ready")) return
-        runCatching { runtime?.talk() }.onFailure { state = state.copy(problem = "Talk unavailable. Try again when connected.") }
+    private fun talk() {
+        val engine = runtime ?: return
+        if (voiceTurn()?.canPresent == true || talkDeadline != 0L) return
+        if (snapshot().optBoolean("talk_ready")) startTalk(engine)
+        else {
+            talkDeadline = SystemClock.elapsedRealtime() + 65_000
+            state = state.copy(pendingTalk = true, problem = "")
+        }
     }
 
-    internal fun stopTurn() { runtime?.stop() }
+    private fun startTalk(engine: Runtime) {
+        talkDeadline = 0
+        state = state.copy(pendingTalk = false, problem = "")
+        runCatching { engine.talk() }
+            .onSuccess {
+                voiceTurn()?.let { PersonalAssistant.ready?.session?.beginTalk(this, it) }
+            }
+            .onFailure { cancelPendingTalk("Talk unavailable. Try again when connected.") }
+    }
+
+    internal fun cancelPendingTalk(problem: String = "") {
+        if (talkDeadline == 0L && problem.isEmpty()) return
+        talkDeadline = 0
+        state = state.copy(pendingTalk = false, problem = problem)
+        if (!state.wakeWord && !snapshot().optBoolean("active")) pause(problem)
+        else if (problem.isNotEmpty()) PersonalAssistant.ready?.session?.talkUnavailable(this, problem)
+    }
+
+    internal fun setWakeWord(enabled: Boolean) {
+        runtime?.setWakeWordEnabled(enabled)
+        state = state.copy(wakeWord = enabled)
+    }
+
+    internal fun stopTurn() { if (state.pendingTalk) cancelPendingTalk() else runtime?.stop() }
     internal fun stopTurn(key: TurnKey) { runtime?.stopTurn(key.generation, key.turn) }
 
-    internal fun pause(problem: String = "") {
-        shutdown(problem)
+    internal fun pause(problem: String = "", keepTranscript: Boolean = false) {
+        shutdown(problem, keepTranscript)
         stopSelf()
     }
 
-    private fun shutdown(problem: String) {
+    private fun shutdown(problem: String, keepTranscript: Boolean = false) {
         handler.removeCallbacks(tick)
+        handler.removeCallbacks(refreshRoute)
+        talkDeadline = 0
+        capturing = false
+        if (problem.isNotEmpty()) PersonalAssistant.ready?.session?.talkUnavailable(this, problem)
+        PersonalAssistant.ready?.session?.invalidate(this, keepTranscript)
         if (armedMic === this) {
             armedMic = null
-            PersonalAssistant.ready?.session?.invalidate(this)
             PersonalAssistant.ready?.update(this, null)
         }
         runtime?.observePresentation(null)
         networkCallback?.let { connectivity.unregisterNetworkCallback(it) }
         networkCallback = null
-        registration?.let { runCatching { getSystemService(NsdManager::class.java).unregisterService(it) } }
-        registration = null
+        unadvertise()
+        advertisedNetwork = null
+        localAddress = ""
         audio?.stopCapture()
         runtime?.close()
         runtime = null
@@ -273,11 +384,15 @@ class MicService : Service() {
     override fun onDestroy() { shutdown(""); super.onDestroy() }
 
     companion object {
-        // Voice interaction services run in the same process and never arm it.
+        // The service is alive for a manual request or explicit wake-word listening.
         internal var armedMic: MicService? = null
             private set
-        const val ARM = "com.encore.personal.ARM"
+        const val WAKE_WORD = "com.encore.personal.WAKE_WORD"
+        const val TALK = "com.encore.personal.TALK"
+        const val SHORTCUT = "com.encore.personal.SHORTCUT"
+        const val SHORTCUT_ID = "shortcut_id"
         const val PAUSE = "com.encore.personal.PAUSE"
+        const val PREFERENCES = "personal_mic"
         const val SERVER_IP = "server_ip"
     }
 }

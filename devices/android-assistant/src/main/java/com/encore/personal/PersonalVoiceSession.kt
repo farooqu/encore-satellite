@@ -1,7 +1,9 @@
 package com.encore.personal
 
+import android.Manifest
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.drawable.ColorDrawable
 import android.os.Build
@@ -69,6 +71,8 @@ internal class PersonalVoiceSession(context: Context) : VoiceInteractionSession(
     private var mode = OverlayMode.HIDDEN
     private var panel: VoiceOverlayView? = null
     private var manual = false
+    private var problem = ""
+    private var shortcutId = 0L
 
     override fun onCreate() {
         super.onCreate()
@@ -90,10 +94,35 @@ internal class PersonalVoiceSession(context: Context) : VoiceInteractionSession(
             }
         } else {
             manual = true
-            mic = MicService.armedMic
-            mic?.talk()
-            call.start(mic?.voiceTurn())
-            mode = if (call.turn != null) OverlayMode.PANEL else OverlayMode.UNAVAILABLE
+            val existing = MicService.armedMic
+            val live = existing?.voiceTurn()
+            if (live?.canPresent == true) {
+                mic = existing
+                call.start(live)
+                mode = OverlayMode.PANEL
+            } else if (mode != OverlayMode.CONNECTING) {
+                mic = null
+                call.clear()
+                val address = context.getSharedPreferences(MicService.PREFERENCES, Context.MODE_PRIVATE)
+                    .getString(MicService.SERVER_IP, "").orEmpty()
+                problem = when {
+                    address.isEmpty() -> "Save an Incubator server in Encore first."
+                    context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED ->
+                        "Allow microphone access in Encore first."
+                    else -> ""
+                }
+                mode = if (problem.isEmpty()) OverlayMode.CONNECTING else OverlayMode.UNAVAILABLE
+                if (mode == OverlayMode.CONNECTING) {
+                    shortcutId = ++nextShortcutId
+                    runCatching {
+                        context.startForegroundService(Intent(context, MicService::class.java).setAction(MicService.SHORTCUT)
+                            .putExtra(MicService.SERVER_IP, address).putExtra(MicService.SHORTCUT_ID, shortcutId))
+                    }.onFailure {
+                        mode = OverlayMode.UNAVAILABLE
+                        problem = "Could not start voice. Open Encore and try again."
+                    }
+                }
+            }
         }
         setUiEnabled(mode != OverlayMode.HIDDEN)
     }
@@ -112,7 +141,31 @@ internal class PersonalVoiceSession(context: Context) : VoiceInteractionSession(
 
     internal fun owns(source: MicService, key: TurnKey) = mic === source && call.turn?.key == key && mode != OverlayMode.HIDDEN
 
-    internal fun invalidate(source: MicService) { if (mic === source) dismiss() }
+    internal fun awaitTalk(source: MicService, id: Long): Boolean {
+        if (mode != OverlayMode.CONNECTING || shortcutId != id) return false
+        mic = source
+        return true
+    }
+
+    internal fun beginTalk(source: MicService, live: VoiceTurn) {
+        if (mic !== source || mode != OverlayMode.CONNECTING) return
+        call.start(live)
+        mode = OverlayMode.PANEL
+        render()
+    }
+
+    internal fun talkUnavailable(source: MicService, message: String) {
+        if (mic !== source || mode != OverlayMode.CONNECTING) return
+        mic = null
+        mode = OverlayMode.UNAVAILABLE
+        problem = message.ifEmpty { "Couldn't start a voice request. Try again." }
+        render()
+    }
+
+    internal fun invalidate(source: MicService, keepTranscript: Boolean = false) {
+        if (mic !== source) return
+        if (keepTranscript && call.finished) mic = null else dismiss()
+    }
 
     internal fun update(source: MicService, observed: JSONObject, current: VoiceTurn?) {
         if (mic !== source || mode == OverlayMode.HIDDEN || call.turn == null) return
@@ -147,7 +200,7 @@ internal class PersonalVoiceSession(context: Context) : VoiceInteractionSession(
             window.addFlags(LayoutParams.FLAG_SECURE)
             window.clearFlags(passive)
         }
-        panel?.render(mode, call.turn, mic != null, call.earlier, call.finished)
+        panel?.render(mode, call.turn, call.earlier, call.finished, problem)
     }
 
     override fun onComputeInsets(outInsets: Insets) {
@@ -174,12 +227,14 @@ internal class PersonalVoiceSession(context: Context) : VoiceInteractionSession(
     }
 
     private fun clear() {
+        val pending = mic?.takeIf { mode == OverlayMode.CONNECTING }
         if (PersonalAssistant.ready?.session === this) PersonalAssistant.ready?.session = null
         mode = OverlayMode.HIDDEN
         call.clear()
-        panel?.render(mode, null, false)
+        panel?.render(mode, null)
         manual = false
         mic = null
+        pending?.cancelPendingTalk()
     }
 
     override fun onBackPressed() { if (mode == OverlayMode.PANEL) stop() else dismiss() }
@@ -189,4 +244,6 @@ internal class PersonalVoiceSession(context: Context) : VoiceInteractionSession(
     override fun onHide() { clear(); super.onHide() }
 
     override fun onDestroy() { clear(); panel = null; super.onDestroy() }
+
+    private companion object { var nextShortcutId = 0L }
 }

@@ -18,7 +18,7 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 
-internal enum class OverlayMode { HIDDEN, CUE, PANEL, UNAVAILABLE }
+internal enum class OverlayMode { HIDDEN, CUE, CONNECTING, PANEL, UNAVAILABLE }
 
 internal class VoiceOverlayView(
     context: Context, close: () -> Unit, setup: () -> Unit,
@@ -64,7 +64,7 @@ internal class VoiceOverlayView(
     }.apply {
         addView(transcript, LayoutParams(-1, -2))
     }
-    private val openSetup = button("Open setup", setup)
+    private val openSetup = button("Open Encore", setup)
     private val closeButton = button("×", close).apply {
         contentDescription = "Close voice panel"
         textSize = 23f
@@ -90,7 +90,7 @@ internal class VoiceOverlayView(
         }
         place(0, 0, 0)
         applySystemColors(resources.configuration)
-        render(OverlayMode.HIDDEN, null, false)
+        render(OverlayMode.HIDDEN, null)
     }
 
     override fun onConfigurationChanged(newConfig: Configuration) {
@@ -134,16 +134,18 @@ internal class VoiceOverlayView(
         super.onMeasure(widthMeasureSpec, heightMeasureSpec)
     }
 
-    internal fun render(mode: OverlayMode, turn: VoiceTurn?, armed: Boolean,
-        earlier: List<VoiceTurn> = emptyList(), finished: Boolean = false,
+    internal fun render(mode: OverlayMode, turn: VoiceTurn?,
+        earlier: List<VoiceTurn> = emptyList(), finished: Boolean = false, problem: String = "",
     ) {
-        val showSheet = mode == OverlayMode.PANEL || mode == OverlayMode.UNAVAILABLE
+        val showSheet = mode == OverlayMode.PANEL || mode == OverlayMode.UNAVAILABLE || mode == OverlayMode.CONNECTING
         cue.visibility = if (mode == OverlayMode.CUE) View.VISIBLE else View.GONE
         sheet.visibility = if (showSheet) View.VISIBLE else View.GONE
         val next = buildList {
-            if (mode == OverlayMode.UNAVAILABLE) {
-                add(Line(if (armed) "Voice unavailable" else "Mic paused", placeholder = true))
-                add(Line(if (armed) "Check your Incubator connection in setup." else "Open setup to arm your phone on trusted Wi-Fi."))
+            if (mode == OverlayMode.CONNECTING) {
+                add(Line("Connecting to Incubator…", placeholder = true))
+            } else if (mode == OverlayMode.UNAVAILABLE) {
+                add(Line("Voice unavailable", placeholder = true))
+                add(Line(problem))
             } else if (mode == OverlayMode.PANEL && turn != null) {
                 for (entry in earlier + turn) {
                     val current = entry === turn && !finished

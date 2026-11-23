@@ -25,8 +25,8 @@ don't forward its port.
 
 Mic mute does not dismiss or silence a ringing alert on a connected satellite.
 Use the Dot's Action button or **Stop alert** on Generic Android while muted;
-the mic stays off. Android Assistant's **Pause mic** stops its satellite runtime,
-so it cannot receive alerts while paused.
+the mic stays off. Android Assistant's **Turn off mic** stops its satellite runtime,
+so it cannot receive alerts while the mic is off.
 
 Generic Android shows the next countdown in a chip. Tap it to open the same
 bottom sheet used for listening; the sheet opens on its own when an alert rings.
@@ -86,7 +86,7 @@ The table lists features in the development builds. Check each device guide for 
 
 | | [Android Assistant](../devices/android-assistant/README.md) | [Generic Android](../devices/android-generic/README.md) | [Echo Dot (2nd gen)](../devices/biscuit/README.md) |
 | --- | --- | --- | --- |
-| Local start and feedback | Talk; optional Android assistant overlay on Android 12+. Explicit Arm mic and Pause mic. | Talk and conversation overlay over the optional HA dashboard. Local mic mute. | Action button, volume buttons, hardware mute-state gate and light ring; the ring isn't a copy of Voice PE. |
+| Local start and feedback | Talk and the optional Android assistant shortcut on Android 12+ open the mic for a request. Background wake-word listening is a separate opt-in. | Talk and conversation overlay over the optional HA dashboard. Local mic mute. | Action button, volume buttons, hardware mute-state gate and light ring; the ring isn't a copy of Voice PE. |
 | Off-call audio | No Live Monitor, enrollment, wake teaching, or intercom. | Live Monitor with a visible, focused recording indicator. No AEC monitor route or two-way intercom advertised. | Implements Live Monitor, the AEC route used for enrollment and wake teaching, and intercom transport with recording-ring gating. The full intercom experience needs compatible companion behavior and physical qualification. |
 | Other jobs | Personal voice only; no ESPHome controls, room dashboard, or music player. | ESPHome pairing and controls, optional Bluetooth proxy and compatible Sendspin playback, and an illuminance sensor if the device exposes one. | ESPHome controls and optional Bluetooth proxy. The AArch64 starter does not include the retired ARMv7 package's Sendspin companion. |
 

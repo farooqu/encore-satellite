@@ -47,27 +47,40 @@ using Android's ordinary sideloading confirmation. The debug app ID is
 
 ## Connect to Voice Incubator
 
-1. On trusted home Wi-Fi, enter the private IPv4 address the Incubator app
-   connects **from** (normally the HA host; reserve its address in DHCP).
-   Tap **Arm mic** and grant microphone and notification access. The phone
-   only listens on its current private Wi-Fi address, TCP 6055, while armed.
-2. Connect Incubator to the discovered `encore-personal-…` satellite or use
-   the phone endpoint shown in the app. The prototype only accepts connections
-   from the configured server IP. If using a container or NAT, verify the
-   actual source address. Native Incubator is unauthenticated and unencrypted;
-   the address filter is not authentication. Do not port-forward it or arm
-   on guest, public or untrusted Wi-Fi.
-3. Try **Talk**, then select an ordinary wake word for the phone on Incubator's
-   Wake words page. Bring your own compatible Micro Wake Word `.tflite` and
+1. On trusted home Wi-Fi, tap **Discover on home Wi-Fi**, confirm, and keep the
+   screen open. The phone advertises itself for up to 30 seconds without opening
+   the microphone. Incubator discovers the `encore-personal-…` satellite and
+   connects to it. If needed, point Incubator at the phone endpoint shown during
+   setup. Confirm **Save server** if the detected address is your Incubator host.
+   You can also enter the IPv4 address Incubator connects **from** manually.
+   The app remembers that address; reserve it in DHCP if applicable.
+2. Tap **Talk** and grant microphone and notification access. Wi-Fi is not
+   required after setup. For a request or while wake-word listening is enabled,
+   the phone listens on TCP 6055 at the source address Android routes toward the
+   saved server and only accepts that server's IPv4 address. Incubator must be
+   able to reach the phone, not just the reverse. A cold request may wait for
+   Incubator's next connection attempt; you can cancel while it waits.
+   Over WireGuard, route the phone's tunnel IP from the Incubator host and point
+   Incubator at the phone's tunnel IP and TCP 6055 if discovery does not cross
+   the tunnel. The incoming source must still match the saved address; check
+   it if your VPN or container uses NAT. Native Incubator is unauthenticated
+   and unencrypted; the IP filter is not identity verification. Use a trusted
+   LAN or VPN and never port-forward the listener. On an untrusted network
+   without a trusted route to Incubator, do not start voice requests or leave
+   wake-word listening enabled: another device could use the same private IP.
+3. **Listen for wake word** is optional and off by default. To use it, turn it
+   on and select a wake word for the phone on Incubator's Wake words page.
+   Bring your own compatible Micro Wake Word `.tflite` and
    `.json` manifest by uploading them **to Incubator**. It packs and pushes
    the model; the phone runs the MixedNet model with the Micro Wake Word
    frontend and only sends session audio (including bounded wake pre-roll)
-   once invoked. No model is bundled and a stop-only model will not arm wake.
-4. On Android 12 or newer, tap **Set up assistant overlay** and choose **Encore Satellite Assistant** as the
+   once invoked. Talk doesn't need a wake model. No model is bundled, and a
+   Stop-only model can't start a request.
+4. On Android 12 or newer, tap **Set as default assistant** and choose **Encore Satellite Assistant** as the
    default digital assistant. This replaces the existing assistant shortcut,
    not the Companion app. Use the system assistant gesture or hold the power
-   button if your phone maps that action to the assistant. Neither the gesture
-   nor a wake arms a paused microphone. The app doesn't request underlying app
+   button if your phone maps that action to the assistant. This starts a manual
+   request even with wake-word listening off. The app doesn't request underlying app
    content, screenshots or the general draw-over-other-apps permission. Android
    8–11 retain in-app Talk and wake detection without the assistant overlay.
    The overlay shows what Incubator heard and the reply text it sends, including
@@ -75,12 +88,15 @@ using Android's ordinary sideloading confirmation. The debug app ID is
    half the screen. After a normal finish with text, it stays for six seconds;
    **×** or **Back** closes it sooner. The overlay does not keep transcript history
    after dismissal.
-5. Test with the display on, then locked and screen off. The explicit arm
-   keeps a microphone foreground service and partial wake lock; measure battery,
-   heat, mic contention and Bluetooth audio routing on the actual phone. **Stop**
-   cancels a turn. **Pause mic** in the app or notification stops listening and
-   closes the satellite. Changing the Wi-Fi network/address or losing sustained
-   microphone access pauses it. It does not re-arm at boot or after process death.
+5. **Stop** cancels a request. Switching off **Listen for wake word** prevents
+   new wakes without cancelling an existing request or follow-up. When wake-word
+   listening is off, Encore opens the mic only after a manual request connects,
+   then releases it when the request ends. **Stop voice** in the Android
+   notification ends capture immediately. A network change or server outage
+   does not switch off wake-word listening; the service retries on network
+   changes and periodically. A disconnected request does not resume. Losing
+   microphone access or disabling the notification stops capture. Background
+   listening does not start automatically at boot or after process death.
 
 On an unlocked, interactive screen, a tentative wake requests a small,
 non-interactive cue above navigation immediately. The phone keeps capturing
@@ -90,19 +106,49 @@ without an alert. If Android delivers the window request after the verdict,
 it opens directly as the full panel on acceptance or stays hidden on rejection.
 The Listening panel stays compact and grows to fit the
 transcript or reply, up to half the screen. Longer text scrolls inside the
-panel. The close icon stops the current turn; Pause mic stays in setup and the
-notification. Automatic wake UI does not turn on the display or show over
+panel. The close icon stops the current turn or cancels a pending request.
+Automatic wake UI does not turn on the display or show over
 the lock screen. Actual window behavior and power-button mapping vary by phone
 and need device testing.
+
+### Voice PE comparison and route check
+
+[Voice PE firmware `8ba314e`](https://github.com/OHF-Voice/firmware-voice-incubator/blob/8ba314e68ff4a23b5c08b78fa21926104bbabba2/PROTOCOL.md)
+advertises a TCP listener. It does not start a connection to the app or toggle
+the hardware mute switch when the connection drops. The
+[Incubator app at `38b573b`](https://github.com/OHF-Voice/voice-incubator/blob/38b573b13a92f0654b24611a3a6355c8e8c4d5c3/voice_incubator/server.py#L1752-L1830)
+discovers and dials that listener, then retries with backoff. Encore keeps that
+direction and chooses a new listen address when the OS route changes rather
+than opening a wildcard listener. Voice PE's Action button sends a `manual`
+call independently of ordinary wake recognition. Encore does the same for Talk
+and the Android shortcut, but makes background capture opt-in and closes the
+manual-only connection at the end of a request to avoid keeping an idle phone's
+microphone and foreground service active. This can make cold Talk slower than
+the always-connected Voice PE. Spoken Stop remains available during eligible
+replies if Incubator has supplied its model. The phone does not advertise
+Live Monitor, monitor AEC, or intercom, and ignores intercom requests: using the
+phone as a personal assistant does not grant other rooms access to its mic.
+Discovery learns the app's source
+address from its inbound connection because stock Incubator does not advertise
+itself as a server. These are source findings, not a phone test.
+
+To verify on a phone, save the server once. With wake-word listening off, try
+Talk and the Android shortcut on Wi-Fi and on cellular with WireGuard routed
+both ways. Check that the microphone indicator appears for the request and
+clears at the end, including after follow-ups. Cancel while connecting and
+confirm no request starts later. Turn on wake-word listening, disconnect the VPN
+while off Wi-Fi, and confirm the switch stays on. Return to Wi-Fi and confirm
+wake and Talk recover without touching the switch. Repeat with the screen off
+and check microphone contention, audio routing, battery, and heat.
 
 ## Which satellite options belong on a phone?
 
 | Option | Encore Satellite Assistant prototype |
 | --- | --- |
 | Assigned/custom wake words, Talk, spoken Stop, replies, follow-ups | Reuses the native Incubator session/model path and Android audio/AEC3. On-device reliability and echo behavior are unqualified. |
-| Listening status and mic privacy | Keep explicit arming and Pause; distinguish waiting for server/model from wake ready. Transcript is not persisted. |
+| Listening status and mic privacy | On-demand capture for manual requests; separate opt-in for background wake-word listening. Transcript is not persisted. |
 | Fixed Incubator Person | Important before treating it as a personal assistant. The install ID is stable, but stock Incubator has no fixed satellite-to-Person mapping. A per-person wake word is only an attribution fallback, not a binding for Talk or authorization. |
-| Timers, alarms and announcements | Worth testing separately. The native transport can receive them if Incubator routes them here while armed. There is no phone alarm/scheduling or ESPHome announcement feature. Prefer personal timers over shared-room broadcasts; avoid assigning the phone to a shared room by default. |
+| Timers, alarms and announcements | Worth testing separately. The native transport can receive them if Incubator routes them here while the service is connected. There is no phone alarm/scheduling or ESPHome announcement feature. Prefer personal timers over shared-room broadcasts; avoid assigning the phone to a shared room by default. |
 | Android assistant role | Optional system overlay and manual gesture. Does not take over the lock screen or replace the system speech recognizer. |
 | Headset routing, shortcuts/tiles | Evaluate after screen-off voice and battery are tested. |
 | Off-store updates | Required before regular use. The debug APK has no updater and is not the initial signed install. |
@@ -145,8 +191,8 @@ in-app updater is activated by this workflow.
 
 For the signed app, make automatic updates a local opt-in. Schedule checks and
 stage verified, newer APKs automatically; verify the signed metadata, digest,
-package identity and signer before install. Apply while the mic is paused so
-an update doesn't interrupt a voice session or silently re-arm the mic. On
+package identity and signer before install. Apply while the mic is off so
+an update doesn't interrupt a voice session or silently turn on the mic. On
 Android 12+ request unattended self-update where Android permits it. If source
 permission, device policy, or the installer requires user action, show a local
 notification for approval. Test a clean install followed by an actual signed

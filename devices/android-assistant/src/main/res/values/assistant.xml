@@ -1,6 +1,5 @@
 <resources>
     <string name="app_name">Encore Satellite Assistant</string>
-    <string name="assistant_armed">Encore Satellite Assistant is armed</string>
     <!-- Older versions can replace the system speech recognizer with the assistant's. -->
     <bool name="assistant_overlay">false</bool>
 </resources>

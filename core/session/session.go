@@ -89,6 +89,7 @@ type Engine struct {
 	cancelOutput                    context.CancelCauseFunc
 	localOutput                     context.Context
 	wakeModelWait                   chan struct{}
+	wakeWordDisabled                bool
 	activityHandler                 func(bool)
 	voiceActive                     bool
 	presentationChanged             func(presentation.State)
@@ -136,7 +137,7 @@ func (e *Engine) snapshot() presentation.State {
 	s.TalkAllowed = !s.Inhibited && !s.Active
 	// This is engine permission only. Incubator additionally checks whether
 	// its ordinary model worker has armed and the host reports healthy capture.
-	s.WakeAllowed = s.TalkAllowed
+	s.WakeAllowed = s.TalkAllowed && !e.wakeWordDisabled
 	if e.active || (e.outputOpen && e.outputOwner == "voice") {
 		s.Invocation = e.invocation
 		s.Speaker = e.state.Speaker
@@ -267,6 +268,18 @@ func (e *Engine) disconnect(reason string) {
 	e.publishActivity()
 }
 
+// SetWakeWordEnabled controls ordinary wake starts, not manual turns or spoken Stop.
+func (e *Engine) SetWakeWordEnabled(enabled bool) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.wakeWordDisabled == !enabled {
+		return false
+	}
+	e.wakeWordDisabled = !enabled
+	e.pre.Clear()
+	return true
+}
+
 // SetMuted stops capture and cancels the current call, without dismissing a ring.
 // Call cancellation retires the connection: ordinary and cancellation stream ends are
 // indistinguishable. A new turn waits for a fresh connection.
@@ -361,7 +374,7 @@ func (e *Engine) CaptureForModels(frame audio.Frame) (modelInput bool, monitorID
 		err := e.send(Command{Kind: "audio", Samples: frame.Samples})
 		return err == nil, 0, err
 	}
-	if !e.active && !e.discard {
+	if !e.active && !e.discard && !e.wakeWordDisabled {
 		e.pre.Add(frame.Samples)
 	}
 	return true, 0, nil
@@ -463,6 +476,9 @@ func (e *Engine) Wake(detection wake.Detection) error {
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if e.wakeWordDisabled {
+		return ErrUnavailable
+	}
 	return e.start(detection, e.pre.Snapshot())
 }
 
@@ -483,7 +499,7 @@ func (e *Engine) WakeState(generation uint64) (listen, stop bool, monitorID uint
 		}
 		return false, false, 0
 	}
-	listen = e.wakeModelsIdle()
+	listen = !e.wakeWordDisabled && e.wakeModelsIdle()
 	return
 }
 
@@ -551,7 +567,7 @@ func (e *Engine) WakeFor(generation uint64, detection wake.Detection) error {
 	if err := detection.Validate(); err != nil {
 		return err
 	}
-	if e.announcing || e.state.Alert {
+	if e.wakeWordDisabled || e.announcing || e.state.Alert {
 		return ErrUnavailable
 	}
 	return e.start(detection, e.pre.Snapshot())
