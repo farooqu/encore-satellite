@@ -3,25 +3,33 @@ package com.encore.satellite
 import android.graphics.BitmapFactory
 import android.provider.Settings
 import android.util.Base64
+import android.view.MotionEvent
+import android.view.View
 import androidx.activity.OnBackPressedDispatcher
 import androidx.activity.compose.LocalOnBackPressedDispatcherOwner
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
 import com.github.takahirom.roborazzi.ExperimentalRoborazziApi
 import com.github.takahirom.roborazzi.RoborazziOptions
 import com.github.takahirom.roborazzi.RoborazziTaskType
@@ -125,10 +133,10 @@ class EncoreScreenTest {
         pair.assertIsDisplayed().performClick()
         compose.runOnIdle { assertEquals(2, taps); state.value = state.value.copy(esphome = "paired") }
         pair.assertDoesNotExist()
-        compose.onNodeWithText("Voice satellite").assertIsDisplayed()
+        compose.onNodeWithTag("display-clock").assertIsDisplayed()
         compose.runOnIdle { state.value = state.value.copy(running = false) }
         allow.assertDoesNotExist()
-        compose.onNodeWithText("Voice satellite").assertIsDisplayed()
+        compose.onNodeWithTag("display-clock").assertIsDisplayed()
         compose.onNodeWithContentDescription("Start satellite").assertDoesNotExist()
         openSettings()
         pair.assertDoesNotExist()
@@ -173,22 +181,18 @@ class EncoreScreenTest {
         compose.onNodeWithText("Set up Bluetooth proxy").assertIsDisplayed()
         compose.onNodeWithText("Not now").performClick()
         compose.onNodeWithText("Finish setup").assertIsDisplayed()
-        compose.onNodeWithText("keep Encore voice-only", substring = true).assertIsDisplayed()
+        compose.onNodeWithText("Encore shows a clock", substring = true).assertIsDisplayed()
         compose.onNodeWithText("Manage notifications").assertDoesNotExist()
         capture("android-first-run-checklist")
         compose.onNodeWithText("Done").performScrollTo().performClick()
-        compose.onNodeWithText("Voice satellite").assertIsDisplayed()
+        compose.onNodeWithTag("display-clock").assertIsDisplayed()
         openSettings()
         compose.onNodeWithText("Setup").performClick()
         compose.onNodeWithText("Finish setup").assertIsDisplayed()
-        compose.runOnIdle { state.value = state.value.copy(dashboard = "https://home.example/lovelace/home") }
-        compose.onNodeWithText("Dashboard URL received", substring = true).assertIsDisplayed()
-        compose.onNodeWithText("Open dashboard").assertDoesNotExist()
-        capture("android-first-run-checklist-dashboard-ready")
 
         // An upgraded, already paired installation has no onboarding cursor.
-        compose.runOnIdle { stage.value = SetupStage.NEW; notificationsReviewed.value = false; state.value = state.value.copy(dashboard = "") }
-        compose.onNodeWithText("Voice satellite").assertIsDisplayed()
+        compose.runOnIdle { stage.value = SetupStage.NEW; notificationsReviewed.value = false }
+        compose.onNodeWithTag("display-clock").assertIsDisplayed()
         compose.onNodeWithText("Allow notifications").assertDoesNotExist()
         compose.onNodeWithText("Set up Bluetooth proxy").assertDoesNotExist()
     }
@@ -444,7 +448,9 @@ class EncoreScreenTest {
         openSettings()
         compose.onNodeWithText("Trusted HA origin").assertDoesNotExist()
         compose.onNodeWithText("Save trusted origin").assertDoesNotExist()
-        compose.onNodeWithText("Set one full Dashboard URL", substring = true).performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("Choose dashboards").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("Home Assistant address").assertIsDisplayed()
+        compose.onNodeWithText("Add dashboard URL").assertDoesNotExist()
         capture("android-settings")
         compose.onNodeWithText("Done").performClick()
         advance(400)
@@ -590,7 +596,7 @@ class EncoreScreenTest {
     }
 
     @Test fun parsesAdditiveFactsWithoutInventingReadinessPlaybackOrIdentity() {
-        val base = """{"voice":{"phase":"speaking","connected":true,"muted":false,"alert":false},"models":3,"dashboard":"","reload":0,"problem":""}"""
+        val base = """{"voice":{"phase":"speaking","connected":true,"muted":false,"alert":false},"models":3,"reload":0,"problem":""}"""
         val missing = EncoreState.parse(base, ready().copy(speakerName = "Previous", speakerRGB = listOf(1, 2, 3)))
         assertFalse(missing.talkReady); assertFalse(missing.wakeReady); assertFalse(missing.captureReady)
         assertFalse(missing.accepted)
@@ -882,15 +888,122 @@ class EncoreScreenTest {
         capture("android-focus-resumed")
     }
 
-    @Test fun dashboardNavigationUsesOnlyTheConfiguredURL() {
-        val state = EncoreState(dashboard = "https://ha.example:8123/lovelace/home")
-        assertTrue(trustedNavigation(state.origin, "https://ha.example:8123/auth/authorize?client_id=encore"))
+    @Test fun dashboardNavigationUsesOnlyTheConfiguredOrigin() {
+        val origin = "https://ha.example:8123"
+        assertTrue(trustedNavigation(origin, "$origin/auth/authorize?client_id=encore"))
         for (url in listOf("https://evil.example/", "http://ha.example:8123/", "https://ha.example/", "file:///data/local", "intent://ha.example", "https://user@ha.example:8123/")) {
-            assertFalse(url, trustedNavigation(state.origin, url))
+            assertFalse(url, trustedNavigation(origin, url))
         }
-        val moved = state.copy(dashboard = "http://new-ha.example:8124/dashboard-main")
-        assertTrue(trustedNavigation(moved.origin, "http://new-ha.example:8124/auth/authorize"))
-        assertFalse(trustedNavigation(moved.origin, state.dashboard))
+        val moved = "http://new-ha.example:8124"
+        assertTrue(trustedNavigation(moved, "$moved/auth/authorize"))
+        assertFalse(trustedNavigation(moved, "$origin/lovelace/home"))
+    }
+
+    @Test fun landscapeClockFillsDisplayWithoutVoiceStatus() = checkClock("24", "landscape")
+
+    @Test @Config(qualifiers = "w400dp-h700dp-mdpi")
+    fun portraitClockFitsTimeWithAmPm() = checkClock("12", "portrait")
+
+    private fun checkClock(format: String, orientation: String) {
+        Settings.System.putString(RuntimeEnvironment.getApplication().contentResolver, Settings.System.TIME_12_24, format)
+        compose.setContent {
+            EncoreScreen(ready(), {}, {}, {}, {}, { "" }, { "" }, {}, {}, {}, {})
+        }
+        val clock = compose.onNodeWithTag("display-clock").assertIsDisplayed()
+        compose.onNodeWithText("Wake ready").assertDoesNotExist()
+        val layouts = mutableListOf<TextLayoutResult>()
+        compose.onNodeWithTag("display-clock-time").assertIsDisplayed()
+            .performSemanticsAction(SemanticsActions.GetTextLayoutResult) { assertTrue(it(layouts)) }
+        val layout = layouts.single()
+        assertTrue("Time must fit on one line", layout.lineCount == 1 && !layout.hasVisualOverflow)
+        val timeWidth = layout.getLineRight(0) - layout.getLineLeft(0)
+        assertTrue("Time must fill most of the screen width", timeWidth > clock.fetchSemanticsNode().size.width * .70f)
+        capture("android-clock-$orientation")
+    }
+
+    @Test fun dashboardPickerCapsOrderedSelectionAndCarouselSwipesToClockAndOtherViews() {
+        val available = (1..6).map { DashboardPage("/lovelace/room-$it", "Room $it") }
+        val selected = mutableStateOf(emptyList<DashboardPage>())
+        val choosing = mutableStateOf(true)
+        val dashboardTouches = mutableListOf<Int>()
+        compose.setContent {
+            MaterialTheme(colorScheme = darkColorScheme(primary = Color(0xff97e6d4), surface = Color(0xff152330))) {
+                Surface(Modifier.fillMaxSize()) {
+                    if (choosing.value) Box(contentAlignment = Alignment.TopCenter) {
+                        DashboardChoices(available, selected.value) { selected.value = it }
+                    } else DashboardCarousel(selected.value, swipeEnabled = true) { page ->
+                        Box(Modifier.fillMaxSize()) {
+                            Text("Showing ${page.title}", Modifier.align(Alignment.Center))
+                            AndroidView(factory = { context -> View(context).apply {
+                                setOnTouchListener { view, event ->
+                                    dashboardTouches += event.actionMasked
+                                    view.parent.requestDisallowInterceptTouchEvent(true)
+                                    true
+                                }
+                            } }, modifier = Modifier.fillMaxSize())
+                        }
+                    }
+                }
+            }
+        }
+        for (index in listOf(4, 1, 5, 2, 3)) compose.onNodeWithText("Room $index").performClick()
+        compose.onNodeWithText("5 of 5 selected").assertIsDisplayed()
+        compose.onNodeWithText("Room 6").assertIsNotEnabled()
+        capture("android-dashboard-picker")
+        compose.runOnIdle { choosing.value = false }
+        compose.onNodeWithText("Showing Room 4").assertIsDisplayed()
+        val display = compose.onNodeWithTag("dashboard-carousel")
+        compose.onNodeWithContentDescription("Previous display page").assertDoesNotExist()
+        compose.onNodeWithText("2 / 6").assertDoesNotExist()
+        display.performTouchInput { click() }
+        compose.runOnIdle {
+            assertEquals(listOf(MotionEvent.ACTION_DOWN, MotionEvent.ACTION_UP), dashboardTouches)
+            dashboardTouches.clear()
+        }
+        display.performTouchInput { swipeUp() }
+        compose.onNodeWithText("Showing Room 4").assertIsDisplayed()
+        compose.runOnIdle {
+            assertTrue(MotionEvent.ACTION_MOVE in dashboardTouches)
+            assertEquals(MotionEvent.ACTION_UP, dashboardTouches.last())
+            assertFalse(MotionEvent.ACTION_CANCEL in dashboardTouches)
+            dashboardTouches.clear()
+        }
+        display.performTouchInput { swipeLeft() }
+        compose.onNodeWithText("Showing Room 1").assertIsDisplayed()
+        compose.runOnIdle {
+            assertEquals(MotionEvent.ACTION_DOWN, dashboardTouches.first())
+            assertEquals(MotionEvent.ACTION_CANCEL, dashboardTouches.last())
+            assertFalse(MotionEvent.ACTION_UP in dashboardTouches)
+        }
+        capture("android-dashboard-carousel")
+        display.performTouchInput { swipeRight() }
+        compose.onNodeWithText("Showing Room 4").assertIsDisplayed()
+        display.performTouchInput { swipeRight() }
+        compose.onNodeWithTag("display-clock").assertIsDisplayed()
+        display.performTouchInput { swipeRight() }
+        compose.onNodeWithTag("display-clock").assertIsDisplayed()
+        capture("android-clock-carousel")
+        display.performTouchInput { swipeLeft() }
+        compose.onNodeWithText("Showing Room 4").assertIsDisplayed()
+        compose.runOnIdle { selected.value = emptyList() }
+        display.assertDoesNotExist()
+        compose.onNodeWithTag("display-clock").assertIsDisplayed()
+        capture("android-dashboard-clock")
+    }
+
+    @Test fun dashboardSelectionPersistsAnExplicitClockChoiceAndRejectsOtherOrigins() {
+        val origin = "https://ha.example:8123"
+        val clock = DashboardSelection(origin, emptyList())
+        assertEquals(clock, DashboardSelection.decode(clock.encode()))
+        val page = DashboardPage("/lovelace/kitchen", "Kitchen")
+        val invalid = listOf("$origin/lovelace/home", "//elsewhere.example/lovelace", "/lovelace/%2e%2e/auth").map {
+            DashboardPage(it, "Other")
+        }
+        assertEquals(DashboardSelection(origin, listOf(page)), DashboardSelection.decode(
+            DashboardSelection(origin, listOf(page) + invalid + page).encode()))
+        assertNull(homeAssistantOrigin("$origin/lovelace/kitchen"))
+        assertNull(homeAssistantOrigin("https://user@ha.example"))
+        assertEquals(origin, homeAssistantOrigin(" $origin/ "))
     }
 
     @OptIn(ExperimentalRoborazziApi::class)

@@ -8,9 +8,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -43,7 +41,6 @@ type Audio interface {
 type settings struct {
 	MAC               string `json:"mac"`
 	Key               string `json:"key"`
-	Dashboard         string `json:"dashboard"`
 	Muted             bool   `json:"muted"`
 	Channel           string `json:"channel"`
 	ChannelGeneration int64  `json:"channel_generation"`
@@ -434,24 +431,13 @@ func (r *Runtime) SetMuted(muted bool) error {
 	return nil
 }
 
-// The paired ESPHome controller supplies the full URL, including its origin.
-// Choosing http:// explicitly permits trusted-LAN HTTP; TLS errors stay fatal.
-func dashboardURL(value string) (string, error) {
-	u, err := url.Parse(value)
-	if err != nil || u.Hostname() == "" || len(value) > 1024 || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Scheme != "https" && u.Scheme != "http") {
-		return "", errors.New("expected a full HTTP(S) Dashboard URL without credentials, query tokens or fragments")
-	}
-	return u.String(), nil
-}
-
 // Snapshot combines engine facts with current native permission/capture health.
 // The host must pass false for unknown, stopped, silenced or stale capture.
 func (r *Runtime) Snapshot(captureReady bool) string {
 	r.mu.Lock()
-	var url string
 	var rev int
 	if r.dashboard != nil {
-		url, rev = r.config.Dashboard, r.dashboard.reload
+		rev = r.dashboard.reload
 	}
 	problem := r.problem
 	esphomeState := r.pairing
@@ -462,7 +448,7 @@ func (r *Runtime) Snapshot(captureReady bool) string {
 		esphomeState = "unpaired"
 	}
 	r.mu.Unlock()
-	b, _ := json.Marshal(map[string]any{"voice": r.voice.Snapshot(captureReady), "models": r.voice.ModelCount(), "dashboard": url, "reload": rev, "problem": problem, "esphome": esphomeState})
+	b, _ := json.Marshal(map[string]any{"voice": r.voice.Snapshot(captureReady), "models": r.voice.ModelCount(), "reload": rev, "problem": problem, "esphome": esphomeState})
 	return string(b)
 }
 
@@ -472,12 +458,9 @@ func (r *Runtime) DismissProblem() {
 	r.mu.Unlock()
 }
 
-const dashboardKey = controls.DashboardKey
-
 type dashboard struct{ reload int }
 
-// ConfigureDashboard opts a renderer using Snapshot into the URL and reload
-// controls. A runtime without a dashboard renderer leaves them unbound.
+// ConfigureDashboard lets ESPHome reload a renderer via Snapshot.
 func (r *Runtime) ConfigureDashboard() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -504,14 +487,12 @@ func (r *Runtime) writable() controls.Bindings {
 	hasUpdater := r.updater != nil
 	r.mu.Unlock()
 	if dashboard != nil {
-		bindings = append(bindings, controls.Dashboard.Bind(r.setDashboard),
-			controls.ReloadDashboard.Bind(func(_ *esphome.Conn, _ *api.ButtonCommandRequest) error {
-				r.mu.Lock()
-				dashboard.reload++
-				r.mu.Unlock()
-				return nil
-			}),
-		)
+		bindings = append(bindings, controls.ReloadDashboard.Bind(func(_ *esphome.Conn, _ *api.ButtonCommandRequest) error {
+			r.mu.Lock()
+			dashboard.reload++
+			r.mu.Unlock()
+			return nil
+		}))
 	}
 	if hasUpdater {
 		bindings = append(bindings,
@@ -559,7 +540,6 @@ func (r *Runtime) Handle(ctx context.Context, c *esphome.Conn, msg proto.Message
 		}
 		r.microphone.Subscribe(c)
 		r.mu.Lock()
-		v := r.config.Dashboard
 		channel := r.config.Channel
 		updateStatus := r.updateStatusText
 		var state *api.UpdateStateResponse
@@ -574,7 +554,6 @@ func (r *Runtime) Handle(ctx context.Context, c *esphome.Conn, msg proto.Message
 			}
 			states = append(states, state)
 		}
-		states = append(states, &api.TextStateResponse{Key: dashboardKey, State: v})
 		if err := r.writable().SendStates(c.Send, states); err != nil {
 			return err
 		}
@@ -590,28 +569,6 @@ func (r *Runtime) ConnClosed(c *esphome.Conn) {
 	r.announcements.ConnClosed(c)
 	r.microphone.Unsubscribe(c)
 	r.proxy.ConnClosed(c)
-}
-
-func (r *Runtime) setDashboard(_ *esphome.Conn, m *api.TextCommandRequest) error {
-	r.mu.Lock()
-	v, err := dashboardURL(m.State)
-	if err == nil {
-		next := r.config
-		next.Dashboard = v
-		err = r.save(next)
-		if err == nil {
-			r.config = next
-			r.dashboard.reload++
-		}
-	}
-	if err != nil {
-		r.problem = fmt.Sprintf("Dashboard configuration: %s", err)
-	} else {
-		r.problem = ""
-	}
-	v = r.config.Dashboard
-	r.mu.Unlock()
-	return r.broadcastControl(&api.TextStateResponse{Key: dashboardKey, State: v})
 }
 
 func (r *Runtime) setUpdateChannel(_ *esphome.Conn, m *api.SelectCommandRequest) error {

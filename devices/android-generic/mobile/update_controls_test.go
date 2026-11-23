@@ -85,7 +85,7 @@ func TestAPKUpdateCapabilityOnESPHome(t *testing.T) {
 				case *api.UpdateStateResponse:
 					state = v
 				case *api.TextStateResponse:
-					if v.Key == dashboardKey {
+					if v.Key == 0x454e4301 {
 						t.Fatal("renderer-less runtime published dashboard state")
 					}
 				case *api.BinarySensorStateResponse:
@@ -97,9 +97,6 @@ func TestAPKUpdateCapabilityOnESPHome(t *testing.T) {
 			if (state != nil) != supported || (supported && (state.Key != update || state.Title != "Encore Satellite" ||
 				state.CurrentVersion != "1.2.3" || state.LatestVersion != state.CurrentVersion || !state.MissingState)) {
 				t.Fatalf("unexpected update state: %v", state)
-			}
-			if err := r.Handle(ctx, nil, &api.TextCommandRequest{Key: dashboardKey, State: "https://dashboard.example.test"}); err != nil || r.config.Dashboard != "" {
-				t.Fatalf("renderer-less runtime handled cached dashboard command: %v", err)
 			}
 			if supported {
 				send(&api.ButtonCommandRequest{Key: check})

@@ -1,9 +1,7 @@
 package com.encore.satellite
 
-import android.annotation.SuppressLint
+import android.content.Context
 import android.net.Uri
-import android.view.View
-import android.webkit.*
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -24,12 +22,12 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.*
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.viewinterop.AndroidView
 import com.encore.engine.mobile.Mobile
 import kotlinx.coroutines.delay
 
@@ -71,6 +69,23 @@ internal fun EncoreScreen(state: EncoreState, onStart: () -> Unit, onTalk: () ->
     var timersExpanded by remember(state.generation, runningTimers.isNotEmpty()) { mutableStateOf(false) }
     val sheetVisible = ringing || (!legacyVisible && (panel != null || timersExpanded))
     var settingsVisible by remember(legacyVisible || sheetVisible) { mutableStateOf(false) }
+    var pickerOrigin by remember(settingsVisible) { mutableStateOf<String?>(null) }
+    val context = LocalContext.current
+    val displayPrefs = remember(context) { context.getSharedPreferences("dashboard-display", Context.MODE_PRIVATE) }
+    var selection by remember(displayPrefs) {
+        mutableStateOf(displayPrefs.getString("selection", null)?.let(DashboardSelection::decode))
+    }
+    val displayOrigin = selection?.origin.orEmpty()
+    val displayPages = selection?.pages.orEmpty()
+    fun saveDisplay(origin: String, pages: List<DashboardPage>) {
+        val next = DashboardSelection(origin, pages)
+        displayPrefs.edit().putString("selection", next.encode()).apply()
+        selection = next
+    }
+    fun closePicker() {
+        if (dashboardAuth?.attempt?.origin == pickerOrigin) dashboardAuth?.cancel()
+        pickerOrigin = null
+    }
     fun closeSettings() { settingsVisible = false }
     fun closePanel() {
         if (panel == null) timersExpanded = false
@@ -81,11 +96,13 @@ internal fun EncoreScreen(state: EncoreState, onStart: () -> Unit, onTalk: () ->
     MaterialTheme(colorScheme = darkColorScheme(primary = Mint, background = Ink, surface = Color(0xff152330))) {
         BoxWithConstraints(Modifier.fillMaxSize().background(Ink)) {
             val landscape = maxWidth > maxHeight
+            val swipeEnabled = !settingsVisible && !sheetVisible && !legacyVisible && !pendingWake
             Box(Modifier.fillMaxSize().semantics { if (settingsVisible) hideFromAccessibility() }
                 .focusProperties { canFocus = !settingsVisible }) {
                 Box(Modifier.fillMaxSize()) {
                     if (dashboardContent != null) dashboardContent()
-                    else Dashboard(state, microphonePermissionGranted, onStart, onPairHomeAssistant, dashboardAuth, settingsVisible)
+                    else Dashboard(state, microphonePermissionGranted, onStart, onPairHomeAssistant,
+                        dashboardAuth, settingsVisible, displayOrigin, displayPages, swipeEnabled)
                 }
                 if (!settingsVisible && !sheetVisible) {
                     val buttons: @Composable () -> Unit = {
@@ -151,10 +168,14 @@ internal fun EncoreScreen(state: EncoreState, onStart: () -> Unit, onTalk: () ->
                 BackHandler(onBack = if (state.alertVisible) ::stopAlert else onStop)
             } else if (settingsVisible) {
                 // Keep Settings in the Activity window so a remote turn can take over without losing window focus.
-                BackHandler(onBack = ::closeSettings)
+                val choosing = pickerOrigin
+                BackHandler(onBack = if (choosing != null) ::closePicker else ::closeSettings)
                 Surface(Modifier.fillMaxSize().testTag("settings-screen").semantics { paneTitle = "Satellite settings" }) {
-                    SettingsContent(state, noiseKey, musicToken, onMusicConnect, onMusicDisconnect, onMusicCommand, onUpdate, onBluetooth,
-                        dashboardAuth, onChooseHome, onNotificationSettings, { closeSettings(); onSetup() }, ::closeSettings)
+                    if (choosing != null) DashboardPicker(choosing, displayPages.takeIf { choosing == displayOrigin }.orEmpty(),
+                        dashboardAuth, ::closePicker) { saveDisplay(choosing, it); closeSettings() }
+                    else SettingsContent(state, noiseKey, musicToken, onMusicConnect, onMusicDisconnect, onMusicCommand, onUpdate, onBluetooth,
+                        dashboardAuth, onChooseHome, onNotificationSettings, { closeSettings(); onSetup() }, ::closeSettings,
+                        displayOrigin, displayPages, { pickerOrigin = it }, { saveDisplay(displayOrigin, it) })
                 }
             } else if (pendingWake) {
                 VoiceWakeCue(Modifier.align(Alignment.BottomCenter).navigationBarsPadding()
@@ -163,7 +184,8 @@ internal fun EncoreScreen(state: EncoreState, onStart: () -> Unit, onTalk: () ->
                 val count = runningTimers.size
                 FilledTonalButton(onClick = { timersExpanded = true },
                     Modifier.align(Alignment.BottomCenter).navigationBarsPadding()
-                        .padding(bottom = if (landscape) 12.dp else 76.dp).heightIn(min = 48.dp).testTag("timer-chip")
+                        .padding(bottom = if (landscape) 12.dp else 76.dp)
+                        .heightIn(min = 48.dp).testTag("timer-chip")
                         .semantics { contentDescription = if (count == 1) "Show running timer" else "Show $count running timers" }) {
                     Text("${runningTimers.first().label} · ${if (count == 1) "1 timer" else "$count timers"}")
                 }
@@ -184,7 +206,7 @@ internal fun EncoreScreen(state: EncoreState, onStart: () -> Unit, onTalk: () ->
             }
         }
         dashboardAuth?.attempt?.let { attempt ->
-            if (attempt.origin == state.origin) DashboardEnrollmentDialog(state.name, attempt.origin, attempt.qr,
+            if (attempt.origin == (pickerOrigin ?: displayOrigin)) DashboardEnrollmentDialog(state.name, attempt.origin, attempt.qr,
                 attempt.candidate?.name(), attempt.error, onCancel = dashboardAuth::cancel,
                 onAccept = { dashboardAuth.accept(attempt) }, onRetry = { dashboardAuth.start(attempt.origin) })
             else if (state.running) LaunchedEffect(attempt) { dashboardAuth.cancel() }
@@ -241,7 +263,8 @@ internal fun trustedNavigation(origin: String, value: String): Boolean {
 }
 
 @Composable private fun Dashboard(state: EncoreState, microphonePermissionGranted: Boolean,
-    onRequestPermission: () -> Unit, onPairHomeAssistant: () -> Unit, auth: DashboardAuth?, settingsVisible: Boolean) {
+    onRequestPermission: () -> Unit, onPairHomeAssistant: () -> Unit, auth: DashboardAuth?, settingsVisible: Boolean,
+    origin: String, pages: List<DashboardPage>, swipeEnabled: Boolean) {
     val needsPermission = !state.running && !microphonePermissionGranted
     if (needsPermission || state.needsHomeAssistantSetup) {
         Box(Modifier.fillMaxSize().background(Color(0xff101d28)).padding(bottom = 88.dp), contentAlignment = Alignment.Center) {
@@ -263,16 +286,14 @@ internal fun trustedNavigation(origin: String, value: String): Boolean {
                 }
             }
         }
-    } else if (state.dashboard.isEmpty()) {
-        Column(Modifier.fillMaxSize().background(Color(0xff101d28)).padding(32.dp), verticalArrangement = Arrangement.Center) {
-            Text("Voice satellite", color = Color.White, fontSize = 30.sp)
-            Spacer(Modifier.height(16.dp))
-            Text(state.voiceReadiness, color = Muted, fontSize = 17.sp, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
+    } else {
+        DashboardCarousel(pages, swipeEnabled) { page ->
+            if (auth != null && auth.lostOrigin == origin) {
+                DashboardSignInNeeded(onPhone = if (supportsDashboardBridge()) ({ auth.start(origin) }) else null,
+                    onTablet = auth::manualSignIn)
+            } else DashboardWebView(origin, origin + page.path, state.reload, auth, hidden = settingsVisible)
         }
-    } else if (auth != null && auth.lostOrigin == state.origin) {
-        DashboardSignInNeeded(onPhone = if (supportsDashboardBridge()) ({ auth.start(state.origin) }) else null,
-            onTablet = auth::manualSignIn)
-    } else DashboardWebView(state, auth, settingsVisible)
+    }
 }
 
 @Composable
@@ -280,48 +301,18 @@ internal fun DashboardSignInNeeded(onPhone: (() -> Unit)?, onTablet: () -> Unit)
     Column(Modifier.fillMaxSize().background(Color(0xff101d28)).padding(32.dp),
         verticalArrangement = Arrangement.Center) {
         Text("Dashboard sign-in needed", style = MaterialTheme.typography.headlineMedium, color = Color.White)
-        Text("Your Home Assistant session ended. Sign in again without changing this satellite's dashboard URL.", color = Muted)
+        Text("Your Home Assistant session ended. Sign in again without changing your dashboard selection.", color = Muted)
         if (onPhone != null) Button(onClick = onPhone) { Text("Sign in with phone") }
         TextButton(onClick = onTablet) { Text("Sign in on tablet") }
-    }
-}
-
-@SuppressLint("SetJavaScriptEnabled")
-@Composable private fun DashboardWebView(state: EncoreState, auth: DashboardAuth?, settingsVisible: Boolean) {
-    val session = auth?.saved?.takeIf { it.origin() == state.origin && supportsDashboardBridge() }
-    key(state.origin, session) {
-        var webView by remember { mutableStateOf<WebView?>(null) }
-        DisposableEffect(Unit) { onDispose { webView?.destroy(); webView = null } }
-        AndroidView(factory = { context -> WebView(context).apply {
-            webView = this
-            setBackgroundColor(android.graphics.Color.rgb(16, 29, 40))
-            settings.javaScriptEnabled = true
-            settings.domStorageEnabled = true
-            settings.allowFileAccess = false
-            settings.allowContentAccess = false
-            settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
-            settings.setSupportMultipleWindows(false)
-            CookieManager.getInstance().setAcceptThirdPartyCookies(this, false)
-            webViewClient = object : WebViewClient() {
-                override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest) = !trustedNavigation(state.origin, request.url.toString())
-            }
-            if (session != null) auth.installBridge(this, session)
-            // No addJavascriptInterface, downloads, external intents or microphone/camera WebChromeClient grants.
-        } }, update = { view ->
-            view.importantForAccessibility = if (settingsVisible) View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS else View.IMPORTANT_FOR_ACCESSIBILITY_AUTO
-            if (settingsVisible) view.clearFocus()
-            view.isFocusable = !settingsVisible
-            view.isFocusableInTouchMode = !settingsVisible
-            val desired = "${state.reload}:${state.dashboard}"
-            if (view.tag != desired) { view.tag = desired; view.loadUrl(dashboardLoadUrl(state.dashboard, session != null)) }
-        }, modifier = Modifier.fillMaxSize().testTag("dashboard"))
     }
 }
 
 @Composable private fun SettingsContent(state: EncoreState, noiseKey: () -> String,
     musicToken: () -> String, onMusicConnect: (String) -> Unit, onMusicDisconnect: () -> Unit,
     onMusicCommand: (String) -> Unit, onUpdate: () -> Unit, onBluetooth: () -> Unit, auth: DashboardAuth?,
-    onChooseHome: () -> Unit, onNotificationSettings: () -> Unit, onSetup: () -> Unit, close: () -> Unit) {
+    onChooseHome: () -> Unit, onNotificationSettings: () -> Unit, onSetup: () -> Unit, close: () -> Unit,
+    displayOrigin: String, displayPages: List<DashboardPage>, chooseDashboards: (String) -> Unit,
+    updateDashboards: (List<DashboardPage>) -> Unit) {
     var sendspin by remember { mutableStateOf("") }
     var secret by remember { mutableStateOf("") }
     Column(Modifier.fillMaxSize().systemBarsPadding().imePadding(), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -335,6 +326,7 @@ internal fun DashboardSignInNeeded(onPhone: (() -> Unit)?, onTablet: () -> Unit)
             Text(state.status, Modifier.semantics { liveRegion = LiveRegionMode.Polite }, color = Muted)
             TextButton(onClick = onSetup) { Text("Setup") }
             TextButton(onClick = { close(); onNotificationSettings() }) { Text("Manage notifications") }
+            HorizontalDivider()
             Text("Android Home", Modifier.semantics { heading() }, style = MaterialTheme.typography.titleMedium)
             Text("Choose Encore Incubator in Android to open Encore when you press Home. To switch back, choose your previous launcher in the same screen.")
             TextButton(onClick = { close(); onChooseHome() }) { Text("Choose Home app") }
@@ -342,12 +334,13 @@ internal fun DashboardSignInNeeded(onPhone: (() -> Unit)?, onTablet: () -> Unit)
             if (state.music.enabled) MusicControls(state.music, onMusicCommand, state.audioInterrupted)
             Text("Incubator voice uses trusted-LAN TCP 6055. ESPHome controls use encrypted TCP 6053. Bluetooth capabilities depend on the running Android APIs; no Assist backend.", fontSize = 12.sp)
             TextButton(onClick = onBluetooth) { Text("Bluetooth proxy setup") }
-            Text("Set one full Dashboard URL through ESPHome, such as https://home.example/lovelace/home. Sign in on the tablet, or use your phone with Home Assistant 2026.11+ over HTTPS. Navigation stays within the configured origin.", fontSize = 12.sp)
-            if (auth != null && state.origin.startsWith("https://") && supportsDashboardBridge()) {
-                auth.saved?.takeIf { it.origin() == state.origin }?.let {
+            HorizontalDivider()
+            DashboardSettings(displayOrigin, displayPages, chooseDashboards, updateDashboards)
+            if (auth != null && displayOrigin.startsWith("https://") && supportsDashboardBridge()) {
+                auth.saved?.takeIf { it.origin() == displayOrigin }?.let {
                     Text("Dashboard account: ${it.name()}\nSession ID: ${it.clientID()}", fontSize = 12.sp)
                 }
-                TextButton(onClick = { close(); auth.start(state.origin) }) { Text("Sign in with phone") }
+                TextButton(onClick = { close(); auth.start(displayOrigin) }) { Text("Sign in with phone") }
             }
             if (!state.needsHomeAssistantSetup) {
                 TextButton(onClick = { secret = noiseKey() }) { Text("Reveal ESPHome encryption key") }

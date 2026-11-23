@@ -9,7 +9,6 @@ import (
 
 	"github.com/farooqu/encore-satellite/devices/android-generic/mobile"
 	"github.com/ygelfand/go-esphome-device/api"
-	"google.golang.org/protobuf/proto"
 )
 
 type output struct{}
@@ -41,114 +40,124 @@ func TestUnpairedIdentityAndPrivacySurviveReopen(t *testing.T) {
 		t.Fatal("pairing identity changed after restart")
 	}
 	var snapshot struct {
-		Dashboard string `json:"dashboard"`
-		Voice     struct {
+		Voice struct {
 			Muted bool `json:"muted"`
 		} `json:"voice"`
 	}
 	if err := json.Unmarshal([]byte(next.Snapshot(false)), &snapshot); err != nil {
 		t.Fatal(err)
 	}
-	if snapshot.Dashboard != "" || !snapshot.Voice.Muted {
+	if !snapshot.Voice.Muted {
 		t.Fatalf("lost local setup/privacy: %+v", snapshot)
 	}
 }
 
 func TestFailedMuteSurvivesUnrelatedSaveAndReopen(t *testing.T) {
-	for _, setting := range []string{"channel", "dashboard"} {
-		t.Run(setting, func(t *testing.T) {
-			directory := t.TempDir()
-			r, err := mobile.Open(directory, output{})
-			if err != nil {
-				t.Fatal(err)
-			}
-			t.Cleanup(r.Close)
-			if err := r.ConfigureDashboard(); err != nil {
-				t.Fatal(err)
-			}
-			if err := r.Start(); err != nil {
-				t.Fatal(err)
-			}
-			assertMuted := func(want bool) {
-				t.Helper()
-				var snapshot struct {
-					Voice struct {
-						Muted bool `json:"muted"`
-					} `json:"voice"`
-				}
-				if err := json.Unmarshal([]byte(r.Snapshot(false)), &snapshot); err != nil {
-					t.Fatal(err)
-				}
-				if snapshot.Voice.Muted != want {
-					t.Fatalf("muted = %v, want %v", snapshot.Voice.Muted, want)
-				}
-			}
-			assertMuted(false)
-			tmp := filepath.Join(directory, "encore.json.tmp")
-			if err := os.Mkdir(tmp, 0700); err != nil {
-				t.Fatal(err)
-			}
-			if err := r.SetMuted(true); err == nil {
-				t.Fatal("mute unexpectedly saved through obstructed temporary file")
-			}
-			assertMuted(true)
-			if err := os.Remove(tmp); err != nil {
-				t.Fatal(err)
-			}
-			var command proto.Message
-			if setting == "channel" {
-				command = &api.SelectCommandRequest{Key: 0x454e4304, State: "stable"}
-			} else {
-				command = &api.TextCommandRequest{Key: 0x454e4301, State: "https://dashboard.example.test"}
-			}
-			if err := r.Handle(context.Background(), nil, command); err != nil {
-				t.Fatal(err)
-			}
-			if setting == "dashboard" {
-				var snapshot struct {
-					Dashboard string `json:"dashboard"`
-					Reload    int    `json:"reload"`
-				}
-				if err := json.Unmarshal([]byte(r.Snapshot(false)), &snapshot); err != nil || snapshot.Dashboard != "https://dashboard.example.test" || snapshot.Reload != 1 {
-					t.Fatalf("dashboard command did not reach renderer snapshot: %+v (%v)", snapshot, err)
-				}
-				if err := r.Handle(context.Background(), nil, &api.ButtonCommandRequest{Key: 0x454e4302}); err != nil {
-					t.Fatal(err)
-				}
-				if err := json.Unmarshal([]byte(r.Snapshot(false)), &snapshot); err != nil || snapshot.Reload != 2 {
-					t.Fatalf("reload command did not reach renderer snapshot: %+v (%v)", snapshot, err)
-				}
-			}
-			r.Close()
-			r, err = mobile.Open(directory, output{})
-			if err != nil {
-				t.Fatal(err)
-			}
-			t.Cleanup(r.Close)
-			assertMuted(true)
+	directory := t.TempDir()
+	r, err := mobile.Open(directory, output{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(r.Close)
+	if err := r.Start(); err != nil {
+		t.Fatal(err)
+	}
+	assertMuted := func(want bool) {
+		t.Helper()
+		var snapshot struct {
+			Voice struct {
+				Muted bool `json:"muted"`
+			} `json:"voice"`
+		}
+		if err := json.Unmarshal([]byte(r.Snapshot(false)), &snapshot); err != nil {
+			t.Fatal(err)
+		}
+		if snapshot.Voice.Muted != want {
+			t.Fatalf("muted = %v, want %v", snapshot.Voice.Muted, want)
+		}
+	}
+	assertMuted(false)
+	tmp := filepath.Join(directory, "encore.json.tmp")
+	if err := os.Mkdir(tmp, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.SetMuted(true); err == nil {
+		t.Fatal("mute unexpectedly saved through obstructed temporary file")
+	}
+	assertMuted(true)
+	if err := os.Remove(tmp); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Handle(context.Background(), nil, &api.SelectCommandRequest{Key: 0x454e4304, State: "stable"}); err != nil {
+		t.Fatal(err)
+	}
+	r.Close()
+	r, err = mobile.Open(directory, output{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(r.Close)
+	assertMuted(true)
 
-			// A failed explicit unmute must retain the latch as well.
-			if err := os.Mkdir(tmp, 0700); err != nil {
-				t.Fatal(err)
-			}
-			if err := r.SetMuted(false); err == nil {
-				t.Fatal("unmute unexpectedly saved through obstructed temporary file")
-			}
-			assertMuted(true)
-			if err := os.Remove(tmp); err != nil {
-				t.Fatal(err)
-			}
-			if err := r.SetMuted(false); err != nil {
-				t.Fatal(err)
-			}
-			assertMuted(false)
-			r.Close()
-			r, err = mobile.Open(directory, output{})
-			if err != nil {
-				t.Fatal(err)
-			}
-			t.Cleanup(r.Close)
-			assertMuted(false)
-		})
+	// A failed explicit unmute must retain the latch as well.
+	if err := os.Mkdir(tmp, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.SetMuted(false); err == nil {
+		t.Fatal("unmute unexpectedly saved through obstructed temporary file")
+	}
+	assertMuted(true)
+	if err := os.Remove(tmp); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.SetMuted(false); err != nil {
+		t.Fatal(err)
+	}
+	assertMuted(false)
+	r.Close()
+	r, err = mobile.Open(directory, output{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(r.Close)
+	assertMuted(false)
+
+}
+
+func TestDashboardReloadWithoutURL(t *testing.T) {
+	directory := t.TempDir()
+	if err := os.WriteFile(filepath.Join(directory, "encore.json"), []byte(`{"mac":"02:11:22:ab:cd:ef","dashboard":"https://old.example/dashboard"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	r, err := mobile.Open(directory, output{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(r.Close)
+	if err := r.ConfigureDashboard(); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Start(); err != nil {
+		t.Fatal(err)
+	}
+	for _, command := range []struct {
+		key  uint32
+		want int
+	}{{0x454e4301, 0}, {0x454e4302, 1}} {
+		if command.want == 0 {
+			err = r.Handle(t.Context(), nil, &api.TextCommandRequest{Key: command.key, State: "https://ignored.example/dashboard"})
+		} else {
+			err = r.Handle(t.Context(), nil, &api.ButtonCommandRequest{Key: command.key})
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		var snapshot struct {
+			Dashboard *string `json:"dashboard"`
+			Reload    int     `json:"reload"`
+		}
+		if err := json.Unmarshal([]byte(r.Snapshot(false)), &snapshot); err != nil || snapshot.Dashboard != nil || snapshot.Reload != command.want {
+			t.Fatalf("unexpected dashboard snapshot for key %x: %+v (%v)", command.key, snapshot, err)
+		}
 	}
 }

@@ -1,6 +1,5 @@
 package com.encore.satellite
 
-import android.net.Uri
 import org.json.JSONObject
 
 data class MusicState(
@@ -40,7 +39,6 @@ data class EncoreState(
     val outputState: String = "",
     val talkAllowed: Boolean = false,
     val audioInterrupted: Boolean = false,
-    val dashboard: String = "",
     val reload: Int = 0,
     val problem: String = "",
     val level: Float = 0f,
@@ -70,7 +68,6 @@ data class EncoreState(
     val ring: RingingAlert? = null,
 ) {
     val needsHomeAssistantSetup: Boolean get() = esphome == "unpaired" || esphome == "waiting" || esphome == "expired"
-    val origin: String get() = if (dashboard.isEmpty()) "" else Uri.parse(dashboard).let { "${it.scheme}://${it.encodedAuthority}" }
     val alertVisible: Boolean get() = running && connected && (!inhibited || muted) &&
         (alert || (outputOwner == "alert" && outputState in setOf("playing", "draining")))
     // Unknown snapshots suppress drawing, but keep Stop/shield for last-known
@@ -151,7 +148,6 @@ data class EncoreState(
                 captureReady = voice.optBoolean("capture_ready"), talkReady = voice.optBoolean("talk_ready"), wakeReady = voice.optBoolean("wake_ready"),
                 night = voice.optString("night").takeIf { it in setOf("on", "off") } ?: "unknown",
                 speakerName = if (attributedTurn) name else "", speakerRGB = if (attributedTurn) colors else emptyList(),
-                dashboard = data.getString("dashboard"),
                 esphome = data.optString("esphome"),
                 reload = data.getInt("reload"), problem = data.getString("problem").ifEmpty { previous.problem })
         }

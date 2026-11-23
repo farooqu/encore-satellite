@@ -52,7 +52,7 @@ class EncoreStateTest {
             {"voice":{"phase":"idle","connected":true,"muted":false,"alert":false,
               "active":$active,"announcing":$announcing,"talk_allowed":$talkAllowed,
               "output":{"state":"$output","owner":"$owner","received":true}},
-              "models":2,"dashboard":"","reload":0,"problem":""}
+              "models":2,"reload":0,"problem":""}
         """.trimIndent()
     }
 }

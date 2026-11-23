@@ -26,7 +26,7 @@
         <meta-data android:name="com.encore.core_version" android:value="${coreVersion}" />
         <meta-data android:name="com.encore.update_base_url" android:value="${updateBaseUrl}" />
         <meta-data android:name="com.encore.update_public_key" android:value="${updatePublicKey}" />
-        <!-- The paired ESPHome controller may explicitly choose an HTTP Dashboard URL. TLS failures are never bypassed. -->
+        <!-- The user can choose an HTTP Home Assistant server on a trusted LAN. TLS failures are never bypassed. -->
         <activity android:name="com.encore.satellite.MainActivity" android:exported="true"
             android:launchMode="singleTask">
             <intent-filter>

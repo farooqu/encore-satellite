@@ -202,14 +202,6 @@ these devices, acoustic timings or model-backed enrollment/training.
    but controls do not appear, reload its ESPHome integration. Existing installs
    keep their key and settings and skip pairing; **Reveal ESPHome encryption key**
    in local Settings remains available for manual recovery after pairing.
-   If you want a dashboard, set the single **Dashboard URL** text entity
-   to a full URL, for example `https://home.example/lovelace/home`. This supplies
-   both the HA origin and dashboard path; no separate tablet origin setup exists.
-   Prefer HTTPS; explicitly choosing `http://` permits trusted-LAN HTTP, including
-   unencrypted HA sign-in traffic. The paired ESPHome controller can change the
-   full URL, including its origin. Invalid URLs retain the previous configuration.
-   **Reload dashboard** is a separate button entity. No dashboard list or backend
-   selector exists. Previously configured full dashboard URLs remain valid.
    The read-only **Microphone muted** (`microphone_muted`) binary sensor reports
    the app's microphone privacy latch and updates when it changes. It does not
    report Android permission or recorder readiness and cannot unmute the app.
@@ -227,8 +219,25 @@ these devices, acoustic timings or model-backed enrollment/training.
    defaults On but needs local access and scan approval. Dashboard, Android Home
    and remote installs are optional. Choose **Done** to use Encore without a
    dashboard; **Settings → Setup** reopens the checklist.
-4. Sign into HA in the dashboard itself, or use **Settings → Sign in with
-   phone** on the tablet. Phone sign-in requires HA 2026.11 or later, an up-to-date
+4. In Encore, open **Settings → Dashboards**, enter the Home Assistant server
+   address (for example `https://home.example`), and tap **Choose dashboards**.
+   Sign in on the tablet, then select up to five Home Assistant dashboard views
+   in the order you want them and tap **Save**. Encore opens the first selection.
+   Swipe left or right across the display to switch pages. The clock is the page
+   before the first dashboard; **Show only clock** removes the dashboard pages.
+   There is no idle timer or screensaver.
+
+   Encore hides the Home Assistant sidebar and Lovelace header in the display
+   WebView, without changing the dashboard or installing a Home Assistant plugin.
+   This is display styling, not an account restriction or Android lockdown.
+
+   The old ESPHome **Dashboard URL** setting is no longer used. Select views on
+   the tablet to replace it. The ESPHome **Reload dashboard** button still reloads
+   the visible dashboard.
+   Prefer HTTPS: `http://` also sends tablet sign-in traffic unencrypted.
+
+   You can use **Sign in with phone** from the picker or Encore Settings.
+   Phone sign-in requires HA 2026.11 or later, an up-to-date
    Android System WebView, and an HTTPS HA address trusted and reachable by both
    devices. Connect the phone and tablet to the same trusted local IPv4 network
    (not isolated guest Wi-Fi).
@@ -238,7 +247,7 @@ these devices, acoustic timings or model-backed enrollment/training.
      satellite account. You do not need to switch accounts in the HA companion app.
    - Return to the tablet and verify the account shown before tapping **Use this
      account**. Repeat on each satellite; the same account can have independently
-     revocable sessions and each satellite keeps its own ESPHome Dashboard URL.
+     revocable sessions and each satellite keeps its own dashboard selection.
      The session has the account's normal HA permissions, not dashboard-only access.
    - If a session is lost or revoked, tap **Sign in with phone** again, or choose
      **Sign in on tablet** from the recovery screen. To revoke one tablet from HA,
@@ -358,7 +367,7 @@ Home support on Portal.
   QR code contains no credentials; the temporary local callback receives a
   single-use PKCE-bound code, and HA credentials are exchanged only over HTTPS.
   The tablet stores its refresh token encrypted with Android Keystore. Navigation
-  stays within the origin derived from the ESPHome URL; changing origin recreates
+  stays within the selected Home Assistant origin; changing origin recreates
   the WebView without sharing the session or interrupting voice or music.
 
 ## Checks

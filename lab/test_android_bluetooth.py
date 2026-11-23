@@ -42,7 +42,8 @@ async def scenario(binary, sdk, hardware=True):
         entities, _ = await client.list_entities_services()
         proxy, = [e for e in entities if e.object_id == "bluetooth_proxy"]
         entity_ids = {e.object_id for e in entities}
-        assert {"dashboard_url", "update_channel"} <= entity_ids, entities
+        assert {"reload_dashboard", "update_channel"} <= entity_ids, entities
+        assert "dashboard_url" not in entity_ids, entities
         assert "apk_update" not in entity_ids, entities  # The fixture has no updater.
         states = {}
         client.subscribe_states(lambda state: states.update({state.key: state}))

@@ -45,13 +45,11 @@ func SpeakerVolume(max, step float32) Entity[*api.NumberCommandRequest] {
 }
 
 const (
-	DashboardKey      uint32 = 0x454e4301
 	AndroidUpdateKey  uint32 = 0x454e4303
 	AndroidChannelKey uint32 = 0x454e4304
 )
 
 var (
-	Dashboard       = Entity[*api.TextCommandRequest]{&api.ListEntitiesTextResponse{ObjectId: "dashboard_url", Key: DashboardKey, Name: "Dashboard URL", EntityCategory: esphome.CategoryConfig, MaxLength: 1024}}
 	ReloadDashboard = button("reload_dashboard", "Reload dashboard", "", 0x454e4302, esphome.CategoryConfig)
 	AndroidUpdate   = update("apk_update", AndroidUpdateKey)
 	AndroidChannel  = UpdateChannel(AndroidChannelKey)

@@ -177,7 +177,7 @@ func TestHomeAssistantPairingExpiresAndRequiresAnotherTap(t *testing.T) {
 func TestHomeAssistantPairingPreservesExistingInstallation(t *testing.T) {
 	dir := t.TempDir()
 	key := (esphome.PSK{1, 42}).String()
-	before := settings{MAC: "02:11:22:ab:cd:ef", Key: key, Dashboard: "https://ha.example/dashboard",
+	before := settings{MAC: "02:11:22:ab:cd:ef", Key: key,
 		Muted: true, Channel: "stable", ChannelGeneration: 7, BluetoothProxy: true}
 	stored, err := json.Marshal(before)
 	if err != nil {

@@ -82,8 +82,8 @@ do not remove a supported sensor from the entity list.
 
 The [writable ESPHome adapter](../../backends/esphome/controls/controls.go) likewise
 lists, routes and publishes state only for entities with a device-supplied
-command implementation. For example, a renderer opts into dashboard URL and
-reload controls; a screen alone does not imply a dashboard. The shared
+command implementation. For example, a renderer can opt into the dashboard
+reload control; a screen alone does not imply a dashboard. The shared
 microphone reporter handles state publication, not the device's privacy gate.
 
 Outside ESPHome, use the same ownership rule: derive advertised support and

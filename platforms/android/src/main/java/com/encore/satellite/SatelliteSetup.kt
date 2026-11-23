@@ -111,9 +111,8 @@ internal fun setupStep(stage: SetupStage, state: EncoreState, microphone: Boolea
                 SetupStep.EXTRAS -> {
                     SetupText("All of these are optional. Open Setup from Encore Settings to revisit them.")
                     HorizontalDivider()
-                    SetupHeading("Dashboard")
-                    SetupText(if (state.dashboard.isEmpty()) "To show a dashboard, set the full Dashboard URL on this satellite’s ESPHome device in Home Assistant (for example, https://home.example/lovelace/home). Or keep Encore voice-only."
-                        else "Dashboard URL received. Select Done to see your dashboard and sign in if needed.")
+                    SetupHeading("Dashboards")
+                    SetupText("Encore shows a clock when no dashboard is selected. After setup, open Settings → Dashboards to choose views by name.")
                     HorizontalDivider()
                     SetupHeading("Android Home")
                     SetupText(when (android.home) {
