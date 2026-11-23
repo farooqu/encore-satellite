@@ -13,6 +13,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -21,6 +22,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	update "github.com/farooqu/encore-satellite/platforms/linuxupdate"
@@ -233,7 +235,7 @@ func TestSignedDiscoveryDownloadStageAndRollback(t *testing.T) {
 	if e != nil || got == nil {
 		t.Fatalf("already-published newer stable: %v %v", got, e)
 	}
-	file, e := c.Download(t.Context(), *got)
+	file, e := c.Download(t.Context(), *got, nil)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -465,7 +467,7 @@ func TestDownloadHTTPSQueryRedirect(t *testing.T) {
 			now := time.Now().Unix()
 			r := update.Release{URL: origin.URL + "/bundle.zip", Size: int64(len(payload)), SHA256: sha(payload), Issued: now - 60, Expires: now + 3600}
 			c := update.Client{Directory: t.TempDir(), HTTP: origin.Client()}
-			path, err := c.Download(t.Context(), r)
+			path, err := c.Download(t.Context(), r, nil)
 			if name == "valid" {
 				if err != nil {
 					t.Fatal(err)
@@ -505,11 +507,77 @@ func TestFailedDownloadRemovesPartial(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if _, e = c.Download(t.Context(), *got); e == nil {
+	if _, e = c.Download(t.Context(), *got, nil); e == nil {
 		t.Fatal("truncated download accepted")
 	}
 	files, _ := os.ReadDir(c.Directory)
 	if len(files) != 1 || files[0].Name() != "stable.json" {
 		t.Fatalf("partial artifacts retained: %v", files)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
+func TestFirmwareDownloadBudgets(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		payload    string
+		pauseAfter int
+		wantTime   time.Duration
+		wantBytes  int64
+		wantError  string
+	}{
+		{"slow but progressing", "abcdefghijklm", 0, 338 * time.Second, 13, ""},
+		{"stalls after three bytes", "abcdefghijklm", 3, 108 * time.Second, 3, "3 of 13 bytes received: no firmware bytes"},
+		{"total deadline despite progress", strings.Repeat("x", 90), 0, 30 * time.Minute, 69, "69 of 90 bytes received: firmware download exceeded"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				ctx := t.Context()
+				transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					reader, writer := io.Pipe()
+					go func() {
+						defer writer.Close()
+						for i := range len(tc.payload) {
+							if i > 0 && i == tc.pauseAfter {
+								<-req.Context().Done()
+								_ = writer.CloseWithError(req.Context().Err())
+								return
+							}
+							select {
+							case <-time.After(26 * time.Second):
+							case <-req.Context().Done():
+								_ = writer.CloseWithError(req.Context().Err())
+								return
+							}
+							if _, err := io.WriteString(writer, tc.payload[i:i+1]); err != nil {
+								return
+							}
+						}
+					}()
+					return &http.Response{StatusCode: 200, Body: reader}, nil
+				})
+				c := update.Client{Directory: t.TempDir(), HTTP: &http.Client{Transport: transport, Timeout: 5 * time.Minute}}
+				start := time.Now()
+				r := update.Release{URL: "https://example.com/ota.zip", Size: int64(len(tc.payload)), SHA256: sha([]byte(tc.payload)), Issued: start.Unix() - 1, Expires: start.Unix() + 3600}
+				var received int64
+				path, err := c.Download(ctx, r, func(n int64) { received = n })
+				if time.Since(start) != tc.wantTime || received != tc.wantBytes {
+					t.Fatalf("download ran for %s and received %d bytes: %v", time.Since(start), received, err)
+				}
+				if tc.wantError == "" {
+					if err != nil || read(t, path) != tc.payload {
+						t.Fatalf("slow transfer did not complete: %v", err)
+					}
+				} else {
+					files, listErr := os.ReadDir(c.Directory)
+					if err == nil || !strings.Contains(err.Error(), tc.wantError) || path != "" || listErr != nil || len(files) != 0 {
+						t.Fatalf("failed download returned path=%q, err=%v; remaining files=%v, dir err=%v", path, err, files, listErr)
+					}
+				}
+			})
+		})
 	}
 }

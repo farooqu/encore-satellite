@@ -9,7 +9,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -164,13 +167,38 @@ func (r Release) Fresh() error {
 }
 
 // Download only returns a completely verified, fsynced private file. Callers
-// recheck selection and slot eligibility before activation.
-func (c *Client) Download(ctx context.Context, r Release) (string, error) {
+// recheck selection and slot eligibility before activation. If progress is
+// non-nil, it receives cumulative bytes read, not a verification result.
+func (c *Client) Download(ctx context.Context, r Release, progress func(int64)) (string, error) {
 	if err := r.Fresh(); err != nil {
 		return "", err
 	}
-	resp, err := updateverify.Get(ctx, c.HTTP, r.URL)
+	// The metadata timeout is too short for a large bundle on a slow link.
+	// Keep a separate total budget and stop promptly on a stalled read.
+	ctx, stop := context.WithTimeoutCause(ctx, 30*time.Minute, errors.New("firmware download exceeded 30 minutes"))
+	defer stop()
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	var httpClient http.Client
+	if c.HTTP != nil {
+		httpClient = *c.HTTP
+		httpClient.Timeout = 0
+	}
+	noResponse := errors.New("no firmware response within 30 seconds")
+	timer := time.AfterFunc(downloadIdleTimeout, func() { cancel(noResponse) })
+	resp, err := updateverify.Get(ctx, &httpClient, r.URL)
+	if !timer.Stop() {
+		cancel(noResponse)
+	}
 	if err != nil {
+		if cause := context.Cause(ctx); cause != nil {
+			return "", cause
+		}
+		// Do not expose a redirected signed URL in the device's update status.
+		var requestErr *url.Error
+		if errors.As(err, &requestErr) {
+			err = requestErr.Err
+		}
 		return "", err
 	}
 	defer resp.Body.Close()
@@ -179,13 +207,17 @@ func (c *Client) Download(ctx context.Context, r Release) (string, error) {
 		return "", err
 	}
 	defer os.Remove(f.Name())
-	match, e := updateverify.CopyAndMatch(f, resp.Body, r.Size, r.SHA256)
-	if e == nil {
+	body := downloadBody{Reader: resp.Body, cancel: cancel, progress: progress}
+	match, e := updateverify.CopyAndMatch(f, &body, r.Size, r.SHA256)
+	if e == nil && match && ctx.Err() == nil {
 		e = f.Sync()
 	}
 	closeErr := f.Close()
+	if cause := context.Cause(ctx); cause != nil {
+		e = cause
+	}
 	if e != nil {
-		return "", e
+		return "", fmt.Errorf("%d of %d bytes received: %w", body.received, r.Size, e)
 	}
 	if closeErr != nil {
 		return "", closeErr
@@ -198,6 +230,32 @@ func (c *Client) Download(ctx context.Context, r Release) (string, error) {
 		return "", err
 	}
 	return path, nil
+}
+
+const downloadIdleTimeout = 30 * time.Second
+
+var errDownloadIdle = errors.New("no firmware bytes received for 30 seconds")
+
+type downloadBody struct {
+	io.Reader
+	cancel   context.CancelCauseFunc
+	progress func(int64)
+	received int64
+}
+
+func (b *downloadBody) Read(p []byte) (int, error) {
+	timer := time.AfterFunc(downloadIdleTimeout, func() { b.cancel(errDownloadIdle) })
+	n, err := b.Reader.Read(p)
+	if !timer.Stop() {
+		b.cancel(errDownloadIdle)
+	}
+	if n > 0 {
+		b.received += int64(n)
+		if b.progress != nil {
+			b.progress(b.received)
+		}
+	}
+	return n, err
 }
 
 func atomicWrite(path string, b []byte) error {

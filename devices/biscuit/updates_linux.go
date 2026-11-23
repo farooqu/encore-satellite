@@ -14,7 +14,6 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"strings"
 	"sync"
 	"time"
 
@@ -140,10 +139,6 @@ func newARM64Updates(selectionPath, manifestPath string) (*linuxUpdates, error) 
 		arm64:  store,
 		reboot: func() error { return exec.Command("/bin/busybox.static", "reboot").Run() },
 		beforeInstall: func() error {
-			b, err := os.ReadFile("/sys/devices/platform/amz_privacy/privacy_state")
-			if err != nil || strings.TrimSpace(string(b)) != "1" {
-				return errors.New("Mute the physical microphone before installing the update")
-			}
 			if m.Target == nativeab.Target {
 				// The native store checks normal boot and confirms the running slot
 				// against hardware boot control before staging anything.
@@ -211,6 +206,7 @@ func (u *linuxUpdates) selectChannel(channel string) error {
 	}
 	u.state.ReleaseUrl = ""
 	u.state.InProgress = false
+	u.state.HasProgress, u.state.Progress = false, 0
 	u.state.ReleaseSummary = "Channel saved; check for updates (nothing installed)"
 	if u.arm64 != nil {
 		if u.busy {
@@ -299,6 +295,35 @@ func (u *linuxUpdates) run(ctx context.Context, changed func() error) {
 	}
 }
 
+func (u *linuxUpdates) download(ctx context.Context, job updateRequest, r linuxupdate.Release, changed func() error) (string, error) {
+	last := -5
+	report := func(received int64) {
+		percent := int(min(received, r.Size) * 100 / r.Size)
+		if percent < last+5 && percent != 100 {
+			return
+		}
+		if percent == last {
+			return
+		}
+		last = percent
+		u.mu.Lock()
+		current := ctx.Err() == nil && job.channel == u.channel && job.generation == u.generation
+		if current {
+			u.state.HasProgress, u.state.Progress = true, float32(percent)
+		}
+		u.mu.Unlock()
+		if current {
+			_ = changed()
+		}
+	}
+	report(0)
+	file, err := u.client.Download(ctx, r, report)
+	u.mu.Lock()
+	u.state.HasProgress, u.state.Progress = false, 0
+	u.mu.Unlock()
+	return file, err
+}
+
 func (u *linuxUpdates) executeARM64(ctx context.Context, job updateRequest, changed func() error) {
 	status := func(offer *linuxupdate.Release, summary string) {
 		u.mu.Lock()
@@ -347,14 +372,13 @@ func (u *linuxUpdates) executeARM64(ctx context.Context, job updateRequest, chan
 		return
 	}
 	if err := u.beforeInstall(); err != nil {
-		status(r, err.Error()) // user can correct privacy and confirm again
+		status(r, err.Error())
 		return
 	}
-	status(nil, "Downloading verified "+payload)
-	_ = changed()
-	file, err := u.client.Download(ctx, *r)
+	status(r, "Downloading "+payload)
+	file, err := u.download(ctx, job, *r, changed)
 	if err != nil {
-		fail(err)
+		status(r, fmt.Sprintf("Download failed: %v. Select Install to retry.", err))
 		return
 	}
 	defer os.Remove(file)
@@ -362,6 +386,8 @@ func (u *linuxUpdates) executeARM64(ctx context.Context, job updateRequest, chan
 		status(r, err.Error())
 		return
 	}
+	status(r, "Staging inactive slot (not activated)")
+	_ = changed()
 	u.mu.Lock()
 	if ctx.Err() != nil || job.channel != u.channel || job.generation != u.generation {
 		u.mu.Unlock()
@@ -453,10 +479,10 @@ func (u *linuxUpdates) execute(ctx context.Context, job updateRequest, changed f
 		status(latest, "Update available; installation requires an explicit Update request", true, false)
 		return
 	}
-	status(latest, "Downloading verified package (not activated)", true, true)
-	file, err := u.client.Download(ctx, *r)
+	status(latest, "Downloading package (not activated)", true, true)
+	file, err := u.download(ctx, job, *r, changed)
 	if err != nil {
-		fail(err)
+		status(latest, fmt.Sprintf("Download failed: %v. Select Install to retry.", err), true, false)
 		return
 	}
 	defer os.Remove(file)

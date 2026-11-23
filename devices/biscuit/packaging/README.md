@@ -30,11 +30,12 @@ writes; it leaves recovery and stock system partitions unchanged and does not
 reboot. If apply is interrupted, stay in recovery and inspect the backups
 instead of retrying over the partial install. The hardware owner controls
 fastboot entry and the first normal boot. Set up [Wi-Fi](#wi-fi-at-install-time),
-then enroll with Voice Incubator and Home Assistant ESPHome. After Home
-Assistant installs the next signed update, verify the confirmed slot and version
-before any fastboot round trip. For read-only verification, never use
-`set_active`, `flash`, or `erase`; a normal reboot into a *pending* slot can
-consume a boot attempt.
+then enroll with Voice Incubator and Home Assistant ESPHome. To verify OTA
+without mute, start from a build that supports it, leave the microphone unmuted,
+and request the next signed update in Home Assistant. Verify the confirmed slot
+and version and that mute is unchanged before any fastboot round trip.
+For read-only verification, never use `set_active`, `flash`, or `erase`; a normal
+reboot into a *pending* slot can consume a boot attempt.
 
 ## Private persistent ARM64 starter
 
@@ -222,11 +223,13 @@ failed-trial rollback and the reviewed recovery path. The initial install starts
 with fresh state and checks existing stock firmware read-only. It does not
 depend on a live upgrade run.
 
-An update requires a healthy running slot, muted physical privacy and read-only
-confirmation that MISC already selects recovery. The installer and OTA app do
-not write MISC; only marked recovery init re-arms it. Check that a normal reboot
-returns to Encore on the exact target and that the clock is valid for TLS and
-feed expiry; do not bypass either check. The starter runs a supervised BusyBox
+Like the [Voice PE OTA configuration at `8ba314e`](https://github.com/OHF-Voice/firmware-voice-incubator/blob/8ba314e68ff4a23b5c08b78fa21926104bbabba2/devices/voice-pe.yaml#L497-L498),
+Biscuit does not require microphone mute for OTA. A recovery-based update still
+requires a healthy running slot and read-only confirmation that MISC already
+selects recovery. The recovery installer and OTA app do not write MISC; only
+marked recovery init re-arms it. Check that a normal reboot returns to Encore on
+the exact target and that the clock is valid for TLS and feed expiry; do not
+bypass either check. The starter runs a supervised BusyBox
 NTP client against `time.cloudflare.com` and `time.nist.gov` (outbound UDP 123).
 It retries after network loss without holding up enrollment, voice or LAN
 startup. A stale clock can still prevent updates until a time server is reachable.

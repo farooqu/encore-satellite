@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/farooqu/encore-satellite/backends/bluetooth"
+	"github.com/farooqu/encore-satellite/devices/biscuit/internal/nativeab"
 	"github.com/farooqu/encore-satellite/platforms/linuxupdate"
 	esphome "github.com/ygelfand/go-esphome-device"
 	"github.com/ygelfand/go-esphome-device/api"
@@ -47,8 +48,9 @@ func testLinuxUpdates(t *testing.T, dir string) *linuxUpdates {
 
 func TestARM64PublicUpdateRequiresConfirmationAndPreservesEnrollment(t *testing.T) {
 	for _, channel := range []string{"stable", "dev"} {
-		t.Run(channel, func(t *testing.T) { testARM64PublicUpdate(t, channel) })
+		t.Run(channel, func(t *testing.T) { testARM64PublicUpdate(t, channel, false) })
 	}
+	t.Run("native A/B without physical mute", func(t *testing.T) { testARM64PublicUpdate(t, "dev", true) })
 }
 
 type updatePollStore struct {
@@ -98,10 +100,14 @@ func TestARM64ChecksAtStartupAndEverySixHours(t *testing.T) {
 	})
 }
 
-func testARM64PublicUpdate(t *testing.T, channel string) {
+func testARM64PublicUpdate(t *testing.T, channel string, native bool) {
 	dir := t.TempDir()
+	// Use a filesystem-backed store in place of the real boot partitions.
 	store := linuxupdate.ARM64Store{Directory: filepath.Join(dir, "cache/encore"), Booted: filepath.Join(dir, "run/slot")}
 	m := linuxupdate.BiscuitARM64Identity("0.1.1-dev.5", 22)
+	if native {
+		m.Target, m.Format, m.BaseSHA256 = nativeab.Target, nativeab.Format, nativeab.LayoutID
+	}
 	seed := []byte("private baseline archive fixture")
 	update := []byte("different public archive fixture")
 	write := func(path string, data []byte) {
@@ -140,7 +146,7 @@ func testARM64PublicUpdate(t *testing.T, channel string) {
 	var metadata, downloads atomic.Int32
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/biscuit-arm64/incubator/" + channel + ".jws":
+		case "/" + m.Target + "/incubator/" + channel + ".jws":
 			mode := metadata.Load()
 			if mode == 0 {
 				http.NotFound(w, r)
@@ -150,7 +156,7 @@ func testARM64PublicUpdate(t *testing.T, channel string) {
 				CoreVersion: "0.1.1", Revision: 23, BaseSHA256: m.BaseSHA256, Size: int64(len(update)), SHA256: digest(update),
 				ReleaseSummary: changelog,
 				URL:            "https://github.com/farooqu/encore-satellite/releases/download/biscuit-0.1.1/rootfs.tar.gz", Issued: time.Now().Unix() - 300, Expires: time.Now().Unix() + 300}
-			if mode == 3 {
+			if mode >= 3 {
 				rel.CoreVersion, rel.Revision = "0.1.2", 24
 				rel.URL = "https://" + r.Host + "/asset"
 				rel.ReleaseSummary = ""
@@ -164,6 +170,11 @@ func testARM64PublicUpdate(t *testing.T, channel string) {
 			fmt.Fprint(w, message+"."+base64.RawURLEncoding.EncodeToString(sig))
 		case "/asset":
 			downloads.Add(1)
+			if metadata.Load() == 4 {
+				w.Header().Set("Content-Length", fmt.Sprint(len(update)))
+				_, _ = w.Write(update[:len(update)/2])
+				return
+			}
 			_, _ = w.Write(update)
 		default:
 			http.NotFound(w, r)
@@ -178,7 +189,14 @@ func testARM64PublicUpdate(t *testing.T, channel string) {
 	if err != nil || legacy.supportsChannelSelection() || legacy.selectChannel("dev") == nil {
 		t.Fatal("old recovery can select a Dev slot it cannot boot", err)
 	}
-	write(bootIdentity, []byte(`{"core_version":"0.1.1-dev.5","package_revision":22,"channel":"stable","update_channels":true}`))
+	manifest, err := json.Marshal(struct {
+		linuxupdate.Manifest
+		UpdateChannels bool `json:"update_channels"`
+	}{m, true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	write(bootIdentity, manifest)
 	u, err := newARM64Updates(selection, bootIdentity)
 	if err != nil || len(u.states()) != 2 || u.states()[0].(*api.SelectStateResponse).State != "stable" {
 		t.Fatal("new recovery did not expose Stable by default", err)
@@ -195,14 +213,22 @@ func testARM64PublicUpdate(t *testing.T, channel string) {
 	}
 	u.arm64 = &store
 	u.client = linuxupdate.Client{Installed: m, Key: pub, HTTP: server.Client(), BaseURL: server.URL, Directory: filepath.Join(stateDir, "updates")}
-	u.beforeInstall = func() error { return nil }
+	if !native {
+		u.beforeInstall = func() error { return nil } // No recovery MISC partition in the test.
+	}
 	u.reboot = func() error { reboots++; return nil }
+	var progress []float32
 	job := func(install bool) {
 		t.Helper()
 		u.request(install)
 		select {
 		case request := <-u.jobs:
-			u.executeARM64(t.Context(), request, func() error { return nil })
+			u.executeARM64(t.Context(), request, func() error {
+				if s := u.states()[1].(*api.UpdateStateResponse); s.InProgress && s.HasProgress && s.LatestVersion == "0.1.2" {
+					progress = append(progress, s.Progress)
+				}
+				return nil
+			})
 			u.busy, u.state.InProgress = false, false
 		default:
 			t.Fatal("no update job queued")
@@ -233,7 +259,7 @@ func testARM64PublicUpdate(t *testing.T, channel string) {
 	if downloads.Load() != 0 || reboots != 0 {
 		t.Fatal("a check or moved feed initiated installation")
 	}
-	if channel == "dev" {
+	if channel == "dev" && !native {
 		guards := 0
 		u.beforeInstall = func() error {
 			guards++
@@ -254,15 +280,34 @@ func testARM64PublicUpdate(t *testing.T, channel string) {
 		u.beforeInstall = func() error { return nil }
 		job(false)
 	}
+	if native {
+		metadata.Store(4)
+		job(true)
+		s := u.states()[1].(*api.UpdateStateResponse)
+		wantSummary := fmt.Sprintf("Download failed: %d of %d bytes received: unexpected EOF. Select Install to retry.", len(update)/2, len(update))
+		if s.CurrentVersion != m.CoreVersion || s.LatestVersion != "0.1.2" || s.InProgress || s.HasProgress || s.ReleaseSummary != wantSummary {
+			t.Fatalf("failed download hid the retry or reported progress: %v", s)
+		}
+		wantProgress := []float32{0, float32((len(update) / 2) * 100 / len(update))}
+		if !reflect.DeepEqual(progress, wantProgress) {
+			t.Fatalf("download progress = %v, want %v", progress, wantProgress)
+		}
+		assertFile(filepath.Join(store.Directory, "active"), "a\n")
+		assertFile(filepath.Join(store.Directory, "highest-revision"), "22\n")
+		if reboots != 0 {
+			t.Fatal("failed download rebooted")
+		}
+		metadata.Store(3) // Retry explicitly without a separate check.
+	}
 	beforeDownload := downloads.Load()
 	job(true)
+	if downloads.Load() != beforeDownload+1 || reboots != 1 {
+		t.Fatalf("downloads=%d reboots=%d: %s", downloads.Load(), reboots, u.state.ReleaseSummary)
+	}
 	assertFile(filepath.Join(store.Directory, "active"), "b\n")
 	assertFile(filepath.Join(store.Directory, "slots/b.state"), "update\n")
 	assertFile(filepath.Join(store.Directory, "highest-revision"), "24\n")
 	assertFile(filepath.Join(store.Directory, "slots/a/rootfs.tar.gz"), string(seed))
-	if downloads.Load() != beforeDownload+1 || reboots != 1 {
-		t.Fatalf("downloads=%d reboots=%d", downloads.Load(), reboots)
-	}
 	if got, err := store.VerifyBoot("b", digest(seed), m, pub); err != nil || got.Revision != 24 || got.CoreVersion != "0.1.2" {
 		t.Fatalf("signed staged archive cannot boot: %+v %v", got, err)
 	}

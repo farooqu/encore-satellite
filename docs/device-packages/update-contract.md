@@ -42,9 +42,18 @@ report unknown/missing state with an actionable reason, not false â€œup to dateâ
 ESPHome's update CHECK command and check button discover only. Its UPDATE command
 requests the platform's download/installation flow and revalidates metadata,
 selection, artifact authenticity, compatibility and monotonic revision. It does
-not bypass Android consent or Linux's privileged installer/recovery gates. A
-download, staged package, pending user confirmation and successful activation
-are distinct states; never report one as the other.
+not bypass Android consent or Linux's privileged installer/recovery gates.
+Microphone mute is not an installation prerequisite on any device. An update
+request does not change the user's microphone privacy setting. A download,
+staged package, pending user confirmation and successful activation are
+distinct states; never report one as the other.
+
+Linux firmware downloads have a separate 30-minute transfer budget and stop
+after 30 seconds waiting for a response or for a body read to make progress.
+The device reports transfer percentage while downloading. A failed transfer
+discards partial bytes, keeps the verified offer available, and explains the
+failure in the update entity's release notes. An explicit retry rechecks the
+selected feed and starts a fresh download; it never installs a partial bundle.
 
 ## Eligibility: next newer semantic version, never a downgrade
 
