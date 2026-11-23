@@ -2,6 +2,7 @@ package biscuit_test
 
 import (
 	"testing"
+	"time"
 
 	"github.com/farooqu/encore-satellite/core/audio"
 	"github.com/farooqu/encore-satellite/core/presentation"
@@ -71,12 +72,27 @@ func TestPublicAveragePacked24(t *testing.T) {
 	}
 }
 
-func TestPublicRingPrivacyHasHighestPriority(t *testing.T) {
+func TestPublicRingKeepsPrivacyVisible(t *testing.T) {
 	for _, phase := range []string{"idle", "listening", "working", "speaking", "error", "disconnected"} {
 		frame := biscuit.RingFrame(presentation.State{Muted: true, Alert: true, Phase: phase, Night: "off"}, 1, 0, biscuit.RingOptions{Brightness: 100})
 		for i := range 12 {
 			if got := [3]byte{frame[i*3], frame[i*3+1], frame[i*3+2]}; got != [3]byte{223, 0, 0} {
 				t.Fatalf("privacy lost to %s: %v", phase, frame)
+			}
+		}
+	}
+	state := presentation.State{Connected: true, Muted: true, Inhibited: true, Alert: true, Night: "off"}
+	options := biscuit.RingOptions{Brightness: 100}
+	for _, elapsed := range []time.Duration{0, 1600 * time.Millisecond} {
+		frame := biscuit.RingFrame(state, 0, elapsed, options)
+		for i := range 12 {
+			r, g, b := frame[i*3], frame[i*3+1], frame[i*3+2]
+			if i == 3 || i == 9 {
+				if r != 223 || g != 0 || b != 0 {
+					t.Fatalf("alert hid a muted marker: %v", frame)
+				}
+			} else if !(r > g && g > b) {
+				t.Fatalf("mute hid the amber alert: %v", frame)
 			}
 		}
 	}

@@ -50,8 +50,11 @@ internal fun EncoreScreen(state: EncoreState, onStart: () -> Unit, onTalk: () ->
     microphonePermissionGranted: Boolean = true,
     dashboardAuth: DashboardAuth? = null,
     dashboardContent: (@Composable () -> Unit)? = null,
-    onChooseHome: () -> Unit = {}, onNotificationSettings: () -> Unit = {}, onSetup: () -> Unit = {}) {
+    onChooseHome: () -> Unit = {}, onNotificationSettings: () -> Unit = {}, onSetup: () -> Unit = {},
+    onStopAlert: (Long) -> Unit = { onStop() }) {
     val voiceVisible = state.interactionVisible || state.microphoneVisible
+    val runningTimers = state.timers.takeIf { state.running && state.connected && state.voiceKnown }.orEmpty()
+    val ringing = state.voiceKnown && state.alertVisible && state.alert
     // Only local Assist invocations use the transcript. Unclassified and remote
     // sessions keep the existing indicator, including its monitor admission hook.
     val localAssist = state.voiceKnown && state.invocation in setOf("wake", "manual", "follow_up") &&
@@ -65,12 +68,16 @@ internal fun EncoreScreen(state: EncoreState, onStart: () -> Unit, onTalk: () ->
     }
     val pendingWake = localAssist && state.microphoneVisible && state.invocation == "wake" && !state.accepted &&
         state.phase == "tentative" && state.reason.isEmpty()
-    var settingsVisible by remember(legacyVisible || panel != null) { mutableStateOf(false) }
+    var timersExpanded by remember(state.generation, runningTimers.isNotEmpty()) { mutableStateOf(false) }
+    val sheetVisible = ringing || (!legacyVisible && (panel != null || timersExpanded))
+    var settingsVisible by remember(legacyVisible || sheetVisible) { mutableStateOf(false) }
     fun closeSettings() { settingsVisible = false }
     fun closePanel() {
+        if (panel == null) timersExpanded = false
         transcript = null
         if (panel?.finished == false) onStop()
     }
+    fun stopAlert() = onStopAlert(state.ring?.sequence ?: 0L)
     MaterialTheme(colorScheme = darkColorScheme(primary = Mint, background = Ink, surface = Color(0xff152330))) {
         BoxWithConstraints(Modifier.fillMaxSize().background(Ink)) {
             val landscape = maxWidth > maxHeight
@@ -80,17 +87,27 @@ internal fun EncoreScreen(state: EncoreState, onStart: () -> Unit, onTalk: () ->
                     if (dashboardContent != null) dashboardContent()
                     else Dashboard(state, microphonePermissionGranted, onStart, onPairHomeAssistant, dashboardAuth, settingsVisible)
                 }
-                if (!settingsVisible && panel == null) {
+                if (!settingsVisible && !sheetVisible) {
                     val buttons: @Composable () -> Unit = {
                         val startMicrophone = state.running && !state.microphoneReady && !state.muted
-                        FilledIconButton(onClick = when { legacyVisible -> onStop; startMicrophone -> onStart; else -> onTalk },
+                        FilledIconButton(onClick = when {
+                            state.alertVisible -> ::stopAlert
+                            legacyVisible -> onStop
+                            startMicrophone -> onStart
+                            else -> onTalk
+                        },
                             enabled = legacyVisible || startMicrophone ||
                                 (state.running && state.voiceKnown && state.connected && state.microphoneReady && state.captureReady &&
                                     !state.muted && !state.inhibited && state.talkAllowed && state.talkReady),
                             colors = IconButtonDefaults.filledIconButtonColors(containerColor = Ink, contentColor = Mint,
                                 disabledContainerColor = Color(0xff38434d), disabledContentColor = Color(0xff9ca8b1)),
                             modifier = Modifier.size(56.dp).testTag(if (legacyVisible) "stop" else "talk").semantics {
-                                contentDescription = when { legacyVisible -> "Stop voice turn"; startMicrophone -> "Start microphone"; else -> "Trigger assistant" }
+                                contentDescription = when {
+                                    state.alertVisible -> "Stop alert"
+                                    legacyVisible -> "Stop voice turn"
+                                    startMicrophone -> "Start microphone"
+                                    else -> "Trigger assistant"
+                                }
                                 val status = state.status
                                 stateDescription = when {
                                     !state.microphoneVisible -> status
@@ -122,13 +139,16 @@ internal fun EncoreScreen(state: EncoreState, onStart: () -> Unit, onTalk: () ->
                         horizontalArrangement = Arrangement.spacedBy(16.dp)) { buttons() }
                 }
             }
-            if (legacyVisible) {
-                BackHandler(onBack = onStop)
+            if (legacyVisible || ringing) {
                 VoiceEdgeGlow(state, reducedMotion, Modifier.matchParentSize(), onMonitorOverlay)
-            } else if (panel != null) {
-                BackHandler(onBack = ::closePanel)
-                VoiceTranscriptPanel(panel, state, Modifier.align(Alignment.BottomCenter).widthIn(max = 640.dp)
-                    .fillMaxWidth().heightIn(max = maxHeight / 2), onClose = ::closePanel)
+            }
+            if (sheetVisible) {
+                BackHandler(onBack = if (ringing) ::stopAlert else ::closePanel)
+                SatelliteSheet(panel, state, runningTimers, ringing, pendingWake, Modifier.align(Alignment.BottomCenter).widthIn(max = 640.dp)
+                    .fillMaxWidth().heightIn(max = maxHeight * if (ringing || runningTimers.isNotEmpty()) .65f else .5f),
+                    onClose = ::closePanel, onStopAlert = ::stopAlert)
+            } else if (legacyVisible) {
+                BackHandler(onBack = if (state.alertVisible) ::stopAlert else onStop)
             } else if (settingsVisible) {
                 // Keep Settings in the Activity window so a remote turn can take over without losing window focus.
                 BackHandler(onBack = ::closeSettings)
@@ -136,10 +156,24 @@ internal fun EncoreScreen(state: EncoreState, onStart: () -> Unit, onTalk: () ->
                     SettingsContent(state, noiseKey, musicToken, onMusicConnect, onMusicDisconnect, onMusicCommand, onUpdate, onBluetooth,
                         dashboardAuth, onChooseHome, onNotificationSettings, { closeSettings(); onSetup() }, ::closeSettings)
                 }
-            } else if (pendingWake) VoiceWakeCue(Modifier.align(Alignment.BottomCenter).navigationBarsPadding()
-                .padding(bottom = if (landscape) 8.dp else 82.dp))
+            } else if (pendingWake) {
+                VoiceWakeCue(Modifier.align(Alignment.BottomCenter).navigationBarsPadding()
+                    .padding(bottom = if (landscape) 8.dp else 82.dp))
+            } else if (runningTimers.isNotEmpty()) {
+                val count = runningTimers.size
+                FilledTonalButton(onClick = { timersExpanded = true },
+                    Modifier.align(Alignment.BottomCenter).navigationBarsPadding()
+                        .padding(bottom = if (landscape) 12.dp else 76.dp).heightIn(min = 48.dp).testTag("timer-chip")
+                        .semantics { contentDescription = if (count == 1) "Show running timer" else "Show $count running timers" }) {
+                    Text("${runningTimers.first().label} · ${if (count == 1) "1 timer" else "$count timers"}")
+                }
+            }
+            if (ringing) {
+                MuteButton(state, onMuted, Modifier.align(Alignment.TopEnd).statusBarsPadding().padding(16.dp))
+            }
             if (!settingsVisible && state.problem.isNotEmpty()) {
-                Surface(Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(horizontal = 20.dp, vertical = 4.dp),
+                Surface(Modifier.align(Alignment.TopCenter).statusBarsPadding()
+                    .padding(start = 20.dp, end = if (ringing) 84.dp else 20.dp, top = 4.dp, bottom = 4.dp),
                     shape = RoundedCornerShape(12.dp)) {
                     Row(Modifier.padding(horizontal = 12.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                         Text(state.problem, Modifier.weight(1f), color = Color(0xffffd0a4), maxLines = 2,
@@ -158,11 +192,11 @@ internal fun EncoreScreen(state: EncoreState, onStart: () -> Unit, onTalk: () ->
     }
 }
 
-@Composable private fun MuteButton(state: EncoreState, onMuted: (Boolean) -> Unit) {
+@Composable private fun MuteButton(state: EncoreState, onMuted: (Boolean) -> Unit, modifier: Modifier = Modifier) {
     FilledIconToggleButton(checked = state.muted, onCheckedChange = onMuted, enabled = state.microphoneReady || state.muted,
         colors = IconButtonDefaults.filledIconToggleButtonColors(containerColor = Ink, contentColor = Mint,
             checkedContainerColor = Color(0xffa23b45), checkedContentColor = Color.White),
-        modifier = Modifier.size(56.dp).testTag("privacy").semantics {
+        modifier = modifier.size(56.dp).testTag("privacy").semantics {
             contentDescription = if (state.muted) "Unmute mic" else "Mute mic"
             stateDescription = if (state.muted) "Microphone muted" else "Microphone unmuted"
         }) {

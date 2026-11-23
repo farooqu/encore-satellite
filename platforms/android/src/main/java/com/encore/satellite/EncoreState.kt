@@ -12,6 +12,17 @@ data class MusicState(
     val commands: List<String> = emptyList(),
 )
 
+data class TimerCountdown(val seconds: Long) {
+    val label: String get() {
+        val hours = seconds / 3600
+        val tail = (seconds % 60).toString().padStart(2, '0')
+        return if (hours == 0L) "${seconds / 60}:$tail"
+        else "$hours:${(seconds / 60 % 60).toString().padStart(2, '0')}:$tail"
+    }
+}
+
+data class RingingAlert(val sequence: Long, val name: String, val count: Int)
+
 data class EncoreState(
     val running: Boolean = false,
     val microphoneReady: Boolean = false,
@@ -55,18 +66,23 @@ data class EncoreState(
     val reason: String = "",
     val esphome: String = "",
     val espHomeFriendlyName: String = "",
+    val timers: List<TimerCountdown> = emptyList(),
+    val ring: RingingAlert? = null,
 ) {
     val needsHomeAssistantSetup: Boolean get() = esphome == "unpaired" || esphome == "waiting" || esphome == "expired"
     val origin: String get() = if (dashboard.isEmpty()) "" else Uri.parse(dashboard).let { "${it.scheme}://${it.encodedAuthority}" }
+    val alertVisible: Boolean get() = running && connected && (!inhibited || muted) &&
+        (alert || (outputOwner == "alert" && outputState in setOf("playing", "draining")))
     // Unknown snapshots suppress drawing, but keep Stop/shield for last-known
     // ownership until an actual stop or fresh snapshot releases it.
-    val interactionVisible: Boolean get() = running && connected && !muted && !inhibited &&
-        (voiceActive || announcing || alert || outputState in setOf("queued", "playing", "draining"))
+    val interactionVisible: Boolean get() = alertVisible || (running && connected && !muted && !inhibited &&
+        (voiceActive || announcing || outputState in setOf("queued", "playing", "draining")))
     val microphoneVisible: Boolean get() = running && microphoneReady && voiceKnown && connected && captureReady && !muted && !inhibited &&
         (monitorId != 0L || inputOpen || input in setOf("tentative", "listening"))
     val visual: String get() = when {
-        !running || !voiceKnown || muted || !connected || inhibited -> "none"
-        alert || (outputOwner == "alert" && outputState in setOf("playing", "draining")) -> "alert"
+        !running || !voiceKnown || !connected -> "none"
+        alertVisible -> "alert"
+        muted || inhibited -> "none"
         outputState == "failed" -> "none"
         outputState in setOf("playing", "draining") -> "output"
         outputState == "queued" || announcing -> "queued"
@@ -76,6 +92,7 @@ data class EncoreState(
         else -> "none"
     }
     val status: String get() = when {
+        muted && voiceKnown && alertVisible -> "Alert · microphone muted"
         muted -> "Microphone muted"
         !running -> "Satellite stopped"
         !voiceKnown -> "Voice status unavailable"
@@ -107,6 +124,8 @@ data class EncoreState(
         fun parse(value: String, previous: EncoreState): EncoreState {
             val data = JSONObject(value)
             val voice = data.getJSONObject("voice")
+            val timers = voice.optJSONArray("timers")
+            val ring = voice.optJSONObject("ring")
             val output = voice.optJSONObject("output")
             val speaker = voice.optJSONObject("speaker")
             val name = speaker?.optString("name").orEmpty().takeUnless { it == "unknown" }.orEmpty()
@@ -119,6 +138,10 @@ data class EncoreState(
             return previous.copy(voiceKnown = true, phase = voice.getString("phase"), connected = voice.getBoolean("connected"),
                 muted = voice.getBoolean("muted"), models = data.getInt("models"),
                 heard = voice.optString("heard"), reply = voice.optString("reply"), alert = voice.getBoolean("alert"),
+                timers = (0 until (timers?.length() ?: 0)).mapNotNull { i ->
+                    timers?.optJSONObject(i)?.optLong("seconds")?.takeIf { it > 0 }?.let(::TimerCountdown)
+                },
+                ring = ring?.let { RingingAlert(it.optLong("sequence"), it.optString("name"), it.optInt("count")) },
                 generation = voice.optLong("generation"), turn = voice.optLong("turn"), monitorId = voice.optLong("monitor_id"),
                 voiceActive = voice.optBoolean("active"), announcing = voice.optBoolean("announcing"), inhibited = voice.optBoolean("inhibited"),
                 talkAllowed = voice.optBoolean("talk_allowed"),

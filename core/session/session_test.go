@@ -419,9 +419,9 @@ func TestMutedStartupAndReconnectFenceOldReaders(t *testing.T) {
 		}
 		_ = e.Capture(audio.Frame{Samples: []int16{127}})
 		_ = e.Handle(g, session.Event{Kind: "hangup", Listen: true})
-		_ = e.Handle(g, session.Event{Kind: "timer_ringing"})
+		_ = e.Handle(g, session.Event{Kind: "responding", Text: "stale reply"})
 		_ = e.EndOutput(g)
-		if e.StartManual() != session.ErrUnavailable || len(l.commands) != 0 || e.Snapshot().Alert {
+		if e.StartManual() != session.ErrUnavailable || len(l.commands) != 0 || e.Snapshot().Reply != "" {
 			t.Fatal("muted connection could start or publish voice events")
 		}
 		e.SetMuted(false)
@@ -534,6 +534,133 @@ func TestStopInterruptsDrainAndRejectsLateAudio(t *testing.T) {
 	_ = e.EndOutput(g)
 	if err := e.StartManual(); err != session.ErrUnavailable {
 		t.Fatal("stream end released cancelled native input", err)
+	}
+}
+
+func TestMicMutePreservesRingingAndManualDismissal(t *testing.T) {
+	for _, name := range []string{"mute_during_playback", "ring_while_muted"} {
+		t.Run(name, func(t *testing.T) {
+			e, l, p, g := fixture(t)
+			if name == "ring_while_muted" {
+				e.SetMuted(true)
+				_ = e.Output(g, []int16{97}) // Idle PCM cannot ring without the event.
+			}
+			_ = e.Handle(g, session.Event{Kind: "timer_ringing"})
+			_ = e.Output(g, []int16{-7, 13})
+			flushed := p.flushed
+			e.SetMuted(true)
+			if s := e.Snapshot(); !s.Muted || !s.Alert || !s.Active || s.Output.Owner != "alert" || s.Output.State != "playing" ||
+				s.InputOpen || s.TalkAllowed || s.WakeAllowed || p.writes != 2 || p.flushed != flushed || len(l.commands) != 0 {
+				t.Fatal("mic mute interrupted the alert or allowed capture", s, l.commands)
+			}
+			_ = e.Capture(audio.Frame{Samples: []int16{127}})
+			if listen, stop, _ := e.WakeState(g); listen || stop || e.StartManual() != session.ErrUnavailable {
+				t.Fatal("alert enabled the muted microphone")
+			}
+			_ = e.EndOutput(g)
+			_ = e.Output(g, []int16{29}) // Ring audio can span several streams.
+			_ = e.Stop()
+			_ = e.Output(g, []int16{17})
+			_ = e.Handle(g, session.Event{Kind: "timer_stopped"}) // No audio end on a cancelled ring.
+			_ = e.Handle(g, session.Event{Kind: "timer_ringing"})
+			_ = e.Output(g, []int16{37, 41})
+			_ = e.Handle(g, session.Event{Kind: "timer_stopped"}) // Dismissed on another satellite.
+			_ = e.EndOutput(g)                                    // No false drain after remote dismissal.
+			if s := e.Snapshot(); !s.Muted || s.Alert || s.Active || p.writes != 5 || l.closed ||
+				len(l.commands) != 2 || l.commands[0].Kind != "drained" || l.commands[1].Kind != "stop_alert" {
+				t.Fatal("muted ring did not drain, dismiss and rearm independently of capture", s, l.commands, p.writes)
+			}
+		})
+	}
+}
+
+func TestMutedRingDoesNotPlayOverlappingNativeAnnouncement(t *testing.T) {
+	for _, ringFirst := range []bool{false, true} {
+		e, l, p, g := fixture(t)
+		e.SetMuted(true)
+		ring := session.Event{Kind: "timer_ringing"}
+		if ringFirst {
+			_ = e.Handle(g, ring)
+			_ = e.Output(g, []int16{12, -31})
+		}
+		writes, flushed := p.writes, p.flushed
+		_ = e.Handle(g, session.Event{Kind: "announcement", Active: true})
+		if !ringFirst {
+			_ = e.Handle(g, ring)
+		}
+		_ = e.Output(g, []int16{73})
+		_ = e.EndOutput(g)
+		_ = e.Output(g, []int16{29, -87}) // An announcement can have multiple segments.
+		_ = e.EndOutput(g)
+		if s := e.Snapshot(); !s.Alert || !s.Muted || s.Announcing || s.Output.State != "" ||
+			p.writes != writes || (ringFirst && p.flushed != flushed+1) || len(l.commands) != 0 {
+			t.Fatal("ambiguous PCM played or displaced the muted ring", s, p.writes, l.commands)
+		}
+		_ = e.Handle(g, session.Event{Kind: "announcement", Active: false})
+		_ = e.Output(g, []int16{-7, 13, 41})
+		_ = e.EndOutput(g)
+		if p.writes != writes+3 || len(l.commands) != 1 || l.commands[0].Kind != "drained" {
+			t.Fatal("unambiguous ring did not resume", p.writes, l.commands)
+		}
+	}
+}
+
+func TestPlaybackInterruptionDoesNotDismissRing(t *testing.T) {
+	e, l, p, g := fixture(t)
+	_ = e.Handle(g, session.Event{Kind: "timer_ringing"})
+	sequence := e.Snapshot().Ring.Sequence // The ring need not have reached the display yet.
+	e.SetPlaybackInterrupted(true)         // Denied before any PCM arrives.
+	_ = e.Output(g, []int16{97, 89})
+	e.SetPlaybackInterrupted(false)
+	_ = e.Output(g, []int16{47}) // Do not play or acknowledge the tail of a skipped segment.
+	_ = e.EndOutput(g)
+	if !e.Snapshot().Alert || p.writes != 0 || len(l.commands) != 0 {
+		t.Fatal("denied focus dismissed the ring or allowed partial playback", e.Snapshot(), p.writes, l.commands)
+	}
+	_ = e.Output(g, []int16{-5, 11, -23})
+	flushed := p.flushed
+	e.SetPlaybackInterrupted(true) // Focus lost during playback.
+	_ = e.Output(g, []int16{101})
+	_ = e.EndOutput(g)
+	if s := e.Snapshot(); !s.Alert || s.Ring.Sequence != sequence || s.Output.State != "" || p.writes != 3 ||
+		p.flushed != flushed+1 || l.closed || len(l.commands) != 0 {
+		t.Fatal("lost focus did not silence just this satellite", s, p.writes, l.commands)
+	}
+	e.StopAlert(sequence)
+	if e.Snapshot().Alert || len(l.commands) != 1 || l.commands[0].Kind != "stop_alert" {
+		t.Fatal("explicit Stop no longer dismisses the interrupted alert", l.commands)
+	}
+}
+
+func TestPlaybackInterruptionDuringDrainDoesNotSkipNextSegment(t *testing.T) {
+	e, l, p, g := fixture(t)
+	p.entered, p.release = make(chan struct{}), make(chan struct{})
+	_ = e.Handle(g, session.Event{Kind: "timer_ringing"})
+	_ = e.Output(g, []int16{17, -83})
+	done := make(chan error, 1)
+	go func() { done <- e.EndOutput(g) }()
+	<-p.entered
+	e.SetPlaybackInterrupted(true)
+	e.SetPlaybackInterrupted(false)
+	close(p.release)
+	if err := <-done; err != nil || len(l.commands) != 0 {
+		t.Fatal("interrupted drain acknowledged playback", err, l.commands)
+	}
+	p.entered = nil
+	_ = e.Output(g, []int16{-31, 67, 123})
+	_ = e.EndOutput(g)
+	if p.writes != 5 || len(l.commands) != 1 || l.commands[0].Kind != "drained" {
+		t.Fatal("the next segment did not play after focus returned", p.writes, l.commands)
+	}
+}
+
+func TestPlaybackInterruptionStillCancelsVoiceCall(t *testing.T) {
+	e, l, _, g := fixture(t)
+	_ = e.StartManual()
+	_ = e.Handle(g, session.Event{Kind: "listening"})
+	e.SetPlaybackInterrupted(true)
+	if e.Snapshot().InputOpen || len(l.commands) != 2 || l.commands[1].Kind != "cancel" {
+		t.Fatal("focus loss did not cancel active conversation", e.Snapshot(), l.commands)
 	}
 }
 

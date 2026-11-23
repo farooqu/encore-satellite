@@ -48,7 +48,8 @@ class EncoreService : Service() {
         SatelliteAudioFocus(getSystemService(AudioManager::class.java)) { focused ->
             mutable.value = mutable.value.copy(audioInterrupted = !focused)
             music?.interrupted(!focused)
-            if (!focused) stopTurn()
+            if (!focused) audio.clearVisualization()
+            runtime?.setPlaybackInterrupted(!focused)
         }
     }
 
@@ -230,10 +231,15 @@ class EncoreService : Service() {
         }.onFailure { problem("Voice is not ready: ${it.message}") }
     }
     fun stopTurn() { inhibitPresentation("stopping"); runtime?.stop() }
+    fun stopAlert(sequence: Long) { runtime?.stopAlert(sequence) }
     private fun inhibitPresentation(phase: String, muted: Boolean = mutable.value.muted) {
         audio.clearVisualization()
-        mutable.value = mutable.value.copy(phase = phase, muted = muted, inhibited = true, voiceActive = false, announcing = false,
-            input = "", inputOpen = false, outputState = "", outputOwner = "", heard = "", reply = "", speakerName = "", speakerRGB = emptyList(),
+        val current = mutable.value
+        val keepAlert = phase == "muted" && current.alertVisible
+        val keepOutput = keepAlert && current.outputOwner == "alert"
+        mutable.value = current.copy(phase = phase, muted = muted, inhibited = true, voiceActive = keepAlert, announcing = false,
+            alert = keepAlert && current.alert, outputState = if (keepOutput) current.outputState else "", outputOwner = if (keepOutput) "alert" else "",
+            input = "", inputOpen = false, heard = "", reply = "", speakerName = "", speakerRGB = emptyList(),
             level = 0f, waveform = emptyList(), playbackLevel = null, talkAllowed = false, talkReady = false, wakeReady = false)
     }
     fun setBluetoothEnabled(enabled: Boolean) {

@@ -80,16 +80,17 @@ func volumeRingFrame(s presentation.State, v volumeFeedback, options RingOptions
 
 func ringMode(s presentation.State) string {
 	switch {
+	case s.Connected && !s.Muted && s.MonitorID != 0:
+		return "monitor"
+	case s.Connected && (!s.Inhibited || s.Muted) &&
+		(s.Alert || (s.Output.Owner == "alert" && (s.Output.State == "playing" || s.Output.State == "draining"))):
+		return "alert"
 	case s.Muted:
 		return "privacy"
-	case s.Connected && s.MonitorID != 0:
-		return "monitor"
 	case !s.Connected || !s.CaptureReady:
 		return "unavailable"
 	case s.Inhibited:
 		return "idle" // Stop/cancellation never resumes a saved animation.
-	case s.Alert || (s.Output.Owner == "alert" && (s.Output.State == "playing" || s.Output.State == "draining")):
-		return "alert"
 	case s.Output.State == "failed":
 		return "unavailable"
 	case s.Output.State == "playing" || s.Output.State == "draining":
@@ -133,6 +134,10 @@ func RingFrame(s presentation.State, level float64, elapsed time.Duration, optio
 	}
 	phase := max(0, elapsed.Seconds())
 	for i := range 12 {
+		if mode == "alert" && s.Muted && (i == 3 || i == 9) {
+			frame[i*3] = byte(max(8, cap)) // Keep the mic privacy cue visible while ringing.
+			continue
+		}
 		color, intensity := [3]float64{1, .45, .02}, .55
 		switch mode {
 		case "monitor":

@@ -46,6 +46,8 @@ type Event struct {
 	Active  bool
 	Speaker presentation.Speaker
 	Night   *bool
+	Timers  []time.Duration // nil means no valid progress update; empty clears the list
+	Ring    presentation.Ring
 }
 
 var (
@@ -54,40 +56,43 @@ var (
 )
 
 type Engine struct {
-	mu                             sync.Mutex
-	player                         audio.Playback
-	state                          presentation.State
-	link                           Link
-	generation                     uint64
-	turn                           uint64
-	callTimer                      *time.Timer
-	monitorSerial                  uint64
-	monitorVisible                 bool
-	intercom                       bool
-	invocation                     string
-	responsePending                bool
-	outputOwner                    string
-	outputAccepted, outputDraining bool
-	outputFailed                   bool
-	active, discard                bool
-	outputTimer                    bool
-	inputOpen, outputOpen          bool
-	outputReceived                 bool
-	announcing                     bool
-	cancelling                     bool
-	runStarted                     bool
-	pre                            audio.PreRoll
-	lastSequence                   uint64
-	lastTime                       time.Duration
-	haveFrame                      bool
-	output                         context.Context
-	cancelOutput                   context.CancelCauseFunc
-	localOutput                    context.Context
-	wakeModelWait                  chan struct{}
-	activityHandler                func(bool)
-	voiceActive                    bool
-	presentationChanged            func(presentation.State)
-	lastPresentation               presentation.State
+	mu                              sync.Mutex
+	player                          audio.Playback
+	state                           presentation.State
+	link                            Link
+	generation                      uint64
+	turn                            uint64
+	ringSequence                    uint64
+	timerDeadlines                  []time.Time
+	callTimer                       *time.Timer
+	monitorSerial                   uint64
+	monitorVisible                  bool
+	intercom                        bool
+	invocation                      string
+	responsePending                 bool
+	outputOwner                     string
+	outputAccepted, outputDraining  bool
+	outputFailed                    bool
+	active, discard                 bool
+	outputTimer                     bool
+	playbackInterrupted, skipOutput bool
+	inputOpen, outputOpen           bool
+	outputReceived                  bool
+	announcing                      bool
+	cancelling                      bool
+	runStarted                      bool
+	pre                             audio.PreRoll
+	lastSequence                    uint64
+	lastTime                        time.Duration
+	haveFrame                       bool
+	output                          context.Context
+	cancelOutput                    context.CancelCauseFunc
+	localOutput                     context.Context
+	wakeModelWait                   chan struct{}
+	activityHandler                 func(bool)
+	voiceActive                     bool
+	presentationChanged             func(presentation.State)
+	lastPresentation                presentation.State
 }
 
 func New(player audio.Playback) *Engine {
@@ -105,21 +110,33 @@ func (e *Engine) Snapshot() presentation.State {
 func (e *Engine) snapshot() presentation.State {
 	s := e.state
 	s.Generation, s.Turn = e.generation, e.turn
+	if !s.Alert {
+		s.Ring = presentation.Ring{}
+	}
+	if len(e.timerDeadlines) != 0 {
+		now, row := time.Now(), 0
+		for _, deadline := range e.timerDeadlines {
+			if left := deadline.Sub(now); left > 0 {
+				s.Timers[row].Seconds = int64((left-1)/time.Second + 1)
+				row++
+			}
+		}
+	}
 	if s.Night == "" {
 		s.Night = "unknown"
 	}
 	s.Inhibited = e.link == nil || s.Muted || e.cancelling || e.discard
 	s.InputOpen = e.inputOpen && !s.Inhibited
 	s.Speaker = presentation.Speaker{}
-	if s.Inhibited && e.localOutput == nil {
+	if s.Inhibited && e.localOutput == nil && !s.Alert {
 		return s
 	}
-	s.Active = e.active || e.outputOpen || e.announcing || s.Alert || s.MonitorID != 0
-	s.Announcing = e.announcing
-	s.TalkAllowed = !s.Active
+	s.Announcing = e.announcing && !s.Muted
+	s.Active = e.active || e.outputOpen || s.Announcing || s.Alert || s.MonitorID != 0
+	s.TalkAllowed = !s.Inhibited && !s.Active
 	// This is engine permission only. Incubator additionally checks whether
 	// its ordinary model worker has armed and the host reports healthy capture.
-	s.WakeAllowed = !s.Active
+	s.WakeAllowed = s.TalkAllowed
 	if e.active || (e.outputOpen && e.outputOwner == "voice") {
 		s.Invocation = e.invocation
 		s.Speaker = e.state.Speaker
@@ -175,7 +192,7 @@ func (e *Engine) publishActivity() {
 		close(e.wakeModelWait)
 		e.wakeModelWait = nil
 	}
-	active := e.active || e.outputOpen || e.announcing || e.state.Alert || e.intercom
+	active := e.active || e.outputOpen || (e.announcing && !e.state.Muted) || e.state.Alert || e.intercom
 	if active != e.voiceActive {
 		e.voiceActive = active
 		if e.activityHandler != nil {
@@ -234,6 +251,7 @@ func (e *Engine) disconnect(reason string) {
 	e.pre.Clear()
 	e.active, e.discard, e.haveFrame = false, false, false
 	e.outputTimer = false
+	e.skipOutput = false
 	e.inputOpen, e.outputOpen, e.cancelling = false, false, false
 	e.runStarted = false
 	e.outputReceived = false
@@ -241,6 +259,7 @@ func (e *Engine) disconnect(reason string) {
 	e.monitorVisible, e.intercom = false, false
 	e.invocation, e.outputOwner = "", ""
 	e.responsePending, e.outputAccepted, e.outputDraining, e.outputFailed = false, false, false, false
+	e.timerDeadlines = nil
 	e.state = presentation.State{Backend: e.state.Backend, Muted: e.state.Muted, Phase: "disconnected", Reason: reason}
 	if e.state.Muted {
 		e.state.Phase = "muted"
@@ -248,8 +267,8 @@ func (e *Engine) disconnect(reason string) {
 	e.publishActivity()
 }
 
-// SetMuted silences locally and cancels the current call. Cancellation retires
-// the voice-only connection: ordinary and cancellation stream ends are
+// SetMuted stops capture and cancels the current call, without dismissing a ring.
+// Call cancellation retires the connection: ordinary and cancellation stream ends are
 // indistinguishable. A new turn waits for a fresh connection.
 // The host must ALSO gate/stop capture immediately at its OS boundary.
 func (e *Engine) SetMuted(muted bool) {
@@ -267,28 +286,32 @@ func (e *Engine) SetMuted(muted bool) {
 			e.disconnect("monitor_privacy")
 			return
 		}
-		active, alert := e.active || (e.outputOpen && e.localOutput == nil) || e.announcing, e.state.Alert
+		active := e.active || (e.outputOpen && !e.outputTimer && e.localOutput == nil) || e.announcing
 		wasCancelling := e.cancelling
-		e.cancelling = e.cancelling || active || e.discard
-		e.cancelOutput(outputFence("mute_fence"))
-		e.localOutput = nil
-		e.player.Flush()
+		e.cancelling = e.cancelling || active || (e.discard && !e.outputTimer)
+		// Leave an owned alert's playback (or its Stop fence) alone. Never
+		// reuse an interrupted call's transport to admit an untagged ring.
+		if !e.outputTimer || e.cancelling {
+			e.cancelOutput(outputFence("mute_fence"))
+			e.localOutput = nil
+			e.player.Flush()
+			e.outputOpen = false
+		}
 		e.pre.Clear()
 		e.haveFrame = false
-		e.active, e.inputOpen, e.outputOpen, e.announcing = false, false, false, false
-		e.state.Heard, e.state.Reply, e.state.Alert = "", "", false
+		e.active, e.inputOpen, e.announcing = false, false, false
+		e.state.Heard, e.state.Reply = "", ""
 		e.state.Speaker = presentation.Speaker{}
-		if alert {
-			_ = e.send(Command{Kind: "stop_alert"})
+		if e.cancelling {
+			e.state.Alert = false
+		} else if !e.outputTimer {
+			e.resetOutput() // A future ring does not belong to the cancelled output.
 		}
 		if e.cancelling && !wasCancelling {
 			// Also retire interrupted output whose Stop/drain already cleared
 			// active ownership. Never wait for a terminal that cannot arrive.
 			_ = e.send(Command{Kind: "cancel", Reason: "cancelled"})
 		}
-	} else if !e.cancelling {
-		// Idle mute also cancelled playback; timers/announcements have no start.
-		e.resetOutput()
 	}
 	e.updatePrivacyPhase()
 }
@@ -596,6 +619,54 @@ func (e *Engine) Stop() error {
 	return e.stop()
 }
 
+// SetPlaybackInterrupted handles host audio focus, not a user's Stop action.
+func (e *Engine) SetPlaybackInterrupted(interrupted bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.playbackInterrupted = interrupted
+	if !interrupted {
+		return
+	}
+	if !e.state.Alert {
+		_ = e.stop()
+		return
+	}
+	e.skipOpenOutput()
+	e.publishActivity()
+}
+
+const skippedOutput = outputFence("output_skipped")
+
+// Discard the rest of this PCM segment without acknowledging a drain. The
+// peer still owns the ring, and the next segment can play if the gate allows.
+func (e *Engine) skipOpenOutput() {
+	if !e.outputOpen {
+		return
+	}
+	e.cancelOutput(skippedOutput)
+	e.resetOutput()
+	e.player.Flush()
+	e.outputOpen, e.outputTimer, e.skipOutput = false, false, !e.outputDraining
+}
+
+// StopAlert ignores a dismissal for an alert that has already ended or been replaced.
+func (e *Engine) StopAlert(sequence uint64) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if !e.state.Alert || sequence != e.state.Ring.Sequence {
+		return
+	}
+	if e.outputTimer {
+		_ = e.stopOutput("cancelled")
+		return
+	}
+	// Before or between PCM streams, dismiss the alert without flushing
+	// another owner or turning an unrelated voice interaction into a cancel.
+	e.state.Alert = false
+	e.publishActivity()
+	_ = e.send(Command{Kind: "stop_alert"})
+}
+
 // StopTurn ignores a dismiss action from an older presentation.
 func (e *Engine) StopTurn(generation, turn uint64) {
 	e.mu.Lock()
@@ -627,19 +698,22 @@ func (e *Engine) stop() error {
 func (e *Engine) stopOutput(reason string) error {
 	e.stopCallTimer()
 	alert := e.state.Alert
-	localOnly := e.localOutput != nil && !e.active && !e.announcing
+	announcing := e.announcing && !e.state.Muted
+	localOnly := e.localOutput != nil && !e.active && !announcing
 	// A timer-only stream has an unambiguous dismissal. Calls and announcements
 	// do not: an ordinary end/HANGUP may already be buffered before Stop.
 	retire := !e.cancelling &&
-		(e.active || e.announcing || (e.outputOpen && !e.outputTimer && !localOnly))
+		(e.active || announcing || (e.outputOpen && !e.outputTimer && !localOnly))
 	e.cancelOutput(outputFence("session_stop"))
 	e.localOutput = nil
 	e.player.Flush()
 	e.pre.Clear()
-	e.discard = e.discard || e.active || e.announcing || (e.outputOpen && !localOnly)
+	e.discard = e.discard || e.active || announcing || (e.outputOpen && !localOnly)
 	e.cancelling = e.cancelling || retire
 	e.active = false
-	e.announcing = false
+	if !e.state.Muted {
+		e.announcing = false
+	}
 	e.inputOpen, e.outputOpen = false, false
 	e.state.Heard, e.state.Reply, e.state.Alert = "", "", false
 	e.state.Speaker = presentation.Speaker{}
@@ -678,6 +752,17 @@ func (e *Engine) Handle(generation uint64, event Event) error {
 	if generation != e.generation || e.link == nil {
 		return ErrStale
 	}
+	if event.Kind == "timer_progress" {
+		// Countdown snapshots change independently of voice turns and mic privacy.
+		if event.Timers != nil {
+			now := time.Now()
+			e.timerDeadlines = e.timerDeadlines[:0]
+			for _, left := range event.Timers[:min(len(event.Timers), presentation.TimerSlots)] {
+				e.timerDeadlines = append(e.timerDeadlines, now.Add(left))
+			}
+		}
+		return nil
+	}
 	// Area visual policy is connection scoped, not turn scoped. It can update
 	// during mute/cancellation but never from an old reader.
 	if event.Kind == "night" {
@@ -689,7 +774,19 @@ func (e *Engine) Handle(generation uint64, event Event) error {
 		}
 		return nil
 	}
-	if e.cancelling || e.state.Muted {
+	if e.cancelling {
+		return nil
+	}
+	if event.Kind == "announcement" {
+		// Ring and announcement PCM have no stream identifiers and can overlap.
+		// Track ownership even during mute or while discarding a stopped ring.
+		e.announcing = event.Active
+		if e.state.Muted && e.announcing && e.outputTimer {
+			e.skipOpenOutput()
+		}
+		return nil
+	}
+	if e.state.Muted && event.Kind != "timer_ringing" && event.Kind != "timer_stopped" {
 		return nil
 	}
 	if event.Kind == "error" {
@@ -733,22 +830,29 @@ func (e *Engine) Handle(generation uint64, event Event) error {
 		}
 		return nil
 	}
-	if event.Kind == "timer_stopped" && e.discard && e.outputTimer {
-		// Cancelling a native paced ring can omit AUDIO_OUT_END. This event
-		// ends only that ring's fence, never a cancelled voice call's fence.
-		e.discard, e.outputTimer = false, false
+	if event.Kind == "timer_stopped" && e.outputTimer {
+		// A ring stopped here or in another room can omit AUDIO_OUT_END.
+		// Clear only the ring's playback and fence, never another stream's.
 		e.resetOutput()
+		if e.outputOpen {
+			e.player.Flush()
+		}
+		e.outputOpen, e.discard, e.outputTimer = false, false, false
 	}
 	if e.discard {
 		return nil
 	}
 	switch event.Kind {
-	case "announcement":
-		e.announcing = event.Active
 	case "timer_ringing":
+		e.ringSequence++
 		e.state.Alert = true
+		e.state.Ring = event.Ring
+		e.state.Ring.Sequence = e.ringSequence
 	case "timer_stopped":
 		e.state.Alert = false
+		if !e.announcing {
+			e.skipOutput = false // A cancelled ring may omit AUDIO_OUT_END.
+		}
 	case "listening":
 		if e.active {
 			e.runStarted = true
@@ -815,7 +919,10 @@ func (e *Engine) outputSamples(generation, monitorID uint64, samples []int16) er
 		e.mu.Unlock()
 		return nil
 	}
-	if e.state.Muted || e.cancelling {
+	if !e.cancelling && !e.discard && e.state.Alert && (e.playbackInterrupted || (e.state.Muted && e.announcing)) {
+		e.skipOutput = true
+	}
+	if e.cancelling || e.skipOutput || e.playbackInterrupted || (e.state.Muted && (!e.state.Alert || e.announcing)) {
 		e.mu.Unlock()
 		return nil
 	}
@@ -838,6 +945,9 @@ func (e *Engine) outputSamples(generation, monitorID uint64, samples []int16) er
 	err := e.player.Write(ctx, samples)
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if context.Cause(ctx) == skippedOutput {
+		return nil // A host interruption must not turn an abandoned write into a link error.
+	}
 	if monitorID != 0 && (ctx != e.output || e.state.MonitorID != monitorID) {
 		return nil // A retired relay write cannot fail the new stream or link.
 	}
@@ -846,7 +956,7 @@ func (e *Engine) outputSamples(generation, monitorID uint64, samples []int16) er
 	}
 	// A blocked Write can finish after Stop, mute or connection replacement.
 	// It must not reassert playback in the newer presentation.
-	if generation == e.generation && ctx == e.output && e.outputOpen && !e.discard && !e.state.Muted {
+	if generation == e.generation && ctx == e.output && e.outputOpen && !e.discard {
 		if err == nil {
 			e.outputAccepted = true
 		} else {
@@ -867,7 +977,12 @@ func (e *Engine) EndOutput(generation uint64) error {
 		e.mu.Unlock()
 		return nil
 	}
-	if e.cancelling || e.state.Muted {
+	if e.skipOutput {
+		e.skipOutput = false
+		e.mu.Unlock()
+		return nil
+	}
+	if e.cancelling || (e.state.Muted && !e.outputTimer) {
 		e.mu.Unlock()
 		return nil
 	}
@@ -889,7 +1004,7 @@ func (e *Engine) EndOutput(generation uint64) error {
 	if generation != e.generation || e.link == nil {
 		return ErrStale
 	}
-	if ctx != e.output || e.cancelling || e.state.Muted {
+	if ctx != e.output || e.cancelling {
 		return nil
 	}
 	e.outputOpen, e.outputTimer = false, false

@@ -12,6 +12,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -19,6 +20,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.*
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
@@ -77,10 +79,10 @@ internal fun VoiceTranscript?.update(state: EncoreState, local: Boolean, active:
     }
 }
 
-@Composable internal fun VoiceTranscriptPanel(call: VoiceTranscript, state: EncoreState, modifier: Modifier,
-    onClose: () -> Unit) {
+@Composable internal fun SatelliteSheet(call: VoiceTranscript?, state: EncoreState, timers: List<TimerCountdown>,
+    ringing: Boolean, pendingWake: Boolean, modifier: Modifier, onClose: () -> Unit, onStopAlert: () -> Unit) {
     val lines = buildList {
-        for (turn in call.earlier + call.current) {
+        if (call != null) for (turn in call.earlier + call.current) {
             val current = turn === call.current && !call.finished
             val heardIcon = if (current && state.phase == "working") R.drawable.ic_voice_working else R.drawable.ic_voice_wave
             if (turn.heard.isNotBlank()) add(TranscriptLine(turn.heard, heardIcon, "You"))
@@ -97,43 +99,80 @@ internal fun VoiceTranscript?.update(state: EncoreState, local: Boolean, active:
     }
     MaterialTheme(colorScheme = voiceColors()) {
         val colors = MaterialTheme.colorScheme
-        Surface(modifier.testTag("voice-transcript"), color = colors.surface,
+        Surface(modifier.testTag(if (call == null) "timer-sheet" else "voice-transcript"), color = colors.surface,
             shape = RoundedCornerShape(topStart = 26.dp, topEnd = 26.dp), shadowElevation = 8.dp) {
             Column(Modifier.navigationBarsPadding().padding(start = 18.dp, top = 3.dp, end = 18.dp, bottom = 8.dp)) {
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Icon(painterResource(R.drawable.ic_second_pulse), contentDescription = "Encore Satellite",
-                        modifier = Modifier.size(36.dp), tint = colors.primary)
+                if (call != null || !ringing) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    if (call == null) Text("Timers", style = MaterialTheme.typography.titleLarge, modifier = Modifier.semantics { heading() })
+                    else Icon(painterResource(R.drawable.ic_second_pulse), contentDescription = "Encore Satellite",
+                            modifier = Modifier.size(36.dp), tint = colors.primary)
                     Spacer(Modifier.weight(1f))
+                    if (pendingWake) VoiceWakeCue(Modifier.padding(end = 8.dp))
                     IconButton(onClick = onClose, modifier = Modifier.size(48.dp)
-                        .testTag(if (call.finished) "close-voice-transcript" else "stop").semantics {
-                            contentDescription = if (call.finished) "Close voice panel" else "Stop voice turn"
-                            if (!call.finished) stateDescription = state.status
+                        .testTag(if (call?.finished == false) "stop" else "close-voice-transcript").semantics {
+                            contentDescription = when {
+                                call == null -> "Close timers"
+                                call.finished -> "Close voice panel"
+                                else -> "Stop voice turn"
+                            }
+                            if (call?.finished == false) stateDescription = state.status
                         }) { Text("×", fontSize = 23.sp, color = colors.onSurfaceVariant) }
                 }
-                val scroll = key(call.generation, call.earlier.firstOrNull()?.number ?: call.current.number) { rememberScrollState() }
+                if (ringing) {
+                    val count = state.ring?.count ?: 0
+                    val title = if (count > 1) "$count alerts ringing" else "Alert ringing"
+                    val name = state.ring?.name.orEmpty().ifBlank { title }
+                    Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Column(Modifier.weight(1f).semantics { liveRegion = LiveRegionMode.Assertive }) {
+                            Text(name, style = MaterialTheme.typography.titleLarge, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            if (name != title) Text(title, color = colors.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+                        }
+                        Button(onClick = onStopAlert, modifier = Modifier.heightIn(min = 48.dp).testTag("stop-alert")
+                            .semantics { stateDescription = title },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xffffc88b), contentColor = Color(0xff321c0b))) {
+                            Text("Stop alert")
+                        }
+                    }
+                }
+                val scroll = key(call?.generation, call?.earlier?.firstOrNull()?.number ?: call?.current?.number) { rememberScrollState() }
                 val threshold = with(LocalDensity.current) { 8.dp.roundToPx() }
                 val atBottom = scroll.maxValue == Int.MAX_VALUE || scroll.maxValue - scroll.value <= threshold
                 LaunchedEffect(lines) {
-                    if (atBottom) {
+                    if (lines.isNotEmpty() && atBottom) {
                         withFrameNanos { }
                         scroll.scrollTo(scroll.maxValue)
                     }
                 }
-                Column(Modifier.weight(1f, fill = false).verticalScroll(scroll).semantics { liveRegion = LiveRegionMode.Polite }) {
-                    lines.forEachIndexed { index, line ->
-                        val latest = index == lines.lastIndex
-                        Row(Modifier.fillMaxWidth().padding(top = 2.dp, bottom = 3.dp, end = 6.dp)) {
-                            Box(Modifier.size(2.dp, 19.dp).background(
-                                if (latest) colors.primary else colors.surface, RoundedCornerShape(2.dp)))
-                            Spacer(Modifier.width(10.dp))
-                            Icon(painterResource(line.icon), contentDescription = null,
-                                modifier = Modifier.padding(top = 2.dp).size(17.dp), tint = colors.primary)
-                            Spacer(Modifier.width(8.dp))
-                            Text(line.text, Modifier.weight(1f).semantics {
-                                line.speaker?.let { contentDescription = "$it: ${line.text}" }
-                            }, fontSize = if (line.speaker == null) 13.sp else 17.sp,
-                                fontWeight = if (latest && line.speaker != null) FontWeight.Medium else FontWeight.Normal,
-                                color = if (latest && line.speaker != null) colors.onSurface else colors.onSurfaceVariant)
+                Column(Modifier.weight(1f, fill = false).verticalScroll(scroll)) {
+                    if (timers.isNotEmpty()) {
+                        Text(if (timers.size == 1) "1 running timer" else "${timers.size} running timers",
+                            Modifier.padding(top = 4.dp, bottom = 4.dp).semantics { heading() },
+                            style = MaterialTheme.typography.labelLarge, color = colors.onSurfaceVariant)
+                        timers.forEach { timer ->
+                            HorizontalDivider(color = colors.outlineVariant)
+                            Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Text("Timer", Modifier.weight(1f), color = colors.onSurfaceVariant)
+                                Text(timer.label, style = MaterialTheme.typography.titleMedium)
+                            }
+                        }
+                    }
+                    if (lines.isNotEmpty()) Column(Modifier.semantics { liveRegion = LiveRegionMode.Polite }) {
+                        lines.forEachIndexed { index, line ->
+                            val latest = index == lines.lastIndex
+                            Row(Modifier.fillMaxWidth().padding(top = 2.dp, bottom = 3.dp, end = 6.dp)) {
+                                Box(Modifier.size(2.dp, 19.dp).background(
+                                    if (latest) colors.primary else colors.surface, RoundedCornerShape(2.dp)))
+                                Spacer(Modifier.width(10.dp))
+                                Icon(painterResource(line.icon), contentDescription = null,
+                                    modifier = Modifier.padding(top = 2.dp).size(17.dp), tint = colors.primary)
+                                Spacer(Modifier.width(8.dp))
+                                Text(line.text, Modifier.weight(1f).semantics {
+                                    line.speaker?.let { contentDescription = "$it: ${line.text}" }
+                                }, fontSize = if (line.speaker == null) 13.sp else 17.sp,
+                                    fontWeight = if (latest && line.speaker != null) FontWeight.Medium else FontWeight.Normal,
+                                    color = if (latest && line.speaker != null) colors.onSurface else colors.onSurfaceVariant)
+                            }
                         }
                     }
                 }

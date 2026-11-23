@@ -387,6 +387,12 @@ func (r *Runtime) Talk() error {
 }
 func (r *Runtime) Stop() { _ = r.engine.Stop() }
 
+func (r *Runtime) SetPlaybackInterrupted(interrupted bool) {
+	r.engine.SetPlaybackInterrupted(interrupted)
+}
+
+func (r *Runtime) StopAlert(sequence int64) { r.engine.StopAlert(uint64(sequence)) }
+
 // SetMonitorVisible applies the Android overlay state for one exact request.
 func (r *Runtime) SetMonitorVisible(id int64, visible bool) {
 	if id <= 0 {

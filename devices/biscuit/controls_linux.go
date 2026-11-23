@@ -184,7 +184,7 @@ func buttons(ctx context.Context, d *input.Device, gate *linux.Privacy, audio fu
 		case 115:
 			player.pressVolume(1)
 		case 138:
-			_, _ = gate.Check(func() {
+			muted, _ := gate.Check(func() {
 				s := engine.Snapshot()
 				if s.Phase == "idle" && !s.Active && !s.Alert {
 					_ = engine.StartManual()
@@ -193,6 +193,12 @@ func buttons(ctx context.Context, d *input.Device, gate *linux.Privacy, audio fu
 					_ = engine.Stop()
 				}
 			})
+			// An alert can be dismissed without opening the microphone.
+			if muted {
+				if s := engine.Snapshot(); s.Alert {
+					engine.StopAlert(s.Ring.Sequence)
+				}
+			}
 		}
 	}
 }

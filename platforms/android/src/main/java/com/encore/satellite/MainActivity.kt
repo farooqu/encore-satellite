@@ -91,6 +91,7 @@ class MainActivity : ComponentActivity() {
                 else state.copy(problem = permissionProblem)
             EncoreScreen(displayedState,
                 onStart = { requestMicrophone(false) }, onTalk = { service?.talk() }, onStop = { service?.stopTurn() },
+                onStopAlert = { service?.stopAlert(it) },
                 onMuted = { if (it) service?.setMuted(true) else requestMicrophone(true) },
                 noiseKey = { service?.noiseKey().orEmpty() }, musicToken = { service?.musicToken().orEmpty() },
                 onMusicConnect = { startForegroundService(Intent(this, EncoreService::class.java).setAction("music").putExtra("address", it)) },

@@ -151,6 +151,62 @@ func receive(t *testing.T, c net.Conn, kind byte) []byte {
 	}
 	return p
 }
+
+func TestNativeTimerDisplayKeepsCountdownsAndRingSeparate(t *testing.T) {
+	e, addr := start(t, &speaker{})
+	e.SetMuted(true)
+	c := connect(t, addr)
+	_ = receive(t, c, 0x01)
+	wait := func(check func(presentation.State) bool) presentation.State {
+		t.Helper()
+		for deadline := time.Now().Add(time.Second); ; time.Sleep(time.Millisecond) {
+			s := e.Snapshot()
+			if check(s) {
+				return s
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("unexpected timer state", s)
+			}
+		}
+	}
+	// A very short timer vanishes locally; none of the countdowns implies a ring.
+	send(t, c, 0x12, []byte(`{"type":"timer_progress","data":{"shown":1,"count":3,"left0":0.02,"left1":33.5,"left2":72.5}}`))
+	wait(func(s presentation.State) bool {
+		return s.Timers[0].Seconds == 34 && s.Timers[1].Seconds == 73 && !s.Alert
+	})
+	send(t, c, 0x12, []byte(`{"type":"timer_progress","data":{"shown":1,"remaining":"invalid"}}`))
+	send(t, c, 0x12, []byte(`{"type":"timer_ringing","data":{"name":"Pasta","timers":2}}`))
+	first := wait(func(s presentation.State) bool { return s.Alert })
+	if !first.Muted || first.Timers[1].Seconds < 72 || first.Ring.Name != "Pasta" || first.Ring.Count != 2 || first.Ring.Sequence == 0 {
+		t.Fatal("ring replaced countdowns or dropped metadata", first)
+	}
+	send(t, c, 0x12, []byte(`{"type":"timer_stopped"}`))
+	send(t, c, 0x12, []byte(`{"type":"timer_ringing"}`))
+	second := wait(func(s presentation.State) bool { return s.Alert && s.Ring.Sequence != first.Ring.Sequence })
+	if second.Ring.Name != "" || second.Ring.Count != 0 {
+		t.Fatal("new ring reused the previous label", second.Ring)
+	}
+	send(t, c, 0x10, []byte{1, 0, 2, 0})
+	wait(func(s presentation.State) bool { return s.Output.Owner == "alert" && s.Output.State == "playing" })
+	e.StopAlert(first.Ring.Sequence)
+	if !e.Snapshot().Alert {
+		t.Fatal("a stale touch stopped the newer ring")
+	}
+	e.StopAlert(second.Ring.Sequence)
+	if v := object(t, receive(t, c, 0x09)); v["type"] != "stop_timer" {
+		t.Fatal(v)
+	}
+	if s := e.Snapshot(); s.Alert || !s.Muted || s.Ring.Sequence != 0 || s.Timers[0].Seconds == 0 {
+		t.Fatal("dismissing the ring changed mic or timers", s)
+	}
+	send(t, c, 0x12, []byte(`{"type":"timer_progress","data":{"shown":0}}`))
+	wait(func(s presentation.State) bool { return s.Timers[0].Seconds == 0 })
+	send(t, c, 0x12, []byte(`{"type":"timer_progress","data":{"shown":1,"remaining":123.5,"total":180}}`))
+	wait(func(s presentation.State) bool { return s.Timers[0].Seconds == 124 && s.Timers[1].Seconds == 0 })
+	_ = c.Close()
+	wait(func(s presentation.State) bool { return !s.Connected && s.Timers[0].Seconds == 0 })
+}
+
 func object(t *testing.T, b []byte) map[string]any {
 	t.Helper()
 	var value map[string]any

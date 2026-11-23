@@ -488,7 +488,8 @@ class EncoreScreenTest {
         capture("android-drain")
         compose.runOnIdle { state.value = state.value.copy(alert = true) }
         advance(800)
-        assertVoiceStatusIsAccessibleOnly("Alert")
+        compose.onNodeWithText("Alert ringing").assertIsDisplayed()
+        compose.onNodeWithTag("stop-alert").assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Alert ringing"))
         capture("android-alert")
         compose.runOnIdle { state.value = state.value.copy(alert = false, outputState = "", playbackLevel = null, phase = "listening", input = "listening",
             invocation = "follow_up", turn = 2, speakerName = "", speakerRGB = emptyList()) }
@@ -516,6 +517,78 @@ class EncoreScreenTest {
         capture("android-night-processing")
     }
 
+    @Test @Config(qualifiers = "w400dp-h700dp-night-mdpi") fun ringingSheetStaysTheSameWhenMicIsMuted() {
+        val idle = ready().copy(timers = listOf(TimerCountdown(278), TimerCountdown(552)))
+        val muted = idle.copy(phase = "muted", muted = true, inhibited = true, microphoneReady = false, captureReady = false,
+            talkAllowed = false, talkReady = false, wakeReady = false)
+        val ringing = idle.copy(alert = true, voiceActive = true, outputOwner = "alert", outputState = "playing",
+            ring = RingingAlert(41, "Pasta", 2))
+        val state = mutableStateOf(ringing)
+        val stops = mutableListOf<Long>()
+        compose.setContent {
+            EncoreScreen(state.value, { fail("Opened microphone") }, { fail("Started voice turn") },
+                { fail("Cancelled voice instead of stopping the alert") }, { checked ->
+                    check(checked)
+                    state.value = ringing.copy(phase = muted.phase, muted = true, inhibited = true, microphoneReady = false, captureReady = false)
+                }, { "" }, { "" }, {}, {}, {}, {},
+                onStopAlert = { stops += it; state.value = muted })
+        }
+        compose.onNodeWithTag("voice-edge-glow").assertIsDisplayed()
+        compose.onNodeWithText("Pasta").assertIsDisplayed()
+        compose.onNodeWithText("2 alerts ringing").assertIsDisplayed()
+        compose.onNodeWithText("9:12").assertIsDisplayed()
+        val stop = compose.onNodeWithTag("stop-alert")
+        val sheet = compose.onNodeWithTag("timer-sheet")
+        val bounds = sheet.fetchSemanticsNode().boundsInRoot
+        val buttonBounds = stop.fetchSemanticsNode().boundsInRoot
+        capture("android-timer-ringing-unmuted")
+        compose.onNodeWithContentDescription("Mute mic").performTouchInput { click() }
+        compose.onNodeWithContentDescription("Unmute mic").assertIsDisplayed()
+        compose.onNode(hasText("Microphone muted") and hasAnyAncestor(hasTestTag("timer-sheet"))).assertDoesNotExist()
+        assertEquals(bounds, sheet.fetchSemanticsNode().boundsInRoot)
+        assertEquals(buttonBounds, stop.fetchSemanticsNode().boundsInRoot)
+        stop.assertIsEnabled().assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "2 alerts ringing"))
+        capture("android-timer-ringing-muted")
+        stop.performTouchInput { click() }
+        compose.onNodeWithTag("timer-sheet").assertDoesNotExist()
+        compose.onNodeWithText("4:38 · 2 timers").assertIsDisplayed()
+        compose.onNodeWithTag("talk").assertIsNotEnabled()
+        assertEquals(listOf(41L), stops)
+    }
+
+    @Test fun runningCountdownsShareTheListeningSheet() {
+        val idle = ready().copy(timers = listOf(TimerCountdown(93), TimerCountdown(3725)))
+        val state = mutableStateOf(idle)
+        compose.setContent {
+            EncoreScreen(state.value, {}, {}, { fail("Closing timers cancelled a voice turn") }, {}, { "" }, { "" }, {}, {}, {}, {})
+        }
+        val chip = compose.onNodeWithTag("timer-chip")
+        compose.onNodeWithText("1:33 · 2 timers").assertIsDisplayed()
+        capture("android-timer-chip")
+        chip.performTouchInput { click() }
+        compose.onNodeWithText("1:02:05").assertIsDisplayed()
+        capture("android-timer-running")
+        compose.runOnIdle { state.value = idle.copy(timers = listOf(TimerCountdown(92), TimerCountdown(3724))) }
+        compose.onNodeWithText("1:32").assertIsDisplayed()
+        compose.runOnIdle {
+            state.value = state.value.copy(phase = "tentative", invocation = "wake", input = "tentative", voiceActive = true)
+        }
+        compose.onNodeWithTag("voice-wake-cue").assertIsDisplayed()
+        compose.runOnIdle { state.value = idle }
+        compose.onNodeWithContentDescription("Close timers").performTouchInput { click() }
+        chip.assertIsDisplayed()
+        compose.runOnIdle {
+            state.value = idle.copy(phase = "listening", invocation = "wake", accepted = true, input = "listening", voiceActive = true)
+        }
+        compose.onNodeWithTag("voice-transcript").assertIsDisplayed()
+        compose.onNodeWithText("Listening…").assertIsDisplayed()
+        compose.onNodeWithText("1:02:05").assertIsDisplayed()
+        capture("android-timer-listening")
+        compose.runOnIdle { state.value = idle.copy(connected = false) }
+        chip.assertDoesNotExist()
+        compose.onNodeWithTag("voice-transcript").assertDoesNotExist()
+    }
+
     @Test fun parsesAdditiveFactsWithoutInventingReadinessPlaybackOrIdentity() {
         val base = """{"voice":{"phase":"speaking","connected":true,"muted":false,"alert":false},"models":3,"dashboard":"","reload":0,"problem":""}"""
         val missing = EncoreState.parse(base, ready().copy(speakerName = "Previous", speakerRGB = listOf(1, 2, 3)))
@@ -523,6 +596,9 @@ class EncoreScreenTest {
         assertFalse(missing.accepted)
         assertFalse(missing.interactionVisible); assertEquals("none", missing.visual); assertEquals("", missing.speakerName)
         fun parse(fields: String) = EncoreState.parse(base.replace("\"phase\":\"speaking\"", fields), ready())
+        val timerState = parse(""""phase":"speaking","timers":[{"seconds":92},{"seconds":0}],"ring":{"sequence":4,"name":"Pasta","count":2}""")
+        assertEquals(listOf(TimerCountdown(92)), timerState.timers)
+        assertEquals(RingingAlert(4, "Pasta", 2), timerState.ring)
         val work = parse(""""phase":"working","active":true,"accepted":true,"capture_ready":true,"night":"off","speaker":{"name":"Fixture","color_known":true,"rgb":[255,0,0]}""")
         assertTrue(work.accepted)
         assertEquals(listOf(255, 0, 0), work.speakerRGB)
@@ -536,7 +612,7 @@ class EncoreScreenTest {
         assertEquals("output", drain.visual); assertTrue(drain.interactionVisible); assertTrue(drain.voiceActive)
         assertEquals("alert", drain.copy(outputOwner = "alert").visual)
         assertEquals("Finishing alert", drain.copy(outputOwner = "alert").status)
-        assertEquals("none", drain.copy(muted = true, alert = true).visual)
+        assertEquals("alert", drain.copy(muted = true, alert = true).visual)
         assertEquals("none", work.copy(captureReady = false).visual)
         assertEquals("none", work.copy(inhibited = true).visual)
         assertEquals("none", work.copy(voiceKnown = false).visual)

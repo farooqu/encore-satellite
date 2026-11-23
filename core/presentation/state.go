@@ -21,15 +21,30 @@ type Output struct {
 	Received bool   `json:"received"`
 }
 
+type Timer struct {
+	Seconds int64 `json:"seconds"`
+}
+
+// TimerSlots is the number of countdowns in the native display projection.
+const TimerSlots = 6
+
+type Ring struct {
+	Sequence uint64 `json:"sequence"` // local alert occurrence, not an upstream timer ID
+	Name     string `json:"name,omitempty"`
+	Count    int    `json:"count,omitempty"`
+}
+
 type State struct {
-	Backend   string `json:"backend"`
-	Connected bool   `json:"connected"`
-	Muted     bool   `json:"muted"`
-	Phase     string `json:"phase"`
-	Heard     string `json:"heard,omitempty"`
-	Reply     string `json:"reply,omitempty"`
-	Alert     bool   `json:"alert"`
-	Reason    string `json:"reason,omitempty"`
+	Backend   string            `json:"backend"`
+	Connected bool              `json:"connected"`
+	Muted     bool              `json:"muted"`
+	Phase     string            `json:"phase"`
+	Heard     string            `json:"heard,omitempty"`
+	Reply     string            `json:"reply,omitempty"`
+	Alert     bool              `json:"alert"`
+	Reason    string            `json:"reason,omitempty"`
+	Timers    [TimerSlots]Timer `json:"timers,omitzero"` // zero rows are unused
+	Ring      Ring              `json:"ring,omitzero"`
 
 	Generation  uint64  `json:"generation"`
 	Turn        uint64  `json:"turn"`

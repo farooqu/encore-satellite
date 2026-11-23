@@ -277,7 +277,8 @@ func TestButtonsMuteHonorsDriverLagAndBlocksAction(t *testing.T) {
 	s, sample := buttonMusic(t)
 	e := session.New(s)
 	l := &buttonLink{commands: make(chan string, 16)}
-	if _, err := e.Attach(l); err != nil {
+	g, err := e.Attach(l)
+	if err != nil {
 		t.Fatal(err)
 	}
 	var driver atomic.Bool
@@ -286,6 +287,19 @@ func TestButtonsMuteHonorsDriverLagAndBlocksAction(t *testing.T) {
 	key(113, 1) // Driver state still reports old unmuted value during its lag.
 	buttonWait(t, "mute did not immediately silence speaker/voice", func() bool { return e.Snapshot().Muted && sample() == 0 })
 	key(113, 0)
+	if err := e.Handle(g, session.Event{Kind: "timer_ringing"}); err != nil {
+		t.Fatal(err)
+	}
+	key(138, 1)
+	select {
+	case command := <-l.commands:
+		if command != "stop_alert" || !e.Snapshot().Muted || e.Snapshot().Alert {
+			t.Fatalf("muted Action did not exclusively dismiss the alert: %s %+v", command, e.Snapshot())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("privacy gate blocked alert dismissal")
+	}
+	key(138, 0)
 	key(138, 1)
 	key(138, 0)
 	if muted, _ := gate.Check(func() { t.Error("Action escaped mute transition") }); !muted {

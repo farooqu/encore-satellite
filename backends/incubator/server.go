@@ -9,7 +9,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
+	"strconv"
 	"sync"
 	"time"
 
@@ -340,6 +342,8 @@ func (s *Server) serveConn(ctx context.Context, conn net.Conn) error {
 					G       json.RawMessage `json:"g"`
 					B       json.RawMessage `json:"b"`
 					On      json.RawMessage `json:"on"`
+					Name    json.RawMessage `json:"name"`
+					Timers  json.RawMessage `json:"timers"`
 				} `json:"data"`
 			}
 			if err = json.Unmarshal(data, &event); err != nil {
@@ -376,6 +380,11 @@ func (s *Server) serveConn(ctx context.Context, conn net.Conn) error {
 				if json.Unmarshal(event.Data.On, &incoming.Night) != nil {
 					incoming.Night = nil
 				}
+			} else if event.Type == "timer_progress" {
+				incoming.Timers = timerProgress(data)
+			} else if event.Type == "timer_ringing" {
+				_ = json.Unmarshal(event.Data.Name, &incoming.Ring.Name)
+				_ = json.Unmarshal(event.Data.Timers, &incoming.Ring.Count)
 			}
 			err = s.Engine.Handle(generation, incoming)
 		case 0x13:
@@ -422,4 +431,39 @@ func (s *Server) serveConn(ctx context.Context, conn net.Conn) error {
 			return err
 		}
 	}
+}
+
+func timerProgress(data []byte) []time.Duration {
+	var event struct {
+		Data map[string]json.RawMessage `json:"data"`
+	}
+	if json.Unmarshal(data, &event) != nil {
+		return nil
+	}
+	var shown *int
+	if json.Unmarshal(event.Data["shown"], &shown) != nil || shown == nil || *shown < 0 {
+		return nil
+	}
+	if *shown == 0 {
+		return []time.Duration{}
+	}
+	count := 1 // Older servers only send the soonest timer.
+	if raw := event.Data["count"]; raw != nil {
+		if json.Unmarshal(raw, &count) != nil || count < 1 {
+			return nil
+		}
+	}
+	left := make([]time.Duration, min(count, presentation.TimerSlots))
+	for i := range left {
+		raw := event.Data["left"+strconv.Itoa(i)]
+		if raw == nil && i == 0 {
+			raw = event.Data["remaining"]
+		}
+		var seconds *float64
+		if json.Unmarshal(raw, &seconds) != nil || seconds == nil || *seconds < 0 || *seconds >= float64(math.MaxInt64)/float64(time.Second) {
+			return nil // Optional visual metadata must not break a voice session.
+		}
+		left[i] = time.Duration(*seconds * float64(time.Second))
+	}
+	return left
 }
