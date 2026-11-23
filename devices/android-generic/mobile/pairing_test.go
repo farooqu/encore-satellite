@@ -55,6 +55,21 @@ func TestHomeAssistantKeyEnablesEncryptedControlsAfterReopen(t *testing.T) {
 	if err := r.PairHomeAssistant(); err != nil {
 		t.Fatal(err)
 	}
+	// HA reads the catalog and capabilities on its plaintext connection before
+	// opening a separate Noise connection to install the key.
+	plainSend, plainReceive := loopbackPeer(t, "127.0.0.1:6053")
+	plainSend(&api.DeviceInfoRequest{})
+	if info, ok := plainReceive().(*api.DeviceInfoResponse); !ok || !info.ApiEncryptionProvisionable {
+		t.Fatal("plaintext identity did not advertise first pairing")
+	}
+	plainSend(&api.ListEntitiesRequest{})
+	if _, ok := plainReceive().(*api.ListEntitiesDoneResponse); !ok {
+		t.Fatal("plaintext bootstrap exposed entities")
+	}
+	plainSend(&api.DeviceCapabilitiesRequest{})
+	if capabilities, ok := plainReceive().(*api.DeviceCapabilitiesResponse); !ok || capabilities.GetSendspin() != nil {
+		t.Fatal("missing plaintext capabilities response or unexpected Sendspin handoff")
+	}
 	first := esphome.PSK{51, 7, 19}
 	bootstrap := pairingNoisePeer(t, esphome.PSK{})
 	checkInfo := func(peer func(proto.Message, proto.Message), version string, provisionable bool) {

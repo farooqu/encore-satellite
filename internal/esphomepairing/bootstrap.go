@@ -170,6 +170,7 @@ func (r *identityFrames) Read(p []byte) (int, error) {
 		}
 		switch id {
 		case 1, 3, 5, 7, 9, 11, 28: // Hello, Auth (ignored), Disconnect, Ping, DeviceInfo, ListEntities, SubscribeLogs (silent).
+		case 149: // DeviceCapabilitiesRequest, sent by HA before Noise provisioning.
 		default:
 			return 0, errors.New("only ESPHome identity is available in plaintext")
 		}

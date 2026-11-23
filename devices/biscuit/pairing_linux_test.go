@@ -149,6 +149,12 @@ func TestESPHomeFirstPairing(t *testing.T) {
 	if !info.ApiEncryptionSupported || !info.ApiEncryptionProvisionable || info.MacAddress != pairingInfo.MACAddress {
 		t.Fatal("missing first-pair identity or capability flags")
 	}
+	sendPlain(149, &api.DeviceCapabilitiesRequest{})
+	capabilities := &api.DeviceCapabilitiesResponse{}
+	readPlain(150, capabilities)
+	if capabilities.GetSendspin() != nil {
+		t.Fatal("plaintext bootstrap advertised Sendspin handoff")
+	}
 	requestID, _ := esphome.Lookup(request)
 	sendPlain(uint64(requestID.ID), request)
 	if _, err := r.ReadByte(); err != io.EOF {
