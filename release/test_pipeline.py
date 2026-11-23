@@ -98,6 +98,8 @@ class PipelineTests(unittest.TestCase):
         # the real ledger or pretending the first dev reservation is stable.
         for name, data in zip(("targets.json", "ledger.json"), inventory("1.2.0")):
             (self.repo / "release" / name).write_text(json.dumps(data))
+        # Synthetic histories start before cutover regardless of the live policy.
+        (self.repo / "release/dev-trains.json").write_text("{}\n")
         shutil.rmtree(self.repo / "release/changelogs", ignore_errors=True)
         self.git("init", "-q")
         self.git("config", "user.email", "test@example.invalid")

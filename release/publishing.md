@@ -49,11 +49,11 @@ source gets the same version even if Stable has advanced since. After a product
 ships Stable `0.10.0`, open that product's `0.10.1-dev.N` train; Dev does not
 promise that `0.10.1` will ship. Other products keep their trains.
 
-**Cutover is not active.** `release/dev-trains.json` is empty until the owner
-approves the migration. Before adding an entry, hold and drain affected writers
-and audit public tags, deployed signed feeds, private/attempted revisions, and
-Biscuit base compatibility. Keep every legacy tag, immutable asset, pinned
-input release, feed URL and checkpoint. For each approved product, add
+`release/dev-trains.json` records the active train for each product. Products
+without an entry still use legacy numbering. Before adding an entry, hold and
+drain affected writers and audit public tags, signed feeds, private/attempted
+revisions, and Biscuit base compatibility. Keep every legacy tag, immutable
+asset, pinned input release, feed URL and checkpoint. For each approved product, add
 `{"base":"0.10.0","first_revision":<cutover revision>,"ordering_major":<audited major>}`
 in one reviewed `chore(release): …` commit. Use the revision of that commit
 (its first parent's revision plus one) and an ordering major strictly above

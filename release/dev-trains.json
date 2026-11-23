@@ -1,1 +1,5 @@
-{}
+{
+  "android-generic": {"base": "0.10.0", "first_revision": 1000000093, "ordering_major": 1},
+  "biscuit": {"base": "0.10.0", "first_revision": 1000000093, "ordering_major": 1},
+  "android-assistant": {"base": "0.10.0", "first_revision": 1000000093, "ordering_major": 1}
+}
