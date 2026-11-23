@@ -101,14 +101,17 @@ and `TestNativeWireEvidenceEndpointingDrainAndFollowUp` and
 
 [Voice PE at `8ba314e`](https://github.com/OHF-Voice/firmware-voice-incubator/blob/8ba314e68ff4a23b5c08b78fa21926104bbabba2/components/voice_incubator/voice_incubator.cpp#L205-L215)
 ends a call after 30 seconds without `HANGUP`, sends `CALL_END(timeout)`, and
-lets buffered playback finish on the same connection. Encore uses the same
-fixed call deadline, with a fresh deadline for each follow-up. On expiry it
-stops streaming, drops unsent call PCM, and uses the Stop fence to interrupt
-playback, send `CALL_END(timeout)` if the transport permits, and retire only
-the voice connection. Keeping that connection would let untagged late frames
-affect the next call. Off-call monitoring, intercom, alerts and announcements
-do not arm the call deadline. The timed `STATUS` frames are diagnostic only
-and are not needed for this watchdog. Verify with
+lets buffered playback finish on the same connection. The
+[Incubator app at `9a1bcf5`](https://github.com/farooqu/voice-incubator/blob/9a1bcf59060c315e2d3c2cccc3893daf493bb483/voice_incubator/server.py#L2201-L2217)
+cancels the responder on `CALL_END`, so draining the existing buffer alone
+still cuts off the rest of a long or late reply. Encore starts with 30 seconds
+for each call or follow-up, then allows 30 seconds from the last successful
+speaker write for an accepted, responding call. This covers both native PCM
+and HA announcements played for the response. Captions, microphone frames,
+blocked writes and blocked drains do not renew the deadline. Off-call output
+does not arm it. On expiry Encore still drops unsent call PCM, flushes playback,
+sends `CALL_END(timeout)` if possible, and retires only the voice connection
+so untagged late frames cannot affect the next call. Verify with
 `go test ./core/session ./backends/incubator -run 'Test.*CallWatchdog'`.
 
 ## Parallel work boundaries

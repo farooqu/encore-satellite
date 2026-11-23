@@ -866,6 +866,78 @@ func TestCallWatchdogGivesFollowUpItsOwnDeadline(t *testing.T) {
 	})
 }
 
+func TestCallWatchdogTracksReplyPlayback(t *testing.T) {
+	for _, route := range []string{"native", "HA announcement"} {
+		for _, outcome := range []string{"drained", "stalled"} {
+			t.Run(route+"/"+outcome, func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					e, l, p, g := fixture(t)
+					p.entered, p.release = make(chan struct{}), make(chan struct{})
+					if err := e.StartManual(); err != nil {
+						t.Fatal(err)
+					}
+					_ = e.Handle(g, session.Event{Kind: "listening"})
+					time.Sleep(29 * time.Second)
+					_ = e.Handle(g, session.Event{Kind: "responding"})
+					stream := func(write func([]int16) error) error {
+						if err := write([]int16{37, -901}); err != nil {
+							return err
+						}
+						time.Sleep(2 * time.Second) // Second block crosses the original deadline.
+						return write([]int16{173, 51, -8})
+					}
+					done := make(chan error, 1)
+					go func() {
+						if route == "native" {
+							err := stream(func(pcm []int16) error { return e.Output(g, pcm) })
+							if err == nil {
+								err = e.EndOutput(g)
+							}
+							done <- err
+						} else {
+							_, err := e.Announce(t.Context(), func(_ context.Context, write func([]int16) error) error {
+								return stream(write)
+							})
+							done <- err
+						}
+					}()
+					time.Sleep(31 * time.Second) // t=60: later than 30s after the first block.
+					synctest.Wait()
+					if got := e.Snapshot(); got.Phase != "speaking" || got.Output.State != "draining" || p.writes != 5 {
+						t.Fatal("progressing reply did not reach drain", got, p.writes, l.commands)
+					}
+					if outcome == "drained" {
+						close(p.release)
+						if err := <-done; err != nil {
+							t.Fatal(err)
+						}
+						want := "drained"
+						if route == "HA announcement" {
+							want = "announced"
+						}
+						if got := l.commands[len(l.commands)-1].Kind; got != want {
+							t.Fatal("physical drain did not notify peer", l.commands)
+						}
+						_ = e.Handle(g, session.Event{Kind: "hangup", Reason: "done"})
+						time.Sleep(time.Second)
+						synctest.Wait()
+						if got := e.Snapshot(); got.Phase != "idle" || got.Reason != "done" {
+							t.Fatal("normal hangup did not disarm watchdog", got)
+						}
+						return
+					}
+					_ = e.Handle(g, session.Event{Kind: "reply_chunk", Text: "still text only"})
+					time.Sleep(time.Second) // t=61: 30s without new accepted PCM.
+					<-done
+					if got := l.commands[len(l.commands)-1]; got.Kind != "cancel" || got.Reason != "timeout" || e.Snapshot().InputOpen {
+						t.Fatal("stalled reply did not time out", got, e.Snapshot())
+					}
+				})
+			})
+		}
+	}
+}
+
 func TestRejectedNativeCandidateKeepsConnectionAndFencesOldOutput(t *testing.T) {
 	for _, reason := range []string{"answered_elsewhere", "wake_rejected"} {
 		t.Run(reason, func(t *testing.T) {

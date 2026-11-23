@@ -15,7 +15,7 @@ import (
 )
 
 func TestNativeCallWatchdog(t *testing.T) {
-	for _, scenario := range []string{"silent peer", "blocked playback"} {
+	for _, scenario := range []string{"silent peer", "text only", "blocked playback"} {
 		t.Run(scenario, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				p := &heldRelayPlayback{started: make(chan struct{}), cancelled: make(chan struct{})}
@@ -47,12 +47,14 @@ func TestNativeCallWatchdog(t *testing.T) {
 				if got := string(receive(0x03)); got != "\x01\x02" {
 					t.Fatalf("live PCM before expiry = %x", got)
 				}
-				if scenario == "blocked playback" {
-					for _, body := range []string{`{"type":"listening"}`, `{"type":"responding"}`} {
+				if scenario != "silent peer" {
+					for _, body := range []string{`{"type":"listening"}`, `{"type":"responding"}`, `{"type":"reply_chunk","data":{"text":"no audio yet"}}`} {
 						if err := writeFrame(peer, 0x12, []byte(body)); err != nil {
 							t.Fatal(err)
 						}
 					}
+				}
+				if scenario == "blocked playback" {
 					if err := writeFrame(peer, 0x10, []byte{1, 0}); err != nil {
 						t.Fatal(err)
 					}

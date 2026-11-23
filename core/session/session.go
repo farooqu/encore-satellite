@@ -77,6 +77,7 @@ type Engine struct {
 	ringSequence                    uint64
 	timerDeadlines                  []timerDeadline
 	callTimer                       *time.Timer
+	callDeadline                    time.Time
 	monitorSerial                   uint64
 	monitorVisible                  bool
 	intercom                        bool
@@ -614,14 +615,20 @@ func (e *Engine) start(detection wake.Detection, pre []int16) error {
 	e.pre.Clear()
 	e.publishActivity() // Duck before the backend can begin capture or respond.
 	turn := e.turn
-	e.callTimer = time.AfterFunc(30*time.Second, func() {
+	e.callDeadline = time.Now().Add(callTimeout)
+	e.callTimer = time.AfterFunc(callTimeout, func() {
 		e.mu.Lock()
 		defer e.mu.Unlock()
 		// Stop may race with an already-started timer callback. It must not
 		// end a different call, including an immediate follow-up.
-		if e.active && e.turn == turn {
-			_ = e.stopOutput("timeout")
+		if !e.active || e.turn != turn {
+			return
 		}
+		if remaining := time.Until(e.callDeadline); remaining > 0 {
+			e.callTimer.Reset(remaining)
+			return
+		}
+		_ = e.stopOutput("timeout")
 	})
 	if err := e.send(Command{Kind: "start", Detection: detection, PreRollBytes: len(pre) * 2}); err != nil {
 		return err
@@ -634,6 +641,16 @@ func (e *Engine) start(detection wake.Detection, pre []int16) error {
 		pre = pre[n:]
 	}
 	return nil
+}
+
+const callTimeout = 30 * time.Second
+
+// Only successful speaker writes for the accepted reply buy more time, not
+// captions, incoming microphone audio, or merely starting a write or drain.
+func (e *Engine) noteReplyPlayback() {
+	if e.active && e.runStarted && e.state.Phase == "speaking" && e.outputOwner == "voice" {
+		e.callDeadline = time.Now().Add(callTimeout)
+	}
 }
 
 func (e *Engine) stopCallTimer() {
@@ -1005,6 +1022,9 @@ func (e *Engine) outputSamples(generation, monitorID uint64, samples []int16) er
 	if generation == e.generation && ctx == e.output && e.outputOpen && !e.discard {
 		if err == nil {
 			e.outputAccepted = true
+			if ctx.Err() == nil {
+				e.noteReplyPlayback()
+			}
 		} else {
 			e.outputFailed = true
 		}

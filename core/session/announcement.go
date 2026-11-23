@@ -96,6 +96,7 @@ func (e *Engine) Announce(parent context.Context, stream func(context.Context, f
 			return context.Canceled
 		}
 		e.outputReceived, e.outputAccepted = true, true
+		e.noteReplyPlayback()
 		if result.AcceptedBlocks == 1 {
 			if e.link != nil && e.generation == generation {
 				return e.send(Command{Kind: "announcing"})
