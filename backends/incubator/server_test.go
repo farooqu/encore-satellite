@@ -343,6 +343,12 @@ func TestNativeIntercomSeparatesCuesAndRelay(t *testing.T) {
 			if got := receive(t, c, 0x0A); !slices.Equal(got, []byte{255, 253}) {
 				t.Fatalf("intercom PCM: %v; want only capture after indicator confirmation", got)
 			}
+			// Reading PCM does not prove the server's write has returned. Wait for
+			// a reply from the same writer before testing the idle-writer teardown.
+			send(t, c, 0x14, []byte(`{"active":true,"intercom":true,"request_id":1}`))
+			if got := object(t, receive(t, c, 0x09)); got["type"] != "monitor_result" || got["request_id"] != float64(1) || got["accepted"] != true {
+				t.Fatalf("intercom monitor result: %v", got)
+			}
 			if end == "mute" {
 				e.SetMuted(true)
 				_ = c.SetReadDeadline(time.Now().Add(time.Second))
