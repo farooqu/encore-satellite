@@ -1,4 +1,4 @@
 {
   "publishing_enabled": false,
-  "automatic_dev_targets": ["biscuit", "android-generic", "android-assistant"]
+  "automatic_dev_targets": []
 }
