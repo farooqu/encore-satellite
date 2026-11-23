@@ -16,12 +16,15 @@ is needed.
 
 ```sh
 devices/biscuit/packaging/sendspin.sh --target host --out build/sendspin-host
-devices/biscuit/packaging/sendspin.sh --target armv7
+devices/biscuit/packaging/sendspin.sh --target arm64
+devices/biscuit/packaging/sendspin.sh --target armv7  # legacy
 ```
 
-ARM output defaults to `build/biscuit/sendspin/`:
+ARM64 output defaults to `build/biscuit/sendspin-arm64/`; the legacy ARMv7
+default remains `build/biscuit/sendspin/`:
 
-* `encore-sendspin`: stripped, **static**, ARMv7 Cortex-A7 EABI5 hard-float ELF.
+* `encore-sendspin`: stripped, **static**, AArch64 Cortex-A53 ELF (ARMv7
+  Cortex-A7 EABI5 hard-float ELF for the legacy target).
 * `provenance.json`: schema 1, target, exact dependency lock, configure command,
   production integration input SHA256s, and artifact SHA256s. `compilers.C` and
   `compilers.CXX` record CMake's configured compiler path, ID/version, a generated
@@ -53,8 +56,9 @@ cannot replace a toolchain still in use. Symlink aliases of a cache share the
 same lock. The persistent `.build.lock` file must not be removed during a build.
 
 The ARM userspace toolchain is checksum-pinned Zig 0.14.1 (Clang 19.1.7,
-musl/libc++), explicitly targeting **`arm-linux.3.18-musleabihf`** with
-`-mcpu=cortex_a7`. It does not use Zig's default Linux 4.19 target. The companion
+musl/libc++). The current Biscuit build targets **`aarch64-linux.6.1-musl`** with
+`-mcpu=cortex_a53`; legacy targets **`arm-linux.3.18-musleabihf`** with
+`-mcpu=cortex_a7`. Neither relies on Zig's default kernel version. The companion
 checks `clock_gettime(CLOCK_MONOTONIC_RAW)` at startup; Linux has provided this
 clock since 2.6.28. `getrandom`, used to provision identity and pairing secrets,
 requires Linux 3.17+. QEMU user-mode checks do not replace a real Dot/kernel
@@ -72,8 +76,9 @@ The source kit can be used without Git by passing its `sources/*` directories as
 recorded configure command), with `FETCHCONTENT_FULLY_DISCONNECTED=ON` and the
 included `integration/platforms/linuxsendspin/native` project. Download the
 checksum-locked compiler archive from the lock file for an ARM rebuild; set
-`ZIG_EXE` and use `native/armv7-musl.cmake`. The kit contains the runtime source,
-not a copy of the compiler executable.
+`ZIG_EXE`, pass `-DENCORE_STATIC=ON`, and use `native/arm64-musl.cmake` (or
+`native/armv7-musl.cmake` for legacy). The kit contains the runtime source, not
+a copy of the compiler executable.
 
 ## Go API and lifecycle
 
@@ -81,14 +86,19 @@ not a copy of the compiler executable.
 err := linuxsendspin.Run(ctx, linuxsendspin.Options{
     Name: "Kitchen Echo", URL: "ws://music-server:8928/sendspin",
     StateDir: "/var/lib/encore/sendspin", Executable: "/usr/bin/encore-sendspin",
-    Output: musicOutput, Commands: commands,
+    Output: musicOutput, Commands: commands, OnReadiness: updateReadiness,
 })
 ```
 
-`Command` has `Play` and `Stop`; closing `Commands` disables commands, not the
-receiver. Controller commands are best-effort SDK requests subject to server
-supported-command/active-role checks. Stop/privacy must also be enforced locally
-by the mixer. `Run` never retries; the host owns retry/backoff and configuration.
+`Commands` accepts `CommandRequest` values stamped with the active `Readiness`
+generation. The same snapshot carries the supported commands, an opaque group
+membership revision, and the public SDK's merged Playing/Stopped state, which
+may be unknown. The pinned SDK does not expose a distinct Paused state. Use a
+new channel for each `Run`; closing the channel disables
+commands, not the receiver. Controller commands are best-effort SDK requests
+subject to server supported-command/active-role checks. Stop/privacy must also
+be enforced locally by the mixer. `Run` never retries; the host owns retry/backoff
+and configuration.
 
 `Output` is exactly:
 
@@ -124,25 +134,39 @@ cancellation/bounded-lifecycle contract. The child environment is reduced to
 `LANG=C`/`LC_ALL=C`; no host credential environment is forwarded. SDK stdout and
 stderr are not forwarded, to prevent future upstream secret logging.
 
-## IPC v1
+## IPC v3
 
 One inherited **AF_UNIX SOCK_SEQPACKET fd 3**, no filesystem socket or listener.
+Version 3 adds group playback and membership to Readiness without changing PCM
+framing or the on-disk trust format. The Go runtime and companion ship together
+in the same Biscuit rootfs; replace or roll them back together. Mixed v2/v3
+binaries fail closed on the version mismatch, not on existing pairing state.
 All packets have a 32-byte little-endian header:
 
 | Offset | Field |
 |---|---|
 | 0 | `ESPN` magic (4 bytes) |
-| 4 | version u16 = 1 |
+| 4 | version u16 = 3 |
 | 6 | kind u16 |
-| 8 | child stream generation u64 |
-| 16 | request ID / timestamp u64 |
+| 8 | stream or controller generation u64 |
+| 16 | request ID / timestamp / opaque group membership revision u64 |
 | 24 | payload byte count u32 |
 | 28 | value u32 |
 
 Kinds: 1 Start, 2 End, 3 Volume (`id`=mute 0/1), 4 PCM (`id`=request,
 `value`=acceptance deadline milliseconds), 5 Accepted (`value`=bytes, 0 for
 ordinary backpressure), 6 Played (`value`=frames, `id`=raw timestamp), 7 Command
-(`value`=1 Play / 2 Stop). Maximum accepted packet is 16 KiB PCM + header; native
+(`value`=1 Play / 2 Stop / 3 Pause / 4 Next / 5 Previous), and 8 Readiness
+(`value` bit 31 = paired and activated with controller state; bits 30 and 29 =
+Playing and Stopped respectively, mutually exclusive, both clear if unknown;
+lower bits 0–4 = supported commands). Readiness `id` is a per-process revision
+that changes with group membership, or zero when membership is unknown. A
+not-ready snapshot has zero `value` and `id`. A change of readiness, command
+mask, group playback, or group identity advances the controller generation.
+Commands and readiness use a separate generation from PCM; both ends discard
+commands for old controller generations. Neither frame contains a payload;
+Command `id` is always zero. Pairing-only connections are not ready.
+Maximum accepted packet is 16 KiB PCM + header; native
 writes are at most **480 frames / 1920 bytes (10 ms)** each. The SDK callback
 accepts into a four-block native queue (at most 40 ms including the block in
 flight), waiting no longer than the SDK timeout when full and returning zero
@@ -159,7 +183,9 @@ they do not perform socket IO. Stale feedback closures are inert. Old wire
 generations are discarded natively; future/invalid generations, malformed or
 truncated packets, queue saturation, output faults, and lost critical state fail
 closed. Fixed exit codes: 70 state/startup/other failure, 71 socket send failure,
-72 acceptance ACK deadline lost, 73 negotiated format mismatch, 74 malformed IPC.
+72 acceptance ACK deadline lost, 73 negotiated format mismatch, 74 malformed IPC,
+75 connection lost or not admitted within 45 seconds. A connected receiver
+waiting for an operator to pair stays online. The host owns retries.
 Run errors retain child exit status without forwarding SDK logs.
 
 ## Pairing and revocation (maintenance only)
@@ -206,7 +232,8 @@ stalled child without waiting for SDK shutdown.
 python3 platforms/linuxsendspin/test_build.py -v
 go test -race ./platforms/linuxsendspin
 go vet ./platforms/linuxsendspin
-python3 platforms/linuxsendspin/test_native.py --binary build/sendspin-host/encore-sendspin -v
+python3 platforms/linuxsendspin/test_native.py --binary build/sendspin-host/encore-sendspin --protocol -v  # needs aiosendspin[server]==10.3.0
+python3 platforms/linuxsendspin/test_native.py --binary build/biscuit/sendspin-arm64/encore-sendspin --runner qemu-aarch64 -v
 python3 platforms/linuxsendspin/test_native.py --binary build/biscuit/sendspin/encore-sendspin --runner qemu-arm -v
 ```
 
@@ -223,6 +250,8 @@ restarts. Native tests use the real SDK for cold/restart identity, secret
 rotation/stable ID, corruption/deletion rejection, failed persistence,
 maintenance locks, invalid IPC, and parent socket closure. Test-generated
 credentials live only in ephemeral `/dev/shm` directories and are removed.
+`--protocol` adds an actual Noise-paired loopback server and checks playback
+state before PCM, Pause/Play, stale command fencing, regrouping and reconnect.
 An additional disposable authenticated MA check exercised the current Go mixer
 with a clocked virtual PCM device for 20 seconds: 924,232 music frames accepted,
 919,081 consumed, 844,469 nonzero rendered frames; it ended on intentional context

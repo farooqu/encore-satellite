@@ -2,7 +2,7 @@
 """Locked SDK build and redistribution kit. No Docker daemon is required.
 
 Host:  sendspin.sh --target host --out build/sendspin-host
-Dot:   sendspin.sh --target armv7 (default)
+Dot:   sendspin.sh --target arm64 (current) or --target armv7 (legacy default)
 Only downloads exact commits and the checksum-locked Zig userspace compiler.
 """
 import argparse
@@ -20,6 +20,10 @@ import urllib.request
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
+ARM = {
+    "armv7": ("armv7-musl.cmake", "-target arm-linux.3.18-musleabihf -mcpu=cortex_a7"),
+    "arm64": ("arm64-musl.cmake", "-target aarch64-linux.6.1-musl -mcpu=cortex_a53"),
+}
 
 
 def run(*args, **kw):
@@ -57,7 +61,7 @@ def checkout(dest, spec):
 
 def add_tree(tar, path, arc):
     def normalized(info):
-        if ".git" in Path(info.name).parts:
+        if {".git", "__pycache__"}.intersection(Path(info.name).parts):
             return None
         info.uid = info.gid = 0
         info.uname = info.gname = ""
@@ -121,13 +125,14 @@ def compiler_provenance(build):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--target", choices=["host", "armv7"], default="armv7")
+    parser.add_argument("--target", choices=["host", *ARM], default="armv7")
     parser.add_argument("--out", type=Path)
     parser.add_argument("--cache", type=Path, default=ROOT / ".amp/in/orb-backup/sendspin-build-cache")
     parser.add_argument("--jobs", type=int, default=4)
     args = parser.parse_args()
     cache = args.cache.resolve()
-    out = (args.out or ROOT / "build/biscuit/sendspin").resolve()
+    default = "sendspin-arm64" if args.target == "arm64" else "sendspin"
+    out = (args.out or ROOT / "build/biscuit" / default).resolve()
     cache.mkdir(parents=True, exist_ok=True)
     # Hold one persistent lock inode through checkout, extraction, compilation,
     # source-kit copying and provenance. A second invocation must not replace
@@ -152,7 +157,7 @@ def build_locked(args, cache, out):
     env = os.environ.copy()
     env["SOURCE_DATE_EPOCH"] = "0"
     zig = None
-    if args.target == "armv7":
+    if args.target in ARM:
         zig = prepare_zig(cache, lock["zig"])
         env["ZIG_EXE"] = str(zig / "zig")
         env["ZIG_GLOBAL_CACHE_DIR"] = str(cache / "zig-cache")
@@ -168,9 +173,9 @@ def build_locked(args, cache, out):
                  f"-DCMAKE_C_FLAGS={flags}", f"-DCMAKE_CXX_FLAGS={flags}"]
     # Explicit flags include the target: CMAKE_*_FLAGS overrides toolchain INIT.
     if zig:
-        target = "-target arm-linux.3.18-musleabihf -mcpu=cortex_a7 "
-        configure[-2:] = [f"-DCMAKE_C_FLAGS={target}{flags}", f"-DCMAKE_CXX_FLAGS={target}{flags}"]
-        configure += [f"-DCMAKE_TOOLCHAIN_FILE={HERE / 'native/armv7-musl.cmake'}", "-DENCORE_STATIC=ON"]
+        toolchain, target = ARM[args.target]
+        configure[-2:] = [f"-DCMAKE_C_FLAGS={target} {flags}", f"-DCMAKE_CXX_FLAGS={target} {flags}"]
+        configure += [f"-DCMAKE_TOOLCHAIN_FILE={HERE / 'native' / toolchain}", "-DENCORE_STATIC=ON"]
     for name in ["arduinojson", "ixwebsocket", "micro_flac", "noise_c"]:
         configure.append(f"-DFETCHCONTENT_SOURCE_DIR_{name.upper()}={sources[name]}")
     run(*configure, env=env)
@@ -182,8 +187,14 @@ def build_locked(args, cache, out):
         shutil.copy2(build / "encore-sendspin", out / "encore-sendspin")
     shutil.copyfile(HERE / "dependencies.lock.json", out / "dependencies.lock.json")
     if zig:
-        headers = output("readelf", "-l", out / "encore-sendspin")
-        dynamic = output("readelf", "-d", out / "encore-sendspin")
+        binary = out / "encore-sendspin"
+        if args.target == "arm64":
+            with binary.open("rb") as stream:
+                header = stream.read(20)
+            if header[:6] != b"\x7fELF\x02\x01" or int.from_bytes(header[18:20], "little") != 183:
+                raise RuntimeError("expected a little-endian AArch64 ELF companion")
+        headers = output("readelf", "-l", binary)
+        dynamic = output("readelf", "-d", binary)
         if "INTERP" in headers or "NEEDED" in dynamic:
             raise RuntimeError("ARM companion unexpectedly needs a dynamic loader")
     notices = out / "notices"

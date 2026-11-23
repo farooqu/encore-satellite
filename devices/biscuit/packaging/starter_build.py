@@ -10,9 +10,12 @@ import tarfile
 import zipfile
 
 from arm64_assemble import HERE, ROOT, boot_image, initramfs, repack, sha
-from package import legacy_ssh_member
+from package import legacy_ssh_member, load_sendspin
 from rootfs import arm64_bluetooth
 from starter_install import BASE_SHA, CA_SHA, DTB_SHA, FORMAT, IMAGE_SHA, boot_compatibility, load_bundle, native_identity, starter_version
+
+SENDSPIN = ROOT / "platforms/linuxsendspin"
+SENDSPIN_LICENSES = "usr/share/licenses/encore/sendspin/"
 
 
 def native_payloads(output, image, dtb, header, busybox, fpga, runtime, verifier, core, revision, lock_sha):
@@ -35,11 +38,19 @@ def native_payloads(output, image, dtb, header, busybox, fpga, runtime, verifier
                 out.writestr(zipfile.ZipInfo(file), data)
 
 
-def starter_rootfs(base, binaries, version=None, ca=None, *, locked=False):
+def starter_rootfs(base, binaries, version=None, ca=None, *, locked=False, sendspin=None):
     files = {
         **{"usr/local/bin/" + name: (data, 0o755) for name, data in binaries.items()},
         "etc/encore-base": ((FORMAT + "\n").encode(), 0o644),
     }
+    if sendspin is not None:
+        record, artifacts = sendspin
+        files["usr/local/bin/encore-sendspin"] = (artifacts["encore-sendspin"], 0o755)
+        files["etc/encore-sendspin.json"] = (json.dumps(record, sort_keys=True).encode(), 0o644)
+        files[SENDSPIN_LICENSES + "dependencies.lock.json"] = ((SENDSPIN / "dependencies.lock.json").read_bytes(), 0o644)
+        for name, data in sorted(artifacts.items()):
+            if name.startswith("notices/"):
+                files[SENDSPIN_LICENSES + name.removeprefix("notices/")] = (data, 0o644)
     if version is not None:
         files["etc/encore-arm64-version"] = ((version + "\n").encode(), 0o644)
         files["etc/ssl/certs/ca-certificates.crt"] = (ca, 0o644)
@@ -71,18 +82,20 @@ fi''')
     for service in ("base", "radio", "wifi", "dhcp", "time-sync", "bluetooth", "network", "enrollment", "app", "health"):
         inittab += f"::respawn:/usr/local/sbin/runtime-service {service}\n"
     files["etc/inittab"] = (inittab.encode(), 0o644)
-    # The private diagnostic base contains no device data. Drop the diagnostic
-    # entry points and its fixed naming overlay rather than ship hidden extras.
+    # Drop the private diagnostic overlay, including any old ARMv7 companion;
+    # only the verified AArch64 replacement enters the current package.
     discard = {"etc/encore/runtime-config.json", "etc/encore/usb-consoles", "usr/local/bin/pcm-silence-check",
                "usr/local/bin/hwprobe", "usr/local/bin/encore-diagnostic",
-               "usr/local/sbin/arm64-hardware-probe", "usr/local/sbin/usb-console", "usr/local/bin/encore-sendspin"}
+               "usr/local/sbin/arm64-hardware-probe", "usr/local/sbin/usb-console",
+               "usr/local/bin/encore-sendspin", "etc/encore-sendspin.json", SENDSPIN_LICENSES.rstrip("/")}
     clean = io.BytesIO()
     with tarfile.open(fileobj=io.BytesIO(base), mode="r:gz") as src, tarfile.open(fileobj=clean, mode="w") as dst:
         for member in src:
-            member.name = member.name.removeprefix("./")
+            member.name = member.name.removeprefix("./").rstrip("/")
             # Regenerate the PAX path too, or it overrides the normalized name.
             member.pax_headers.pop("path", None)
-            if member.name not in discard and not legacy_ssh_member(member.name):
+            if (member.name not in discard and not legacy_ssh_member(member.name)
+                    and not member.name.startswith(SENDSPIN_LICENSES)):
                 dst.addfile(member, src.extractfile(member) if member.isfile() else None)
     return repack(clean.getvalue(), files)
 
@@ -91,8 +104,15 @@ def source_hashes():
     paths = {p for directory in ("devices/biscuit", "platforms", "core", "backends", "internal", "cmd/btbridge")
              for p in (ROOT / directory).rglob("*.go")}
     paths.update(p for p in HERE.iterdir() if p.is_file())
+    paths.update([SENDSPIN / "build.py", SENDSPIN / "dependencies.lock.json"])
+    paths.update(p for p in (SENDSPIN / "native").rglob("*") if p.is_file())
     paths.update((ROOT / "go.mod", ROOT / "go.sum"))
     return {str(p.relative_to(ROOT)): sha(p.read_bytes()) for p in sorted(paths)}
+
+
+def build_sendspin(output, jobs):
+    subprocess.run([HERE / "sendspin.sh", "--target", "arm64", "--out", output,
+                    "--jobs", str(jobs)], cwd=ROOT, check=True)
 
 
 def main():
@@ -102,6 +122,7 @@ def main():
     parser.add_argument("--core-version", required=True, help="complete core SemVer, including prerelease when applicable")
     parser.add_argument("--ca-bundle", type=Path, required=True, help="pinned Alpine Mozilla CA bundle")
     parser.add_argument("--output", type=Path, required=True, help="new private build directory")
+    parser.add_argument("--sendspin-directory", type=Path, help="use an existing locked ARM64 companion build instead of building it")
     parser.add_argument("--input-lock-sha256", help="digest from the same-commit external-input builder")
     parser.add_argument("--native-payloads", action="store_true", help="also produce unsigned native A/B seed and OTA candidates")
     args = parser.parse_args()
@@ -124,6 +145,11 @@ def main():
     sources = source_hashes()
     output = args.output.resolve()
     output.mkdir(mode=0o700, parents=True)
+    sendspin_directory = args.sendspin_directory
+    if sendspin_directory is None:
+        sendspin_directory = output / "sendspin"
+        build_sendspin(sendspin_directory, 4)
+    sendspin = load_sendspin(sendspin_directory, target="arm64")
     env = dict(os.environ, CGO_ENABLED="0", GOOS="linux", GOARCH="arm64")
     binaries = {}
     for name, package in (("encore-satellite", "./devices/biscuit/cmd/encore-satellite"),
@@ -136,7 +162,7 @@ def main():
     subprocess.run(["go", "build", "-trimpath", "-buildvcs=false", "-o", str(verifier),
                     "./devices/biscuit/cmd/arm64-verify"], cwd=ROOT, env=env, check=True)
     binaries["arm64-verify"] = verifier.read_bytes()
-    rootfs = starter_rootfs(base, binaries, version, ca, locked=bool(args.input_lock_sha256))
+    rootfs = starter_rootfs(base, binaries, version, ca, locked=bool(args.input_lock_sha256), sendspin=sendspin)
     compatibility = boot_compatibility(image, dtb) if args.input_lock_sha256 else BASE_SHA
     signed = (args.core_version, args.revision, binaries["arm64-verify"])
     if args.input_lock_sha256:

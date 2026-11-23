@@ -63,6 +63,9 @@ same stable MAC, not an `assist_satellite` or per-native-voice availability enti
 Native rejected/losing HANGUP preserves healthy transport so
 ordinary upstream decisions do not trigger reconnect backoff.
 
+Device music support and hardware qualification are tracked in
+[Sendspin music](sendspin-targets.md), separately from virtual-lab instrumentation.
+
 [Voice PE at `8ba314e`](https://github.com/OHF-Voice/firmware-voice-incubator/blob/8ba314e68ff4a23b5c08b78fa21926104bbabba2/devices/voice-pe.yaml#L1053-L1103)
 starts fading in a stationary “Heard” effect on local call start, then changes to its
 listening animation on `listening`. The [Incubator app at `ffd4f235`](https://github.com/OHF-Voice/voice-incubator/blob/ffd4f23520d8e4c845741a0c9da797b50995d5f6/voice_incubator/server.py#L2784-L2820)

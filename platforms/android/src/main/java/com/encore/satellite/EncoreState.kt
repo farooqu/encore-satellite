@@ -1,5 +1,6 @@
 package com.encore.satellite
 
+import android.graphics.Bitmap
 import org.json.JSONObject
 
 data class MusicState(
@@ -9,6 +10,10 @@ data class MusicState(
     val artist: String = "",
     val playing: Boolean = false,
     val commands: List<String> = emptyList(),
+    val stopped: Boolean = false,
+    val awaitingServer: Boolean = false,
+    val groupPlayback: String = "",
+    val artwork: Bitmap? = null,
 )
 
 data class TimerCountdown(val seconds: Long) {
@@ -45,6 +50,8 @@ data class EncoreState(
     val waveform: List<Float> = emptyList(),
     val playbackLevel: Float? = null,
     val music: MusicState = MusicState(),
+    val manualMusicServer: String? = null,
+    val musicProblem: String = "",
     val voiceKnown: Boolean = false,
     val generation: Long = 0,
     val turn: Long = 0,

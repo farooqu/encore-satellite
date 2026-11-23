@@ -19,7 +19,6 @@ func TestConfigurationAndDefault(t *testing.T) {
 		`{"schema":1,"name":"dot.local"}`, `{"schema":1,"name":"dot","backend":"wyoming"}`,
 		`{"schema":1,"name":"dot","backend":"assist"}`, `{"schema":1,"name":"dot","backend":"incubator"}`,
 		`{"schema":1,"name":"dot","secret":"no"}`, `{"schema":1,"name":"dot"} {}`,
-		`{"schema":1,"name":"dot","sendspin":true}`,
 	} {
 		if _, err := parseConfig(strings.NewReader(bad)); err == nil {
 			t.Fatalf("accepted %s", bad)
@@ -27,22 +26,29 @@ func TestConfigurationAndDefault(t *testing.T) {
 	}
 }
 
-func TestSendspinURLIsManualEndpointNotCredentialCarrier(t *testing.T) {
-	for _, raw := range []string{"ws://ma.local:8927/sendspin", "ws://[2001:db8::1]:8927/sendspin"} {
-		if err := validateMusicURL(raw); err != nil {
-			t.Fatal(err)
-		}
+func TestSendspinIgnoresLegacyURLWithoutBreakingRollback(t *testing.T) {
+	const setup = `{"schema":1,"name":"dot","sendspin":true`
+	auto, err := parseConfig(strings.NewReader(setup + `}`))
+	if err != nil || !auto.Sendspin {
+		t.Fatalf("could not enable discovery: %+v %v", auto, err)
 	}
-	for _, raw := range []string{"ws://ma/sendspin", "ws://ma:0/sendspin", "ws://ma:65536/sendspin", "wss://ma:8927/sendspin", "ws://user:secret@ma:8927/sendspin", "ws://ma:8927/sendspin?token=x", "ws://ma:8927/sendspin#secret", "ws://ma:8927/", "ws://ma:8927/%73endspin"} {
-		if err := validateMusicURL(raw); err == nil {
-			t.Fatalf("accepted %q", raw)
-		}
+	old, err := parseConfig(strings.NewReader(setup + `,"sendspin_url":"ws://old.local:9000/sendspin"}`))
+	if err != nil || old != auto {
+		t.Fatalf("legacy URL affected discovery config: %+v %v", old, err)
+	}
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := SaveConfig(path, old); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil || !strings.Contains(string(b), `"sendspin_url":"ws://sendspin-discovery.invalid:8927/sendspin"`) {
+		t.Fatal("saved config must remain readable by older slots without carrying a dialable URL", err)
 	}
 }
 
 func TestProxySettingPersistsWithoutChangingIdentity(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
-	c := Config{Schema: 1, Name: "office-dot", Sendspin: true, SendspinURL: "ws://ma.local:8927/sendspin"}
+	c := Config{Schema: 1, Name: "office-dot", Sendspin: true}
 	for _, enabled := range []bool{true, false} {
 		c.BluetoothProxy = enabled
 		if err := SaveConfig(path, c); err != nil {

@@ -83,12 +83,15 @@ class VerifiedToolchain(Scratch):
         self.assertEqual(build.output(zig / "zig"), "verified-toolchain")
         self.assertFalse((zig / "lib/libc/musl/injected").exists())
         # Exercise the same source-kit copy helper used by the production build.
+        (zig / "lib/libc/musl/__pycache__").mkdir()
+        (zig / "lib/libc/musl/__pycache__/cached.pyc").write_bytes(b"generated")
         kit = self.root / "source.tar"
         with tarfile.open(kit, "w") as tar:
             build.add_tree(tar, zig / "lib/libc/musl", "toolchain/lib/libc/musl")
         with tarfile.open(kit) as tar:
             self.assertEqual(tar.extractfile("toolchain/lib/libc/musl/COPYRIGHT").read(),
                              self.files["lib/libc/musl/COPYRIGHT"])
+            self.assertNotIn("toolchain/lib/libc/musl/__pycache__", tar.getnames())
 
     def test_symlinked_extracted_cache_is_not_followed(self):
         external = self.root / "external"

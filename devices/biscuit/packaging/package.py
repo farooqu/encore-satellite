@@ -148,17 +148,17 @@ def boot_image(recovery, ramdisk, replacement=None):
     return image
 
 
-def load_sendspin(directory):
+def load_sendspin(directory, *, target="armv7"):
     directory = Path(directory)
     record = json.loads((directory / "provenance.json").read_bytes())
     source = ROOT / "platforms/linuxsendspin"
     inputs = [source / "build.py", source / "dependencies.lock.json", source / "bridge_linux.go",
               HERE / "sendspin.sh", *sorted(p for p in (source / "native").rglob("*") if p.is_file())]
     expected = {str(p.relative_to(ROOT)): sha(p.read_bytes()) for p in inputs}
-    if (record.get("schema") != 1 or record.get("target") != "armv7"
+    if (record.get("schema") != 1 or record.get("target") != target
             or record.get("dependencies") != json.loads((source / "dependencies.lock.json").read_bytes())
             or record.get("integration_sha256") != expected):
-        raise ValueError("Sendspin artifact inputs mismatch; rebuild with make biscuit-sendspin")
+        raise ValueError(f"Sendspin artifact inputs mismatch; rebuild with packaging/sendspin.sh --target {target}")
     artifacts = record.get("artifacts", {})
     if not {"encore-sendspin", "source.tar.gz", "notices/README.txt"} <= artifacts.keys():
         raise ValueError("Sendspin artifact lacks binary, source kit or notices")
@@ -171,9 +171,19 @@ def load_sendspin(directory):
         if sha(data) != digest:
             raise ValueError(f"Sendspin artifact checksum mismatch: {name}")
         files[name] = data
-    arm_elf(files["encore-sendspin"], static=True)
-    if not struct.unpack_from("<I", files["encore-sendspin"], 36)[0] & 0x400:
-        raise ValueError("Sendspin requires ARM hard-float ABI")
+    binary = files["encore-sendspin"]
+    if target == "arm64":
+        from arm64_probe import native_elf
+        native_elf(binary, static=True)
+        offset = struct.unpack_from("<Q", binary, 32)[0]
+        size, count = struct.unpack_from("<HH", binary, 54)
+        types = {struct.unpack_from("<I", binary, offset + size * i)[0] for i in range(count)}
+        if 1 not in types or 2 in types:  # PT_LOAD required, PT_DYNAMIC forbidden
+            raise ValueError("expected static AArch64 Sendspin executable")
+    else:
+        arm_elf(binary, static=True)
+        if not struct.unpack_from("<I", binary, 36)[0] & 0x400:
+            raise ValueError("Sendspin requires ARM hard-float ABI")
     return record, files
 
 

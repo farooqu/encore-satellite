@@ -18,6 +18,9 @@ like timers to those projects so other satellites can use them too. See the
 Set up Home Assistant and Voice Incubator first. Encore builds are development
 previews. Keep the unencrypted, unauthenticated voice connection on a trusted LAN.
 
+Android displays and ARM64 Biscuit also support opt-in [Sendspin music](docs/sendspin-targets.md).
+Physical playback and cross-device sync are not yet qualified.
+
 | Device | Guide |
 | --- | --- |
 | Android phone | [Install and set up Encore Satellite Assistant](devices/android-assistant/README.md#install-the-signed-apk) for personal voice input. |

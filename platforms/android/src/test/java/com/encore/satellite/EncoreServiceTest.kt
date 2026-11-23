@@ -2,8 +2,12 @@ package com.encore.satellite
 
 import android.Manifest
 import android.content.ComponentName
+import android.content.Context
 import android.content.Intent
 import android.media.AudioManager
+import android.net.nsd.NsdManager
+import android.net.nsd.NsdServiceInfo
+import com.sendspindroid.sendspin.crypto.TrustStore
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -13,6 +17,9 @@ import org.robolectric.RuntimeEnvironment
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import org.robolectric.shadows.ShadowLooper
+import java.net.InetAddress
+import java.time.Duration
+import javax.crypto.KeyGenerator
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
@@ -20,7 +27,80 @@ class EncoreServiceTest {
     private val manager = RuntimeEnvironment.getApplication().getSystemService(AudioManager::class.java)
     private val platform = shadowOf(manager)
 
-    @Test fun openingEncoreStartsSatelliteOnlyWithMicrophonePermission() {
+    @Test fun manualSendspinServerRequiresHostAndPortAndAcceptsAnOptionalPath() {
+        assertEquals(MusicEndpoint("music.local:8927", "/sendspin"), MusicEndpoint.manual(" music.local:8927 "))
+        assertEquals(MusicEndpoint("[2001:db8::5]:8931", "/music/ws"), MusicEndpoint.manual("[2001:db8::5]:8931/music/ws"))
+        assertEquals("192.0.2.5:8931/music/ws", MusicEndpoint.manual("192.0.2.5:8931/music/ws")?.setting)
+        for (invalid in listOf("music.local", "music.local:0", "music.local:65536", "ws://music.local:8927",
+            "user:secret@music.local:8927", "music.local:8927/sendspin?token=secret", "music.local:8927/sendspin#fragment")) {
+            assertNull(invalid, MusicEndpoint.manual(invalid))
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    @Test fun discoveryWaitsForTheWholeBrowseAndOnlyReturnsOneCompatibleEndpoint() {
+        val app = RuntimeEnvironment.getApplication()
+        val nsd = shadowOf(app.getSystemService(NsdManager::class.java))
+        val looper = ShadowLooper.shadowMainLooper()
+        val type = "_sendspin-server._tcp."
+        val results = mutableListOf<Pair<MusicEndpoint?, String>>()
+        val discovery = MusicDiscovery(app) { endpoint, message -> results.add(endpoint to message) }
+        fun advertise(name: String, port: Int, path: String) {
+            val info = NsdServiceInfo().apply {
+                serviceName = name
+                serviceType = type
+                setHost(InetAddress.getByName("192.0.2.4"))
+                setPort(port)
+                setAttribute("path", path)
+            }
+            nsd.getDiscoveryListeners(type).orEmpty().single().onServiceFound(info)
+            looper.idle()
+            nsd.getResolveListeners(info).orEmpty().single().onServiceResolved(info)
+            looper.idle()
+        }
+        discovery.start()
+        advertise("single", 8931, "/music/ws")
+        advertise("invalid", 8927, "/sendspin?auth=none")
+        assertTrue("Do not dial the first response", results.isEmpty())
+        looper.idleFor(Duration.ofSeconds(5))
+        assertEquals(MusicEndpoint("192.0.2.4:8931", "/music/ws") to "", results.single())
+
+        discovery.start()
+        advertise("one", 8931, "/sendspin")
+        advertise("two", 8932, "/sendspin")
+        looper.idleFor(Duration.ofSeconds(5))
+        assertNull("Ambiguous discovery must not dial either server", results.last().first)
+        assertTrue(results.last().second.contains("Multiple"))
+
+        discovery.start()
+        advertise("cancelled", 8933, "/sendspin")
+        discovery.stop()
+        looper.idleFor(Duration.ofSeconds(5))
+        assertEquals("Turning off cancels pending discovery", 2, results.size)
+    }
+
+    @Test fun revocationKeepsIdentityAndAnOldConnectionCannotReinstateTrust() {
+        val context = RuntimeEnvironment.getApplication()
+        val key = KeyGenerator.getInstance("AES").generateKey()
+        val before = MusicHost(context, key)
+        val token = before.pairingToken()
+        val psk = ByteArray(32) { 7 }
+        assertTrue(before.trustStore().addRecord(psk, "server-a") is TrustStore.AddRecordResult.Ok)
+        val persisted = MusicHost(context, key)
+        assertTrue("Pairing token must survive restart", token == persisted.pairingToken())
+        assertEquals("server-a", persisted.trustStore().listRecords().single().serverId)
+
+        persisted.revokeAll()
+        assertEquals(TrustStore.AddRecordResult.StorageFailed,
+            persisted.trustStore().addRecord(ByteArray(32) { 9 }, "server-b"))
+        val after = MusicHost(context, key)
+        assertEquals(before.clientIdentity().clientId, after.clientIdentity().clientId)
+        assertTrue("Previously revealed token must stop working", token != after.pairingToken())
+        assertTrue(after.trustStore().listRecords().isEmpty())
+        assertFalse(after.pairingConfigStore().load().unpairedAccessEnabled)
+    }
+
+    @Test fun reopeningEncoreWithoutMicrophonePermissionOnlyStartsAnEnabledPlayer() {
         val app = RuntimeEnvironment.getApplication()
         val android = shadowOf(app)
         val serviceIntent = Intent(app, EncoreService::class.java)
@@ -33,6 +113,16 @@ class EncoreServiceTest {
         assertFalse("Binding is not a foreground start", android.nextStartedService.hasExtra("unmute"))
         assertNull(android.nextStartedService)
         beforeGrant.pause().stop().destroy()
+
+        val music = app.getSharedPreferences("sendspin", Context.MODE_PRIVATE)
+        music.edit().putBoolean("enabled", true).commit()
+        val musicOnly = Robolectric.buildActivity(MainActivity::class.java).setup()
+        ShadowLooper.idleMainLooper()
+        assertFalse(android.nextStartedService.hasExtra("unmute"))
+        assertEquals("A saved player does not need microphone permission", serviceIntent.component, android.nextStartedService.component)
+        assertNull(android.nextStartedService)
+        musicOnly.pause().stop().destroy()
+        music.edit().clear().commit()
 
         android.grantPermissions(Manifest.permission.RECORD_AUDIO)
         val afterGrant = Robolectric.buildActivity(MainActivity::class.java).setup()

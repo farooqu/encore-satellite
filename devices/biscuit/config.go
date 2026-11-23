@@ -4,12 +4,9 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"net"
-	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 
 	esphome "github.com/ygelfand/go-esphome-device"
@@ -24,7 +21,13 @@ type Config struct {
 	Name           string `json:"name"`
 	BluetoothProxy bool   `json:"bluetooth_proxy,omitempty"`
 	Sendspin       bool   `json:"sendspin,omitempty"`
-	SendspinURL    string `json:"sendspin_url,omitempty"`
+}
+
+// Older rollback slots require a syntactically valid URL when music is enabled.
+// Retain the field on disk, but never dial it. A legacy slot cannot resolve .invalid.
+type diskConfig struct {
+	Config
+	LegacySendspinURL string `json:"sendspin_url,omitempty"`
 }
 
 var dnsLabel = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
@@ -39,50 +42,29 @@ func LoadConfig(path string) (Config, error) {
 }
 
 func parseConfig(r io.Reader) (Config, error) {
-	var c Config
+	var disk diskConfig
 	d := json.NewDecoder(r)
 	d.DisallowUnknownFields()
-	if err := d.Decode(&c); err != nil {
-		return c, errors.New("dot: invalid configuration JSON")
+	if err := d.Decode(&disk); err != nil {
+		return disk.Config, errors.New("dot: invalid configuration JSON")
 	}
+	c := disk.Config
 	if d.Decode(new(any)) != io.EOF {
 		return c, errors.New("dot: trailing configuration data")
 	}
 	if c.Schema != 1 || !dnsLabel.MatchString(c.Name) {
 		return c, errors.New("dot: expected schema 1 and lowercase DNS label name; voice backend belongs to the installed package")
 	}
-	if err := validateMusicURL(c.SendspinURL); err != nil {
-		return c, err
-	}
-	if c.Sendspin && c.SendspinURL == "" {
-		return c, errors.New("dot: configure sendspin_url before enabling music")
-	}
 	return c, nil
-}
-
-// ws is only the carrier: Sendspin mandates its own authenticated Noise channel.
-// No credentials, pairing tokens or guessed fallback endpoints enter the URL.
-func validateMusicURL(raw string) error {
-	if raw == "" {
-		return nil
-	}
-	u, err := url.Parse(raw)
-	if err == nil {
-		_, _, err = net.SplitHostPort(u.Host)
-	}
-	if err != nil || len(raw) > 255 || u.Scheme != "ws" || u.Hostname() == "" || u.Port() == "" || u.Path != "/sendspin" || u.RawPath != "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || strings.ContainsAny(raw, "\r\n\t ") {
-		return errors.New("dot: expected ws://host:port/sendspin without credentials or query")
-	}
-	port, err := strconv.Atoi(u.Port())
-	if err != nil || port < 1 || port > 65535 {
-		return errors.New("dot: invalid Sendspin server port")
-	}
-	return nil
 }
 
 // SaveConfig publishes a complete private config before applying a control.
 func SaveConfig(path string, c Config) error {
-	b, err := json.Marshal(c)
+	disk := diskConfig{Config: c}
+	if c.Sendspin {
+		disk.LegacySendspinURL = "ws://sendspin-discovery.invalid:8927/sendspin"
+	}
+	b, err := json.Marshal(disk)
 	if err != nil {
 		return err
 	}

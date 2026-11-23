@@ -148,10 +148,14 @@ Release promotion is not implemented by the automatic dev workflow.
    Alpine from the locked APKs, not from an earlier Encore image. It emits one
    version's complete starter ZIP and matching unsigned runtime payload, with
    byte-identical repeat assemblies, the two corresponding source kits and
-   evidence. Dispatch with a full first-parent main SHA to replay that commit
-   and its lock. This checks repeat packaging; it does not claim identical
-   rebuilds across arbitrary build hosts. Retention and approval of matching
-   source and notices still require review before any distribution.
+   evidence. The `alpine` source role (`alpine-go-source.tar.gz`) also carries
+   `sendspin-source.tar.gz`, including the pinned SDK, adapter, and bundled
+   userspace runtime sources. Receipt verification checks that kit against the
+   companion provenance, executable, and notices in the exact packaged rootfs.
+   Dispatch with a full first-parent main SHA to replay that commit and its
+   locks. This checks repeat packaging; it does not claim identical rebuilds
+   across arbitrary build hosts. Retention and approval of matching source and
+   notices still require review before any distribution.
    Each starter works for a first Encore install on supported hardware without
    an earlier Encore version. Legacy installs can do a one-time fresh install
    via recovery/fastboot. The runtime archive is the ZIP's exact `rootfs.tar.gz`,

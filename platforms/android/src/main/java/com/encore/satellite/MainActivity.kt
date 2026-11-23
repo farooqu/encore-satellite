@@ -94,9 +94,12 @@ class MainActivity : ComponentActivity() {
                 onStopAlert = { service?.stopAlert(it) },
                 onMuted = { if (it) service?.setMuted(true) else requestMicrophone(true) },
                 noiseKey = { service?.noiseKey().orEmpty() }, musicToken = { service?.musicToken().orEmpty() },
-                onMusicConnect = { startForegroundService(Intent(this, EncoreService::class.java).setAction("music").putExtra("address", it)) },
+                onMusicEnable = { server ->
+                    startForegroundService(Intent(this, EncoreService::class.java).setAction("music").putExtra("manual_server", server))
+                },
                 onMusicDisconnect = { service?.disconnectMusic() },
                 onMusicCommand = { service?.musicCommand(it) },
+                onMusicRevoke = { service?.revokeMusic() },
                 onDismiss = { permissionProblem = ""; service?.dismissProblem() },
                 onUpdate = { startActivity(Intent(this, UpdateActivity::class.java)) },
                 onBluetooth = { startActivity(Intent(this, BluetoothActivity::class.java)) },
@@ -193,7 +196,9 @@ class MainActivity : ComponentActivity() {
 
     private fun startIfPermitted() {
         val connected = service ?: return
-        if (microphonePermissionGranted && !startRequested && (!connected.state.value.running || connected.awaitingUpdateMicrophone)) startSatellite(false)
+        val mayStart = microphonePermissionGranted || connected.musicEnabled()
+        val needsStart = !connected.state.value.running || (microphonePermissionGranted && connected.awaitingUpdateMicrophone)
+        if (!startRequested && mayStart && needsStart) startSatellite(false)
     }
 
     private fun startSatellite(unmute: Boolean) {

@@ -88,7 +88,7 @@ def build_base(inputs, work, kernel):
     return base / "etc/ssl/certs/ca-certificates.crt"
 
 
-def source_kits(inputs, kernel, sources, env):
+def source_kits(inputs, kernel, sendspin, sources, env):
     sources.mkdir()
     kit = sources.parent / "kernel-sources"
     kit.mkdir()
@@ -100,6 +100,9 @@ def source_kits(inputs, kernel, sources, env):
     kit.mkdir()
     for name in ("alpine-source.tar.gz", "go-source.tar.gz"):
         shutil.copyfile(inputs / name, kit / name)
+    # Retain the companion's full corresponding source under the existing
+    # userspace source role; none of it needs to occupy the target RAM root.
+    shutil.copyfile(sendspin / "source.tar.gz", kit / "sendspin-source.tar.gz")
     for name in ("go.mod", "go.sum"):
         shutil.copyfile(ROOT / name, kit / name)
     # Go verifies module zip contents against this checkout's go.sum.
@@ -140,6 +143,9 @@ def main():
     subprocess.run([sys.executable, HERE / "arm64_probe.py", "--source-archive", inputs / "linux-source.tar.gz",
                     "--output", kernel, "--jobs", str(args.jobs)], check=True)
     ca = build_base(inputs, work, kernel)
+    from starter_build import build_sendspin
+    sendspin = work / "sendspin"
+    build_sendspin(sendspin, args.jobs)
     asset = f"encore-biscuit-arm64-{args.version}"
     files = {"starter.zip": f"{asset}.zip", "rootfs.tar.gz": f"{asset}-rootfs.tar.gz",
              "native-seed.zip": f"{asset}-native-seed.zip", "native-ota.zip": f"{asset}-native-ota.zip"}
@@ -149,13 +155,14 @@ def main():
         staging = work / attempt
         subprocess.run([sys.executable, HERE / "starter_build.py", "--sealed-base", work, "--ca-bundle", ca,
                         "--core-version", args.version, "--revision", args.revision, "--output", staging,
+                        "--sendspin-directory", sendspin,
                         "--input-lock-sha256", hashlib.sha256(data).hexdigest(), "--native-payloads"], env=env, check=True)
         for old, name in files.items():
             (staging / old).rename(dest / name)
     for name in files.values():
         if (output / "primary" / name).read_bytes() != (output / "repeat" / name).read_bytes():
             raise ValueError(f"non-reproducible assembly: {name}")
-    source_kits(inputs, kernel, output / "sources", env)
+    source_kits(inputs, kernel, sendspin, output / "sources", env)
     lines = [f"Unsigned Biscuit ARM64 candidate {args.version}", f"Source: {source}" + (" (dirty worktree)" if dirty else ""),
              f"External lock SHA-256: {hashlib.sha256(data).hexdigest()}",
              subprocess.check_output(["go", "version"], env=env, text=True).strip(),

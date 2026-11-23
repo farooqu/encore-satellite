@@ -17,6 +17,7 @@
 #include <sendspin/persistence_codec.h>
 #include <sendspin/player_role.h>
 #include <stdexcept>
+#include <string_view>
 #include <sys/file.h>
 #include <sys/random.h>
 #include <sys/socket.h>
@@ -246,13 +247,14 @@ public:
   }
 };
 
-// v1: 32-byte little-endian header: ESPN, u16 version, u16 type,
+// 32-byte little-endian header: ESPN, u16 version, u16 type,
 // u64 epoch, u64 request/timestamp, u32 payload bytes, u32 value.
+static constexpr uint16_t ipc_version = 3;
 static Bytes frame(uint16_t kind, uint64_t epoch = 0, uint64_t id = 0,
                    uint32_t value = 0, const uint8_t *data = nullptr,
                    size_t n = 0) {
   Bytes b = {'E', 'S', 'P', 'N'};
-  put(b, 1, 2);
+  put(b, ipc_version, 2);
   put(b, kind, 2);
   put(b, epoch, 8);
   put(b, id, 8);
@@ -262,7 +264,19 @@ static Bytes frame(uint16_t kind, uint64_t epoch = 0, uint64_t id = 0,
     b.insert(b.end(), data, data + n);
   return b;
 }
-class Sink final : public PlayerRoleListener {
+// IPC command values are one-based indices, not SDK enum ordinals.
+static constexpr std::array controller_commands = {
+    SendspinControllerCommand::PLAY, SendspinControllerCommand::STOP,
+    SendspinControllerCommand::PAUSE, SendspinControllerCommand::NEXT,
+    SendspinControllerCommand::PREVIOUS};
+static constexpr uint32_t controller_ready = uint32_t{1} << 31;
+static constexpr uint32_t group_playing = uint32_t{1} << 30;
+static constexpr uint32_t group_stopped = uint32_t{1} << 29;
+static bool activated(SendspinClient &client) {
+  return client.is_paired() && client.is_connected();
+}
+
+class Sink final : public PlayerRoleListener, public ControllerRoleListener {
   std::mutex mu_;
   std::condition_variable cv_;
   uint64_t generation_ = 0, active_ = 0, request_ = 0, pending_ = 0;
@@ -272,14 +286,60 @@ class Sink final : public PlayerRoleListener {
   std::chrono::steady_clock::time_point ack_deadline_;
   uint8_t volume_ = 100;
   bool muted_ = false;
+  // The SDK main loop owns advertised_commands_; the IPC worker reads only
+  // the published snapshot below, guarded by mu_.
+  std::optional<uint32_t> advertised_commands_;
+  std::string group_id_;
+  uint64_t controller_generation_ = 0, group_revision_ = 0;
+  uint32_t controller_state_ = 0;
+
   void send_locked(const Bytes &b) {
     if (send(3, b.data(), b.size(), MSG_DONTWAIT | MSG_NOSIGNAL) !=
         ssize_t(b.size()))
       fatal(71);
   }
+  void publish_controller(uint32_t state, std::string_view group_id = {}) {
+    std::lock_guard lock(mu_);
+    const bool changed_group = group_id_ != group_id;
+    if (changed_group) {
+      group_id_ = group_id;
+      ++group_revision_;
+    }
+    if (changed_group || controller_state_ != state) {
+      controller_state_ = state;
+      send_locked(frame(8, ++controller_generation_,
+                        group_id_.empty() ? 0 : group_revision_, state));
+    }
+  }
 
 public:
   PlayerRole *player = nullptr;
+  void on_controller_state(const ServerStateControllerObject &state) override {
+    uint32_t mask = 0;
+    for (size_t i = 0; i < controller_commands.size(); ++i)
+      if (std::find(state.supported_commands.begin(), state.supported_commands.end(),
+                    controller_commands[i]) != state.supported_commands.end())
+        mask |= uint32_t{1} << i;
+    advertised_commands_ = mask;
+  }
+  void on_controller_state_clear() override {
+    advertised_commands_.reset();
+    publish_controller(0);
+  }
+  void update_controller(SendspinClient &client) {
+    if (!activated(client) || !advertised_commands_) {
+      publish_controller(0);
+      return;
+    }
+    const auto state = client.group_state(); // Main loop only, after loop().
+    uint32_t playback = 0;
+    if (state.playback_state == SendspinPlaybackState::PLAYING)
+      playback = group_playing;
+    else if (state.playback_state == SendspinPlaybackState::STOPPED)
+      playback = group_stopped;
+    publish_controller(controller_ready | *advertised_commands_ | playback,
+                       state.group_id.value_or(""));
+  }
   size_t on_audio_write(uint8_t *data, size_t length,
                         uint32_t timeout) override {
     auto deadline =
@@ -335,7 +395,7 @@ public:
     muted_ = m;
     send_locked(frame(3, 0, muted_ ? 1 : 0, volume_));
   }
-  void receive(ControllerRole &controller) {
+  void receive(SendspinClient &client, ControllerRole &controller) {
     uint8_t b[33];
     iovec iov{b, sizeof(b)};
     msghdr msg{};
@@ -345,7 +405,7 @@ public:
     if (n < 0 && (errno == EAGAIN || errno == EINTR))
       return;
     if (n != 32 || (msg.msg_flags & MSG_TRUNC) ||
-        std::memcmp(b, "ESPN", 4) != 0 || get(b + 4, 2) != 1 ||
+        std::memcmp(b, "ESPN", 4) != 0 || get(b + 4, 2) != ipc_version ||
         get(b + 24, 4) != 0)
       fatal(74);
     auto kind = get(b + 6, 2), epoch = get(b + 8, 8), id = get(b + 16, 8),
@@ -371,18 +431,19 @@ public:
       if (epoch == active_)
         player->notify_audio_played(uint32_t(value), int64_t(id));
     } else if (kind == 7) {
-      if (epoch || id || (value != 1 && value != 2))
+      if (!epoch || id || value < 1 || value > controller_commands.size())
         fatal(74);
-      controller.send_command(
-          {.command = value == 1 ? SendspinControllerCommand::PLAY
-                                 : SendspinControllerCommand::STOP});
+      if (epoch == controller_generation_ &&
+          (controller_state_ & (uint32_t{1} << (value - 1))) && activated(client))
+        controller.send_command({.command = controller_commands[value - 1]});
     } else
       fatal(74);
   }
   // Runs independently of SDK main-loop persistence and lifecycle dispatch.
   // IPCWorker is declared after the client, so it joins before client
   // destruction.
-  void service(ControllerRole &controller, const std::atomic<bool> &stop) {
+  void service(SendspinClient &client, ControllerRole &controller,
+               const std::atomic<bool> &stop) {
     while (!stop.load()) {
       {
         std::lock_guard lock(mu_);
@@ -404,7 +465,7 @@ public:
       if (p.revents & (POLLHUP | POLLERR | POLLNVAL))
         fatal();
       if (p.revents & POLLIN)
-        receive(controller);
+        receive(client, controller);
     }
   }
 };
@@ -414,9 +475,10 @@ class IPCWorker {
   std::thread worker_;
 
 public:
-  IPCWorker(Sink &sink, ControllerRole &controller)
-      : worker_(
-            [this, &sink, &controller] { sink.service(controller, stop_); }) {}
+  IPCWorker(Sink &sink, SendspinClient &client, ControllerRole &controller)
+      : worker_([this, &sink, &client, &controller] {
+          sink.service(client, controller, stop_);
+        }) {}
   ~IPCWorker() {
     stop_.store(true);
     worker_.join();
@@ -497,6 +559,7 @@ int main(int argc, char **argv) {
     player.set_listener(&sink);
     player.set_output_delay_adjustable(false);
     auto &controller = client.add_controller();
+    controller.set_listener(&sink);
     check(client.start());
     if (mode == "pairing-token") {
       auto token = client.client_pairing_token();
@@ -508,10 +571,20 @@ int main(int argc, char **argv) {
       client.stop();
       return 0;
     }
-    IPCWorker worker(sink, controller);
+    IPCWorker worker(sink, client, controller);
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(45);
+    bool admitted = false;
     client.connect_to(url);
     for (;;) {
       client.loop();
+      sink.update_controller(client);
+      // An admitted idle or pairing-only connection is intentionally kept
+      // open for the MA setup UI. Transport attempts are not retried by the
+      // SDK. Exit for the Go supervisor on loss or a never-admitted attempt.
+      if (client.server_information())
+        admitted = true;
+      else if (admitted || std::chrono::steady_clock::now() >= deadline)
+        fatal(75);
       std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
   } catch (...) {

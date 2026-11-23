@@ -120,7 +120,8 @@ jobs:
         if: steps.inputs.outputs.tag != ''
         run: |
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            make gcc gcc-aarch64-linux-gnu libc6-dev libssl-dev libelf-dev bc patch curl perl flex bison
+            make gcc gcc-aarch64-linux-gnu libc6-dev libssl-dev libelf-dev bc patch curl perl flex bison \
+            binutils cmake ninja-build
       - name: Fetch the locked external inputs (no prebuilt Encore assets)
         if: steps.inputs.outputs.tag != ''
         env:

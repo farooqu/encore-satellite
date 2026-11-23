@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -42,18 +43,47 @@ type Command uint8
 const (
 	Play Command = iota + 1
 	Stop
+	Pause
+	Next
+	Previous
 )
+
+type Readiness struct {
+	Generation uint64
+	Group      uint64 // opaque membership revision; zero if no group ID is known
+	Ready      bool
+	Commands   uint32 // bit n-1 represents Command(n)
+	Playing    bool   // the SDK's merged group state explicitly says Playing
+	Stopped    bool   // the SDK's merged group state explicitly says Stopped
+}
+
+func (s Readiness) Supports(c Command) bool {
+	return s.Ready && c >= Play && c <= Previous && s.Commands&commandBit(c) != 0
+}
+
+func commandBit(c Command) uint32 { return 1 << (c - 1) }
+
+// CommandRequest belongs to the Readiness snapshot at dispatch time, not the
+// one current when this request eventually reaches the socket.
+type CommandRequest struct {
+	Command    Command
+	Generation uint64
+}
 
 type Options struct {
 	Name, URL, StateDir, Executable string
 	Output                          Output
-	Commands                        <-chan Command
+	Commands                        <-chan CommandRequest
+	// OnReadiness runs on the IPC reader. It must return promptly and receives
+	// a zero snapshot when the reader exits.
+	OnReadiness func(Readiness)
 }
 
 // Epochs passed to Output never repeat when the host retries Run.
 var outputEpoch atomic.Uint64
 
 const (
+	ipcVersion  = 3
 	headerSize  = 32
 	maxPCM      = 16384
 	msgStart    = 1
@@ -63,6 +93,11 @@ const (
 	msgAccepted = 5
 	msgPlayed   = 6
 	msgCommand  = 7
+	msgReady    = 8
+	readyBit    = uint32(1 << 31)
+	playingBit  = uint32(1 << 30)
+	stoppedBit  = uint32(1 << 29)
+	commandMask = uint32(1<<Previous) - 1
 )
 
 type packet struct {
@@ -75,7 +110,7 @@ type packet struct {
 func encode(p packet) []byte {
 	b := make([]byte, headerSize+len(p.data))
 	copy(b, "ESPN")
-	binary.LittleEndian.PutUint16(b[4:], 1)
+	binary.LittleEndian.PutUint16(b[4:], ipcVersion)
 	binary.LittleEndian.PutUint16(b[6:], p.kind)
 	binary.LittleEndian.PutUint64(b[8:], p.epoch)
 	binary.LittleEndian.PutUint64(b[16:], p.id)
@@ -86,7 +121,7 @@ func encode(p packet) []byte {
 }
 
 func decode(b []byte) (packet, error) {
-	if len(b) < headerSize || string(b[:4]) != "ESPN" || binary.LittleEndian.Uint16(b[4:]) != 1 || int(binary.LittleEndian.Uint32(b[24:])) != len(b)-headerSize {
+	if len(b) < headerSize || string(b[:4]) != "ESPN" || binary.LittleEndian.Uint16(b[4:]) != ipcVersion || int(binary.LittleEndian.Uint32(b[24:])) != len(b)-headerSize {
 		return packet{}, errors.New("sendspin: malformed IPC frame")
 	}
 	return packet{binary.LittleEndian.Uint16(b[6:]), binary.LittleEndian.Uint64(b[8:]), binary.LittleEndian.Uint64(b[16:]), b[32:], binary.LittleEndian.Uint32(b[28:])}, nil
@@ -96,11 +131,14 @@ func decode(b []byte) (packet, error) {
 // transports. Authentication is the SDK's mandatory Noise pairing, not a URL PSK.
 func ValidateURL(raw string) error {
 	u, err := url.Parse(raw)
-	if err != nil || u.Scheme != "ws" || u.Hostname() == "" || u.Port() == "" || u.User != nil || u.Path != "/sendspin" || u.RawPath != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+	if err == nil {
+		_, _, err = net.SplitHostPort(u.Host)
+	}
+	if err != nil || !strings.HasPrefix(raw, "ws://") || u.Hostname() == "" || u.Port() == "" || u.User != nil || u.Path != "/sendspin" || u.RawPath != "" || u.RawQuery != "" || u.ForceQuery || strings.ContainsAny(raw, "#\\\r\n\t ") {
 		return errors.New("sendspin: URL must be ws://HOST:PORT/sendspin without credentials or parameters")
 	}
 	n, err := strconv.Atoi(u.Port())
-	if err != nil || n < 1 || n > 65535 {
+	if err != nil || len(u.Port()) > 5 || n < 1 || n > 65535 {
 		return errors.New("sendspin: invalid port")
 	}
 	return nil
@@ -265,6 +303,7 @@ func Run(ctx context.Context, o Options) error {
 	var active, localEpoch uint64
 	var streamCtx context.Context
 	var streamCancel context.CancelFunc
+	var readyGeneration atomic.Uint64
 	ended := make(chan struct{})
 	go func() {
 		defer close(ended)
@@ -279,7 +318,13 @@ func Run(ctx context.Context, o Options) error {
 				o.Output.MusicEnd(localEpoch)
 			}
 		}()
-		var last, lastRequest uint64
+		defer func() {
+			readyGeneration.Store(0)
+			if o.OnReadiness != nil {
+				o.OnReadiness(Readiness{})
+			}
+		}()
+		var last, lastRequest, lastReady uint64
 		for {
 			b := make([]byte, headerSize+maxPCM)
 			n, _, flags, _, e := conn.ReadMsgUnix(b, nil)
@@ -298,6 +343,24 @@ func Run(ctx context.Context, o Options) error {
 			}
 			valid := false
 			switch p.kind {
+			case msgReady:
+				ready := p.value&readyBit != 0
+				playback := p.value & (playingBit | stoppedBit)
+				valid = len(p.data) == 0 && p.epoch > lastReady &&
+					playback != (playingBit|stoppedBit) && p.value&^(readyBit|playingBit|stoppedBit|commandMask) == 0 &&
+					(ready || (p.value == 0 && p.id == 0))
+				if valid {
+					lastReady = p.epoch
+					generation := uint64(0)
+					if ready {
+						generation = p.epoch
+					}
+					readyGeneration.Store(generation)
+					if o.OnReadiness != nil {
+						o.OnReadiness(Readiness{Generation: p.epoch, Group: p.id, Ready: ready, Commands: p.value & commandMask,
+							Playing: playback == playingBit, Stopped: playback == stoppedBit})
+					}
+				}
 			case msgStart:
 				valid = len(p.data) == 0 && p.epoch > last && p.id == 0 && p.value == 0
 				if valid {
@@ -376,11 +439,13 @@ func Run(ctx context.Context, o Options) error {
 					commands = nil
 					continue
 				}
-				if c != Play && c != Stop {
+				if c.Command < Play || c.Command > Previous || c.Generation == 0 {
 					die(errors.New("sendspin: invalid command"))
 					return
 				}
-				queue(packet{kind: msgCommand, value: uint32(c)})
+				if ctx.Err() == nil && readyGeneration.Load() == c.Generation {
+					queue(packet{kind: msgCommand, epoch: c.Generation, value: uint32(c.Command)})
+				}
 			}
 		}
 	}()

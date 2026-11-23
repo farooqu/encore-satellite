@@ -16,6 +16,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -44,6 +45,8 @@ import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
 import org.robolectric.shadows.ShadowLooper
+import java.awt.image.BufferedImage
+import java.io.ByteArrayOutputStream
 import java.util.concurrent.TimeUnit
 import java.io.File
 import javax.imageio.ImageIO
@@ -922,6 +925,86 @@ class EncoreScreenTest {
         assertEquals(2, taps)
     }
 
+    @Test fun sendspinDiscoveryRequiresExplicitEnableAndRevocationRequiresConfirmation() {
+        val state = mutableStateOf(EncoreState(running = true))
+        var enabled = 0
+        var revoked = 0
+        compose.setContent {
+            EncoreScreen(state.value, {}, {}, {}, {}, { "" }, { "fixture-token" }, {
+                enabled++
+                state.value = state.value.copy(music = MusicState(enabled = true, awaitingServer = true, status = "Looking for a server…"))
+            }, { state.value = state.value.copy(music = MusicState(), musicProblem = "") }, {}, {}, onMusicRevoke = {
+                revoked++
+                state.value = state.value.copy(music = MusicState())
+            })
+        }
+        openSettings()
+        val enable = compose.onNodeWithText("Enable music")
+        enable.assertDoesNotExist()
+        compose.onNodeWithText("Specify server").assertDoesNotExist()
+        capture("android-sendspin-settings-collapsed")
+        compose.onNodeWithText("Connection details").performScrollTo().performTouchInput { click() }
+        compose.onNodeWithText("Specify server").performScrollTo().assertIsDisplayed()
+        compose.runOnIdle { assertEquals(0, enabled) }
+        capture("android-sendspin-auto-off")
+        enable.performScrollTo().assertIsEnabled().performClick()
+        compose.onNodeWithText("Sendspin · Looking for a server…").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("Stop music").assertDoesNotExist()
+        capture("android-sendspin-auto-searching")
+        val conflict = "Multiple Sendspin servers found. You can specify a server below."
+        compose.runOnIdle { state.value = state.value.copy(music = state.value.music.copy(status = "Waiting for a server"), musicProblem = conflict) }
+        compose.onNodeWithText(conflict).performScrollTo().assertIsDisplayed()
+        capture("android-sendspin-auto-conflict")
+        compose.onNodeWithText("Turn off music").performScrollTo().performClick()
+        compose.onNodeWithText(conflict).assertDoesNotExist()
+        enable.performScrollTo().performClick()
+        compose.onNodeWithText("Revoke all Sendspin trust").performScrollTo().performClick()
+        compose.onNodeWithText("Revoke Sendspin pairing?").assertIsDisplayed()
+        capture("android-sendspin-auto-revoke")
+        compose.onNodeWithText("Cancel").performClick()
+        compose.runOnIdle { assertEquals(2, enabled); assertEquals(0, revoked) }
+        compose.onNodeWithText("Revoke all Sendspin trust").performClick()
+        compose.onNodeWithText("Revoke pairing").performClick()
+        compose.runOnIdle { assertEquals(1, revoked) }
+        compose.onNodeWithText("Enable music").assertExists()
+    }
+
+    @Test fun manualSendspinServerCanReplaceAmbiguousDiscoveryAndReturnToAuto() {
+        val conflict = "Multiple Sendspin servers found. You can specify a server below."
+        val state = mutableStateOf(EncoreState(running = true,
+            music = MusicState(enabled = true, awaitingServer = true, status = "Waiting for a server"), musicProblem = conflict))
+        val requests = mutableListOf<String?>()
+        compose.setContent {
+            EncoreScreen(state.value, {}, {}, {}, {}, { "" }, { "" }, { server ->
+                requests += server
+                state.value = state.value.copy(manualMusicServer = server, musicProblem = "",
+                    music = state.value.music.copy(status = if (server == null) "Looking for a server…" else "Connecting…"))
+            }, {}, {}, {})
+        }
+        openSettings()
+        compose.onNodeWithText("Connection details").performScrollTo().performTouchInput { click() }
+        compose.onNodeWithText("Specify server").performScrollTo().performClick()
+        val field = compose.onNode(hasSetTextAction() and hasText("Host and port"))
+        field.performTextInput("music.local")
+        compose.onNodeWithText("Save and connect").assertIsNotEnabled()
+        compose.onNodeWithText("Cancel").performClick()
+        compose.runOnIdle { assertTrue(requests.isEmpty()) }
+        compose.onNodeWithText(conflict).performScrollTo().assertIsDisplayed()
+
+        compose.onNodeWithText("Specify server").performScrollTo().performClick()
+        field.performTextInput("music.local:8931/music/ws")
+        capture("android-sendspin-manual-entry")
+        compose.onNodeWithText("Save and connect").assertIsEnabled().performClick()
+        compose.onNodeWithText("Server: music.local:8931/music/ws").performScrollTo().assertIsDisplayed()
+        capture("android-sendspin-manual-selected")
+        compose.onNodeWithText("Edit server").performScrollTo().performClick()
+        compose.onNodeWithText("music.local:8931/music/ws").assertExists()
+        compose.onNodeWithText("Cancel").performClick()
+        compose.onNodeWithText("Connect by auto-discovery").performScrollTo().performClick()
+        compose.onNodeWithText("Sendspin · Looking for a server…").performScrollTo().assertIsDisplayed()
+        compose.runOnIdle { assertEquals(listOf("music.local:8931/music/ws", null), requests) }
+    }
+
     @Test fun interruptedPlayingMusicCanResumeWithoutServerPlayCapability() {
         val state = mutableStateOf(EncoreState(running = true, microphoneReady = true, connected = true, talkAllowed = true, audioInterrupted = true,
             music = MusicState(enabled = true, status = "Connected", title = "Test audio · continuous stream", playing = true, commands = listOf("pause"))))
@@ -930,15 +1013,180 @@ class EncoreScreenTest {
             EncoreScreen(state.value, {}, {}, {}, {}, { "" }, { "" }, {}, {}, { command = it }, {})
         }
         openSettings()
-        compose.onNodeWithText("Pause").assertIsEnabled()
-        compose.onNodeWithText("Resume audio").assertIsEnabled()
+        compose.onNodeWithText("Pause").assertDoesNotExist()
+        compose.onNodeWithText("Silent on this tablet").assertIsDisplayed()
+        val resume = compose.onNodeWithText("Resume on this tablet").assertIsEnabled()
         capture("android-focus-lost")
-        compose.onNodeWithText("Resume audio").performClick()
+        resume.performClick()
         assertEquals("resume", command)
         compose.runOnIdle { state.value = state.value.copy(audioInterrupted = false) }
-        compose.onNodeWithText("Resume audio").assertDoesNotExist()
+        resume.assertDoesNotExist()
         compose.onNodeWithText("Pause").assertIsDisplayed()
         capture("android-focus-resumed")
+        compose.onNodeWithText("Stop music").performClick()
+        assertEquals("stop", command)
+        compose.runOnIdle { state.value = state.value.copy(music = state.value.music.copy(stopped = true)) }
+        compose.onNodeWithText("Stopped on this tablet").assertIsDisplayed()
+        compose.onNodeWithText("Pause").assertDoesNotExist()
+        compose.onNodeWithText("Stop music").assertIsNotEnabled()
+        capture("android-sendspin-stopped")
+        compose.onNodeWithText("Play").assertIsEnabled().performClick()
+        assertEquals("play", command)
+    }
+
+    @Test fun nowPlayingCanMinimizeExpandAndDisappearWhenStopped() {
+        val state = mutableStateOf(ready().copy(music = MusicState(enabled = true, status = "Connected")))
+        val commands = mutableListOf<String>()
+        compose.setContent {
+            EncoreScreen(state.value, {}, {}, {}, {}, { "" }, { "" }, {}, {}, { commands += it }, {}, reducedMotion = true)
+        }
+        val card = compose.onNodeWithTag("now-playing")
+        card.assertDoesNotExist()
+        val artwork = checkNotNull(decodeSendspinArtwork(exampleCover()))
+        compose.runOnIdle {
+            state.value = state.value.copy(music = state.value.music.copy(playing = true,
+                title = "Northern Lights", artist = "The Satellite Sessions", commands = listOf("pause", "next"), artwork = artwork))
+        }
+        val clock = compose.onNodeWithTag("display-clock")
+        val mini = compose.onNodeWithTag("floating-player")
+        clock.assertDoesNotExist()
+        card.assertIsDisplayed()
+        compose.onNodeWithTag("now-playing-time").assertIsDisplayed()
+        compose.onNodeWithText("Northern Lights").assertIsDisplayed()
+        compose.onNodeWithText("The Satellite Sessions").assertIsDisplayed()
+        compose.onNodeWithContentDescription("Previous").assertIsNotEnabled()
+        compose.onNodeWithContentDescription("Next").assertIsEnabled().performClick()
+        compose.onNodeWithContentDescription("Pause").assertIsEnabled().performClick()
+        capture("android-now-playing-landscape")
+        compose.runOnIdle { state.value = state.value.copy(audioInterrupted = true) }
+        val resume = compose.onNodeWithContentDescription("Resume on this tablet")
+        val minimize = compose.onNodeWithContentDescription("Minimize")
+        compose.onNodeWithText("Silent on this tablet").assertIsDisplayed()
+        compose.onNodeWithContentDescription("Pause").assertDoesNotExist()
+        compose.onNodeWithText("Resume audio").assertDoesNotExist()
+        capture("android-now-playing-interrupted")
+        resume.assertIsEnabled().performTouchInput { click() }
+        minimize.performTouchInput { click() }
+        mini.assertIsDisplayed()
+        resume.assertIsEnabled().performTouchInput { click() }
+        capture("android-floating-player-interrupted")
+        compose.onNodeWithContentDescription("Expand Now Playing").performTouchInput { click() }
+        compose.runOnIdle {
+            assertEquals(listOf("next", "pause", "resume", "resume"), commands)
+            state.value = state.value.copy(audioInterrupted = false,
+                music = state.value.music.copy(playing = false, groupPlayback = "paused", commands = listOf("play")))
+        }
+        compose.onNodeWithText("Paused").assertIsDisplayed()
+        compose.onNodeWithContentDescription("Play").assertIsEnabled().performClick()
+        capture("android-now-playing-paused")
+        compose.runOnIdle { state.value = state.value.copy(music = state.value.music.copy(playing = true, groupPlayback = "stopped")) }
+        card.assertDoesNotExist()
+        compose.onNodeWithText("Northern Lights").assertDoesNotExist()
+        clock.assertIsDisplayed()
+        capture("android-now-playing-stopped")
+        compose.runOnIdle { state.value = state.value.copy(music = state.value.music.copy(groupPlayback = "playing")) }
+        minimize.performTouchInput { click() }
+        clock.assertIsDisplayed()
+        mini.assertIsDisplayed()
+        compose.onNodeWithContentDescription("Expand Now Playing").performTouchInput { click() }
+        card.assertIsDisplayed()
+        mini.assertDoesNotExist()
+        minimize.performTouchInput { click() }
+        compose.onNodeWithContentDescription("Stop music").assertIsEnabled().performClick()
+        compose.runOnIdle {
+            assertEquals(listOf("next", "pause", "resume", "resume", "play", "stop"), commands)
+            state.value = state.value.copy(music = state.value.music.copy(stopped = true))
+        }
+        card.assertDoesNotExist()
+        mini.assertDoesNotExist()
+        compose.runOnIdle {
+            state.value = state.value.copy(music = state.value.music.copy(stopped = false))
+            state.value = state.value.copy(voiceActive = true, phase = "listening", inputOpen = true)
+        }
+        card.assertDoesNotExist()
+        compose.onNodeWithTag("stop").assertIsDisplayed()
+        compose.runOnIdle { state.value = ready().copy(music = MusicState(enabled = true, status = "Reconnecting")) }
+        card.assertDoesNotExist()
+    }
+
+    private fun exampleCover(): ByteArray {
+        val cover = BufferedImage(1024, 1024, BufferedImage.TYPE_INT_RGB)
+        cover.createGraphics().apply {
+            scale(2.0, 2.0)
+            color = java.awt.Color(37, 33, 86)
+            fillRect(0, 0, 512, 512)
+            color = java.awt.Color(255, 170, 107)
+            fillOval(140, 72, 232, 232)
+            color = java.awt.Color(86, 184, 170)
+            fillPolygon(intArrayOf(0, 160, 289, 424, 512, 512, 0), intArrayOf(324, 208, 328, 245, 318, 512, 512), 7)
+            dispose()
+        }
+        return ByteArrayOutputStream().apply { ImageIO.write(cover, "jpg", this) }.toByteArray()
+    }
+
+    @Test fun nowPlayingShowsLargeDecodedCoverAndFallsBackWhenArtworkIsCleared() {
+        val artwork = checkNotNull(decodeSendspinArtwork(exampleCover()))
+        assertEquals(512, artwork.width)
+        assertEquals(512, artwork.height)
+        assertNull(decodeSendspinArtwork(byteArrayOf(1, 2, 3)))
+        val state = mutableStateOf(ready().copy(music = MusicState(enabled = true, playing = true,
+            title = "Northern Lights", artist = "The Satellite Sessions", commands = listOf("pause", "next"), artwork = artwork)))
+        compose.setContent { EncoreScreen(state.value, {}, {}, {}, {}, { "" }, { "" }, {}, {}, {}, {}) }
+        val bounds = compose.onNodeWithContentDescription("Album cover").assertIsDisplayed().fetchSemanticsNode().boundsInRoot
+        assertTrue("The page should visibly feature the cover", bounds.width >= 320 && bounds.height >= 320)
+        assertNowPlayingHeader()
+        capture("android-album-cover")
+        compose.runOnIdle { state.value = state.value.copy(music = state.value.music.copy(artwork = null)) }
+        compose.onNodeWithContentDescription("Album cover").assertDoesNotExist()
+        compose.onNodeWithTag("now-playing").assertIsDisplayed()
+        capture("android-album-cover-fallback")
+    }
+
+    @Test @Config(qualifiers = "w360dp-h640dp-mdpi") fun portraitPlayersLeaveRoomForTimersAndVoiceDock() {
+        val artwork = checkNotNull(decodeSendspinArtwork(exampleCover()))
+        compose.setContent {
+            EncoreScreen(ready().copy(timers = listOf(TimerCountdown(273)),
+                music = MusicState(enabled = true, playing = true, title = "Northern Lights",
+                artist = "The Satellite Sessions", commands = listOf("pause", "previous", "next"), artwork = artwork)),
+                {}, {}, {}, {}, { "" }, { "" }, {}, {}, {}, {})
+        }
+        val pause = compose.onNodeWithContentDescription("Pause").assertIsDisplayed().fetchSemanticsNode().boundsInRoot
+        val next = compose.onNodeWithContentDescription("Next").assertIsDisplayed().fetchSemanticsNode().boundsInRoot
+        compose.onNodeWithTag("talk").assertDoesNotExist()
+        revealDock()
+        val dock = compose.onNodeWithTag("talk").assertIsDisplayed().fetchSemanticsNode().boundsInRoot
+        val chip = compose.onNodeWithTag("timer-chip").assertIsDisplayed()
+        val chipBounds = chip.fetchSemanticsNode().boundsInRoot
+        val card = compose.onNodeWithTag("now-playing").assertIsDisplayed()
+        assertNowPlayingHeader()
+        assertEquals("Transport controls should stay in one row", pause.center.y, next.center.y, 1f)
+        assertTrue("The music card must stay above the timer chip", card.fetchSemanticsNode().boundsInRoot.bottom <= chipBounds.top)
+        assertTrue("The timer chip must stay above the voice dock", chipBounds.bottom <= dock.top)
+        compose.onNodeWithTag("privacy").assertIsDisplayed()
+        compose.onNodeWithTag("open-settings").assertIsDisplayed()
+        capture("android-now-playing-timer-portrait")
+        compose.onNodeWithContentDescription("Minimize").performTouchInput { click() }
+        val mini = compose.onNodeWithTag("floating-player").assertIsDisplayed()
+        assertTrue("The mini-player must stay above the timer chip", mini.fetchSemanticsNode().boundsInRoot.bottom <= chipBounds.top)
+        capture("android-floating-player-timer-portrait")
+        chip.performTouchInput { click() }
+        compose.onNodeWithTag("timer-sheet").assertIsDisplayed()
+        card.assertDoesNotExist()
+        mini.assertDoesNotExist()
+        compose.onNodeWithContentDescription("Close timers").performTouchInput { click() }
+        mini.assertIsDisplayed()
+    }
+
+    private fun assertNowPlayingHeader() {
+        val page = compose.onNodeWithTag("now-playing").fetchSemanticsNode().boundsInRoot
+        val clock = compose.onNodeWithTag("now-playing-time").assertIsDisplayed().fetchSemanticsNode().boundsInRoot
+        val minimize = compose.onNodeWithContentDescription("Minimize").assertIsEnabled().assertIsDisplayed()
+            .fetchSemanticsNode().boundsInRoot
+        val cover = compose.onNodeWithContentDescription("Album cover").assertIsDisplayed().fetchSemanticsNode().boundsInRoot
+        assertEquals("Clock should be centered on the page", page.center.x, clock.center.x, 1f)
+        assertEquals("Minimize should be under the clock", clock.center.x, minimize.center.x, 1f)
+        assertTrue("Minimize must be between the clock and artwork", clock.bottom <= minimize.top && minimize.bottom <= cover.top)
+        assertTrue("Minimize needs a full 48dp touch target", minimize.width >= 48f && minimize.height >= 48f)
     }
 
     @Test fun dashboardNavigationUsesOnlyTheConfiguredOrigin() {
@@ -1071,6 +1319,80 @@ class EncoreScreenTest {
         assertNull(homeAssistantOrigin("$origin/lovelace/kitchen"))
         assertNull(homeAssistantOrigin("https://user@ha.example"))
         assertEquals(origin, homeAssistantOrigin(" $origin/ "))
+    }
+
+    @Test fun carouselReturnsToMusicClockOnlyWhenIdleFocusedAndNotMinimized() {
+        val pages = listOf(DashboardPage("/kitchen", "Kitchen"), DashboardPage("/living", "Living room"))
+        val music = mutableStateOf(true)
+        val focused = mutableStateOf(true)
+        val navigation = mutableStateOf(true)
+        var touches = 0
+        val mounted = mutableListOf<String>()
+        compose.setContent {
+            DashboardCarousel(pages, swipeEnabled = navigation.value, reducedMotion = true,
+                nowPlaying = if (music.value) ({ minimize -> Button(onClick = minimize) { Text("Minimize music") } }) else null,
+                miniPlayer = { expand -> Button(onClick = expand) { Text("Expand music") } },
+                musicFocused = focused.value) { dashboard, _ ->
+                DisposableEffect(dashboard.path) {
+                    mounted += dashboard.path
+                    onDispose {}
+                }
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Button(onClick = { touches++ }) { Text(dashboard.title) }
+                }
+            }
+        }
+        val carousel = compose.onNodeWithTag("dashboard-carousel")
+        val full = compose.onNodeWithText("Minimize music")
+        val mini = compose.onNodeWithText("Expand music")
+        val kitchen = compose.onNodeWithText("Kitchen").assertIsDisplayed()
+        val living = compose.onNodeWithText("Living room")
+        val clock = compose.onNodeWithTag("display-clock")
+        compose.mainClock.advanceTimeBy(31_000)
+        kitchen.assertIsDisplayed() // A new track never steals the opening page.
+        carousel.performTouchInput { swipeRight() }
+        full.assertIsDisplayed()
+        carousel.performTouchInput { swipeLeft() }
+        mini.assertIsDisplayed()
+        compose.mainClock.advanceTimeBy(25_000)
+        kitchen.performTouchInput { click() }
+        assertEquals(1, touches)
+        compose.mainClock.advanceTimeBy(10_000)
+        kitchen.assertIsDisplayed() // Past the original deadline, but the tap reset it.
+        compose.runOnIdle { focused.value = false }
+        compose.waitForIdle()
+        compose.mainClock.advanceTimeBy(31_000)
+        kitchen.assertIsDisplayed()
+        compose.runOnIdle { navigation.value = false }
+        compose.runOnIdle { focused.value = true }
+        compose.waitForIdle()
+        compose.mainClock.advanceTimeBy(31_000)
+        kitchen.assertIsDisplayed()
+        compose.runOnIdle { navigation.value = true }
+        kitchen.assertIsDisplayed()
+        compose.mainClock.advanceTimeBy(31_000)
+        full.assertIsDisplayed()
+        full.performClick()
+        clock.assertIsDisplayed()
+        mini.assertIsDisplayed()
+        carousel.performTouchInput { swipeLeft() }
+        kitchen.assertIsDisplayed()
+        carousel.performTouchInput { swipeLeft() }
+        living.assertIsDisplayed()
+        carousel.performTouchInput { swipeLeft() }
+        living.assertIsDisplayed() // No extra music page.
+        compose.mainClock.advanceTimeBy(31_000)
+        mini.assertIsDisplayed()
+        living.assertIsDisplayed()
+        mini.performClick()
+        full.assertIsDisplayed()
+        carousel.performTouchInput { swipeLeft() }
+        compose.runOnIdle { music.value = false }
+        mini.assertDoesNotExist()
+        compose.mainClock.advanceTimeBy(31_000)
+        kitchen.assertIsDisplayed()
+        full.assertDoesNotExist()
+        compose.runOnIdle { assertEquals(pages.map { it.path }.sorted(), mounted.sorted()) }
     }
 
     @OptIn(ExperimentalRoborazziApi::class)

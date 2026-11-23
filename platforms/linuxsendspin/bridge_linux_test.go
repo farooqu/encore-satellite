@@ -45,12 +45,28 @@ func TestMain(m *testing.M) {
 			return p
 		}
 		if mode == "no-read" {
+			send(packet{kind: msgReady, epoch: 1, value: readyBit | commandBit(Play)})
 			for {
 				time.Sleep(time.Hour)
 			}
 		}
 		send(packet{kind: msgStart, epoch: 1})
 		switch mode {
+		case "commands":
+			send(packet{kind: msgReady, epoch: 1, id: 1, value: readyBit | playingBit | commandBit(Play)})
+			if p := read(); p.kind != msgCommand || p.epoch != 1 || p.value != uint32(Play) {
+				os.Exit(97)
+			}
+			send(packet{kind: msgReady, epoch: 2})
+			send(packet{kind: msgReady, epoch: 3, id: 2, value: readyBit | stoppedBit | commandBit(Next)})
+			if p := read(); p.kind != msgCommand || p.epoch != 3 || p.value != uint32(Next) {
+				os.Exit(98)
+			}
+			send(packet{kind: msgVolume, value: 87})
+		case "bad-readiness":
+			send(packet{kind: msgReady, epoch: 1, value: playingBit})
+		case "conflicting-playback":
+			send(packet{kind: msgReady, epoch: 1, id: 1, value: readyBit | playingBit | stoppedBit})
 		case "malformed":
 			_, _ = c.Write([]byte("bad"))
 		case "oversize":
@@ -188,7 +204,7 @@ func TestValidateURL(t *testing.T) {
 			t.Fatal(e)
 		}
 	}
-	for _, s := range []string{"ws://host/sendspin", "wss://host:8928/sendspin", "ws://token@host:8928/sendspin", "ws://host:8928/sendspin?token=x", "ws://host:8928/sendspin?", "ws://host:8928/sendspin#x", "ws://host:0/sendspin", "ws://host:99999/sendspin", "ws://host:8928/%73endspin"} {
+	for _, s := range []string{"ws://host/sendspin", "wss://host:8928/sendspin", "ws://token@host:8928/sendspin", "ws://host:8928/sendspin?token=x", "ws://host:8928/sendspin?", "ws://host:8928/sendspin#x", "ws://host:8928/sendspin#", "ws://host:0/sendspin", "ws://host:99999/sendspin", "ws://host:8928/%73endspin"} {
 		if ValidateURL(s) == nil {
 			t.Fatalf("accepted invalid URL %q", s)
 		}
@@ -215,7 +231,7 @@ func TestFrameValidation(t *testing.T) {
 	}
 }
 func TestMalformedAndExitFenceMusic(t *testing.T) {
-	for _, mode := range []string{"malformed", "oversize", "exit"} {
+	for _, mode := range []string{"malformed", "oversize", "exit", "bad-readiness", "conflicting-playback"} {
 		t.Run(mode, func(t *testing.T) {
 			o := &testOutput{}
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -354,16 +370,72 @@ func TestOutputBackpressureReturnsZero(t *testing.T) {
 
 func TestCommandSaturationFailsClosed(t *testing.T) {
 	o := &testOutput{}
-	cmds := make(chan Command, 1000)
-	for i := 0; i < cap(cmds); i++ {
-		cmds <- Play
-	}
+	cmds := make(chan CommandRequest, 1000)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	opt := options(t, "no-read", o)
 	opt.Commands = cmds
+	opt.OnReadiness = func(s Readiness) {
+		if s.Ready {
+			for range cap(cmds) {
+				cmds <- CommandRequest{Play, s.Generation}
+			}
+		}
+	}
 	err := Run(ctx, opt)
 	if err == nil || errors.Is(err, context.DeadlineExceeded) {
 		t.Fatal("saturated IPC did not fail promptly", err)
+	}
+}
+
+func TestCommandsAreFencedByReadinessGeneration(t *testing.T) {
+	o := &testOutput{verified: make(chan struct{}, 1)}
+	opt := options(t, "commands", o)
+	cmds := make(chan CommandRequest, 2)
+	states := make(chan Readiness, 4)
+	opt.Commands = cmds
+	opt.OnReadiness = func(s Readiness) { states <- s }
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- Run(ctx, opt) }()
+	state := func() Readiness {
+		t.Helper()
+		select {
+		case s := <-states:
+			return s
+		case <-ctx.Done():
+			t.Fatal("timed out waiting for readiness")
+			return Readiness{}
+		}
+	}
+	if s := state(); !s.Supports(Play) || s.Supports(Next) || s.Generation != 1 || s.Group != 1 || !s.Playing || s.Stopped {
+		t.Fatalf("bad initial state: %+v", s)
+	}
+	cmds <- CommandRequest{Play, 1}
+	if s := state(); s.Ready || s.Supports(Play) || s.Generation != 2 || s.Group != 0 || s.Playing || s.Stopped {
+		t.Fatalf("bad revoked state: %+v", s)
+	}
+	if s := state(); !s.Supports(Next) || s.Supports(Play) || s.Generation != 3 || s.Group != 2 || s.Playing || !s.Stopped {
+		t.Fatalf("bad replacement state: %+v", s)
+	}
+	cmds <- CommandRequest{Play, 1}
+	cmds <- CommandRequest{Next, 3}
+	select {
+	case <-o.verified:
+	case err := <-done:
+		t.Fatalf("peer did not receive current command only: %v", err)
+	case <-ctx.Done():
+		t.Fatal("peer did not verify commands")
+	}
+	cancel()
+	<-done
+	select {
+	case s := <-states:
+		if s != (Readiness{}) {
+			t.Fatalf("ready after Run returned: %+v", s)
+		}
+	default:
+		t.Fatal("Run returned without clearing readiness")
 	}
 }

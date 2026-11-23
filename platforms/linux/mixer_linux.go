@@ -289,13 +289,17 @@ func (m *Mixer) StopMusic() {
 	m.stopped = true
 	m.requestPurge(purgeMusic)
 }
-func (m *Mixer) PlayMusic() {
+// PlayMusic reports whether it released the local Stop latch. It never
+// changes remote playback or overrides hardware privacy.
+func (m *Mixer) PlayMusic() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if !m.privacy.Load() {
-		m.stopped = false
-		m.notifyOwner()
+	if !m.stopped || m.privacy.Load() {
+		return false
 	}
+	m.stopped = false
+	m.notifyOwner()
+	return true
 }
 
 // MusicStart/Write/End implement the companion output contract. The epoch is

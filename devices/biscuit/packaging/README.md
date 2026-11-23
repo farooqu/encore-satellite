@@ -57,6 +57,15 @@ on the supervised RAM-root test; that does not qualify the persistent starter.
 The exact retained input/header policy is not a general loader compatibility
 claim. Packaging does not contact a device or enable OTA.
 
+The current starter and native A/B OTA rootfs include the static AArch64
+Sendspin companion at `/usr/local/bin/encore-sendspin`. The starter builds it
+from the [pinned SDK and Zig toolchain](../../../platforms/linuxsendspin/README.md)
+on Linux x86-64; it needs Git, CMake, Ninja and `readelf` as well as Python and
+Go. A standalone build leaves the matching redistribution kit in `sendspin/`
+beside the starter ZIP. The rootfs includes provenance and license notices but
+not the source archive. Release builds retain that archive separately in
+`alpine-go-source.tar.gz`; keep it with the release for distribution.
+
 **Before installing Encore:** Start with an Echo Dot (2nd gen, `biscuit`) on
 stock Fire OS, with both `system_a` and `system_b` intact. The starter currently
 accepts the exact radio firmware set from Fire OS 6.5.7.4. Prepare the Dot with

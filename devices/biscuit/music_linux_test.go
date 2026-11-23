@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/libp2p/zeroconf/v2"
+
 	"github.com/farooqu/encore-satellite/backends/bluetooth"
 	"github.com/farooqu/encore-satellite/backends/esphome/sensors"
 	"github.com/farooqu/encore-satellite/backends/incubator"
@@ -143,6 +145,7 @@ func TestNativeVolumeEncryptedAPIAndPhysicalKeys(t *testing.T) {
 	peer.receive()
 	peer.send(&api.ListEntitiesRequest{})
 	var volume, mute uint32
+	buttons := map[string]bool{}
 listing:
 	for {
 		switch v := peer.receive().(type) {
@@ -157,12 +160,21 @@ listing:
 			if v.ObjectId == "speaker_mute" {
 				mute = v.Key
 			}
+		case *api.ListEntitiesButtonResponse:
+			buttons[v.ObjectId] = true
+		case *api.ListEntitiesMediaPlayerResponse:
+			t.Fatal("Sendspin exposed a duplicate media-player entity")
 		case *api.ListEntitiesDoneResponse:
 			break listing
 		}
 	}
 	if volume == 0 || mute == 0 || mute == volume {
 		t.Fatal("missing native entities")
+	}
+	for _, button := range []string{"sendspin_play", "sendspin_stop", "sendspin_pause", "sendspin_next", "sendspin_previous"} {
+		if !buttons[button] {
+			t.Fatalf("missing Sendspin button %q", button)
+		}
 	}
 	// Each volume snapshot precedes its mute state. Drain through a complete
 	// matching pair, including any coalesced earlier notifications.
@@ -202,7 +214,7 @@ listing:
 	state(20, false)
 	buttonWait(t, "unmute did not restore selected gain", func() bool { return sample() == 2400 })
 	e := session.New(p)
-	keys := pairedButtonEvents(t, linux.NewPrivacy(func() (bool, error) { return false, nil }), e, p)
+	keys := pairedButtonEvents(t, linux.NewPrivacy(func() (bool, error) { return false, nil }), e, p, nil)
 	keys(114, 1)
 	keys(114, 0)
 	state(100.0*23/120, false)
@@ -320,6 +332,8 @@ func TestMusicSwitchLifecycleAndIndependentPersistence(t *testing.T) {
 	player := newSpeaker(&speakerPCM{})
 	defer player.Close()
 	m := newMusic(c, s, player)
+	url := "ws://192.0.2.4:8931/sendspin"
+	m.discover = func(context.Context) (string, error) { return url, nil }
 	started := make(chan string, 8)
 	var live, maximum atomic.Int32
 	m.run = func(ctx context.Context, o linuxsendspin.Options) error {
@@ -341,14 +355,6 @@ func TestMusicSwitchLifecycleAndIndependentPersistence(t *testing.T) {
 		t.Fatal("default off started music")
 	case <-time.After(15 * time.Millisecond):
 	}
-	yes, no := true, false
-	if err := m.configure(&yes, nil); err == nil {
-		t.Fatal("enabled music without server configuration")
-	}
-	url := "ws://ma.local:8927/sendspin"
-	if err := m.configure(nil, &url); err != nil {
-		t.Fatal(err)
-	}
 	var writes sync.WaitGroup
 	writes.Go(func() {
 		if err := s.update(func(c *Config) { c.BluetoothProxy = true }); err != nil {
@@ -356,7 +362,7 @@ func TestMusicSwitchLifecycleAndIndependentPersistence(t *testing.T) {
 		}
 	})
 	writes.Go(func() {
-		if err := m.configure(&yes, nil); err != nil {
+		if err := m.configure(true); err != nil {
 			t.Error(err)
 		}
 	})
@@ -370,10 +376,10 @@ func TestMusicSwitchLifecycleAndIndependentPersistence(t *testing.T) {
 		t.Fatal("music did not start")
 	}
 	got, err := LoadConfig(s.path)
-	if err != nil || !got.BluetoothProxy || !got.Sendspin || got.SendspinURL != url || got.Name != c.Name {
+	if err != nil || !got.BluetoothProxy || !got.Sendspin || got.Name != c.Name {
 		t.Fatalf("independent setting lost: %+v %v", got, err)
 	}
-	if err := m.configure(&no, nil); err != nil {
+	if err := m.configure(false); err != nil {
 		t.Fatal(err)
 	}
 	until := time.Now().Add(time.Second)
@@ -385,10 +391,11 @@ func TestMusicSwitchLifecycleAndIndependentPersistence(t *testing.T) {
 	}
 	// OFF must stay off; commands from that period cannot turn into autoplay.
 	m.command(music.Play)
-	select {
-	case <-m.commands:
-		t.Fatal("queued Play while disabled")
-	default:
+	m.mu.Lock()
+	worker := m.worker
+	m.mu.Unlock()
+	if worker != nil {
+		t.Fatal("disabled music retained an active worker")
 	}
 	select {
 	case <-started:
@@ -396,13 +403,45 @@ func TestMusicSwitchLifecycleAndIndependentPersistence(t *testing.T) {
 	case <-time.After(15 * time.Millisecond):
 	}
 	s.path = filepath.Join(t.TempDir(), "missing", "config.json")
-	if err := m.configure(&yes, nil); err == nil {
+	if err := m.configure(true); err == nil {
 		t.Fatal("accepted failed persistence")
 	}
-	if enabled, _, _ := m.snapshot(); enabled {
+	if enabled, _ := m.snapshot(); enabled {
 		t.Fatal("failed save changed live music switch")
 	}
 	if maximum.Load() != 1 {
 		t.Fatalf("overlapping music children: %d", maximum.Load())
+	}
+}
+
+func TestMusicDiscoveryUsesAdvertisedPortAndRejectsAmbiguity(t *testing.T) {
+	server := func(id string, port int, txt ...string) *zeroconf.ServiceEntry {
+		return &zeroconf.ServiceEntry{ServiceRecord: zeroconf.ServiceRecord{Instance: id},
+			AddrIPv4: []net.IP{net.ParseIP("192.0.2.1")}, Port: port, Text: txt}
+	}
+	ma := server("ma-server-id", 8930, "name=Music Assistant", "path=/sendspin")
+	for _, tc := range []struct {
+		name    string
+		entries []*zeroconf.ServiceEntry
+		want    string
+	}{
+		{"one compatible server", []*zeroconf.ServiceEntry{server("bad", 8927, "path=/sendspin?token=x"), ma}, "ws://192.0.2.1:8930/sendspin"},
+		{"duplicate announcement", []*zeroconf.ServiceEntry{ma, ma}, "ws://192.0.2.1:8930/sendspin"},
+		{"multiple servers", []*zeroconf.ServiceEntry{ma, server("other-server-id", 8931, "path=/sendspin")}, ""},
+		{"conflicting endpoints", []*zeroconf.ServiceEntry{ma, server("ma-server-id", 8931, "path=/sendspin")}, ""},
+		{"missing or ambiguous path", []*zeroconf.ServiceEntry{server("one", 8927), server("two", 8927, "path=/sendspin", "path=/bad")}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			entries := make(chan *zeroconf.ServiceEntry, len(tc.entries))
+			for _, e := range tc.entries {
+				entries <- e
+			}
+			close(entries)
+			done := make(chan error, 1)
+			done <- nil
+			if got, err := chooseMusicEndpoint(t.Context(), entries, done); got != tc.want || (err != nil) != (tc.want == "") {
+				t.Fatalf("got %q (%v), want %q", got, err, tc.want)
+			}
+		})
 	}
 }

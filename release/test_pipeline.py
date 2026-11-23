@@ -1,11 +1,14 @@
 """Offline public CLI contracts with disposable keys and synthetic source/bundles."""
 import copy
+import hashlib
+import io
 import json
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 import unittest
@@ -18,6 +21,66 @@ import dev_plan
 import pipeline
 from biscuit_dev import ANCHOR, SEMVER_BASE
 from test_fixtures import inventory
+
+
+class BiscuitSourceTests(unittest.TestCase):
+    def test_release_binds_sendspin_source_and_notices_without_changing_historical_receipts(self):
+        def archive(files):
+            stream = io.BytesIO()
+            with tarfile.open(fileobj=stream, mode="w:gz") as tar:
+                for name, content in files.items():
+                    member = tarfile.TarInfo(name)
+                    member.size = len(content)
+                    tar.addfile(member, io.BytesIO(content))
+            return stream.getvalue()
+
+        sha = lambda data: hashlib.sha256(data).hexdigest()
+        source = {"alpine-source.tar.gz": b"alpine", "go-source.tar.gz": b"go", "go.mod": b"mod", "go.sum": b"sum"}
+        pins = {name: sha(data) for name, data in source.items()}
+        pins["linux-source.tar.gz"] = "1" * 64
+        manifest = {"kernel_image_sha256": "2" * 64, "dtb_sha256": "3" * 64}
+        kernel = {"source_sha256": pins["linux-source.tar.gz"], "files": {
+            "Image": {"sha256": manifest["kernel_image_sha256"]},
+            "biscuit-arm64-probe.dtb": {"sha256": manifest["dtb_sha256"]}}}
+        lock_path = "platforms/linuxsendspin/dependencies.lock.json"
+        lock = b'{"schema": 1}\n'
+        music = {"encore-sendspin": b"binary", "notices/README.txt": b"notice", "source.tar.gz": b"source kit"}
+        provenance = {"schema": 1, "target": "arm64", "dependencies": json.loads(lock),
+                      "artifacts": {name: sha(data) for name, data in music.items()}}
+        runtime = {"etc/encore-sendspin.json": json.dumps(provenance).encode(),
+                   "usr/local/bin/encore-sendspin": music["encore-sendspin"],
+                   "usr/share/licenses/encore/sendspin/README.txt": music["notices/README.txt"],
+                   "usr/share/licenses/encore/sendspin/dependencies.lock.json": lock}
+
+        def git(*args):
+            if args[:2] == ("git", "ls-tree"):
+                return b"" if historical else b"arm64-musl.cmake\n"
+            return {**source, lock_path: lock}[args[-1].split(":", 1)[1]]
+
+        scratch = pipeline.ROOT / ".amp/in/orb-backup"
+        scratch.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=scratch) as tmp, patch.object(pipeline, "biscuit_lock", return_value=(None, pins)), \
+                patch.object(pipeline, "run", side_effect=git):
+            sources = {role: Path(tmp) / role for role in ("alpine", "kernel")}
+            sources["kernel"].write_bytes(archive({"manifest.json": json.dumps(kernel).encode()}))
+
+            def verify(files, rootfs):
+                sources["alpine"].write_bytes(archive(files))
+                pipeline.verify_biscuit_sources({"source": "a" * 40}, manifest, sources, archive(rootfs))
+
+            historical = True
+            verify(source, {})
+            historical = False
+            with self.assertRaisesRegex(KeyError, "sendspin-source.tar.gz"):
+                verify(source, runtime)
+            source["sendspin-source.tar.gz"] = b"substituted"
+            with self.assertRaisesRegex(ValueError, "Sendspin source kit differs"):
+                verify(source, runtime)
+            source["sendspin-source.tar.gz"] = music["source.tar.gz"]
+            verify(source, runtime)
+            runtime["usr/share/licenses/encore/sendspin/README.txt"] = b"substituted"
+            with self.assertRaisesRegex(ValueError, "artifact differs from provenance: notices/README.txt"):
+                verify(source, runtime)
 
 
 class PipelineTests(unittest.TestCase):

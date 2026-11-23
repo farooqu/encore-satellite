@@ -189,6 +189,7 @@ listing:
 	// Cached commands for removed controls must not reach a missing worker.
 	sshEnabledKey := (&esphome.Base{ObjectID: "ssh_enabled"}).Key()
 	bluetoothKey := (&esphome.Base{ObjectID: "bluetooth_proxy"}).Key()
+	legacyMusicURLKey := (&esphome.Base{ObjectID: "sendspin_url"}).Key()
 	peer.send(&api.SwitchCommandRequest{Key: sshEnabledKey, State: true})
 	peer.send(&api.SwitchCommandRequest{Key: bluetoothKey, State: true})
 	peer.send(&api.SwitchCommandRequest{Key: musicKey, State: true})
@@ -206,7 +207,7 @@ listing:
 				t.Fatal("published unsupported switch state")
 			}
 		case *api.TextStateResponse:
-			if v.Key == musicURLKey {
+			if v.Key == legacyMusicURLKey {
 				t.Fatal("published unsupported Sendspin URL")
 			}
 		case *api.ExecuteServiceResponse:

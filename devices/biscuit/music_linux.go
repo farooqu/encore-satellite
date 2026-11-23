@@ -5,9 +5,12 @@ import (
 	"errors"
 	"log"
 	"net"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/libp2p/zeroconf/v2"
 	esphome "github.com/ygelfand/go-esphome-device"
 	"github.com/ygelfand/go-esphome-device/api"
 	"google.golang.org/protobuf/proto"
@@ -45,57 +48,68 @@ func (s *settings) update(change func(*Config)) error {
 }
 
 type musicService struct {
-	mu                        sync.Mutex
-	settings                  *settings
-	player                    *speaker
-	name, url                 string
-	enabled                   bool
-	revision, runningRevision uint64
-	running                   bool
-	changed                   chan struct{}
-	commands                  chan linuxsendspin.Command
-	run                       func(context.Context, linuxsendspin.Options) error
+	mu       sync.Mutex
+	configMu sync.Mutex
+	settings *settings
+	player   *speaker
+	name     string
+	enabled  bool
+	revision uint64
+	worker   *musicWorker
+	changed  chan struct{}
+	discover func(context.Context) (string, error)
+	run      func(context.Context, linuxsendspin.Options) error
+}
+
+type musicWorker struct {
+	revision     uint64
+	ready        linuxsendspin.Readiness // guarded by musicService.mu
+	commands     chan linuxsendspin.CommandRequest
+	pausePending time.Time // physical Pause must be followed promptly by Stopped
+	resumePaused bool      // explicit Action pause in this authenticated group
+}
+
+func (w *musicWorker) updateReadiness(next linuxsendspin.Readiness) {
+	sameGroup := next.Ready && w.ready.Ready && next.Group != 0 && next.Group == w.ready.Group
+	if !sameGroup || !next.Stopped {
+		w.resumePaused = false
+	} else if w.ready.Playing {
+		w.resumePaused = time.Now().Before(w.pausePending)
+	}
+	// A different snapshot fences the pending command, even if the mask
+	// changed without any playback transition.
+	w.pausePending = time.Time{}
+	w.ready = next
 }
 
 func newMusic(c Config, s *settings, player *speaker) *musicService {
-	return &musicService{settings: s, player: player, name: c.Name, url: c.SendspinURL, enabled: c.Sendspin, changed: make(chan struct{}, 1), commands: make(chan linuxsendspin.Command, 1), run: linuxsendspin.Run}
+	return &musicService{settings: s, player: player, name: c.Name, enabled: c.Sendspin, changed: make(chan struct{}, 1), discover: discoverMusic, run: linuxsendspin.Run}
 }
-func (m *musicService) snapshot() (bool, string, uint64) {
+func (m *musicService) snapshot() (bool, uint64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.enabled, m.url, m.revision
+	return m.enabled, m.revision
 }
-func (m *musicService) configure(enabled *bool, url *string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if (enabled == nil || *enabled == m.enabled) && (url == nil || *url == m.url) {
+func (m *musicService) configure(enabled bool) error {
+	m.configMu.Lock()
+	defer m.configMu.Unlock()
+	wasEnabled, _ := m.snapshot()
+	if enabled == wasEnabled {
 		return nil
 	}
 	err := m.settings.update(func(c *Config) {
-		if enabled != nil {
-			c.Sendspin = *enabled
-		}
-		if url != nil {
-			c.SendspinURL = *url
-		}
+		c.Sendspin = enabled
 	})
 	if err != nil {
 		return err
 	}
-	if enabled != nil {
-		m.enabled = *enabled
-	}
-	if url != nil {
-		m.url = *url
-	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.enabled = enabled
 	m.revision++
 	// Kill audible output synchronously. Lifecycle teardown/replacement follows
 	// on the music worker, never while holding a voice/session lock.
 	m.player.StopMusic()
-	select {
-	case <-m.commands:
-	default:
-	}
 	select {
 	case m.changed <- struct{}{}:
 	default:
@@ -103,97 +117,271 @@ func (m *musicService) configure(enabled *bool, url *string) error {
 	return nil
 }
 
+// actionPlayback only takes over from idle voice for authoritative playback or
+// for a Stopped transition immediately following our own Pause. This SDK and
+// Music Assistant do not distinguish paused from stopped on the wire.
+func (m *musicService) actionPlayback() bool {
+	if m == nil {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	w := m.worker
+	if !m.enabled || w == nil || w.revision != m.revision || !w.ready.Ready {
+		return false
+	}
+	if w.ready.Playing {
+		if !m.player.PlayMusic() && w.ready.Supports(linuxsendspin.Pause) && w.queue(linuxsendspin.Pause) && w.ready.Group != 0 {
+			w.pausePending = time.Now().Add(5 * time.Second)
+		}
+		return true // Unsupported Pause is a no-op, not a voice invocation.
+	}
+	if w.ready.Stopped && w.resumePaused {
+		if w.ready.Supports(linuxsendspin.Play) {
+			m.player.PlayMusic()
+			w.queue(linuxsendspin.Play)
+		}
+		return true // Keep the resume intent if Play is unavailable or not acted on.
+	}
+	return false
+}
+
 // Only the intents this player implements are translated to companion commands.
 var sendspinCommands = map[music.Command]linuxsendspin.Command{
-	music.Play: linuxsendspin.Play,
-	music.Stop: linuxsendspin.Stop,
+	music.Play:     linuxsendspin.Play,
+	music.Stop:     linuxsendspin.Stop,
+	music.Pause:    linuxsendspin.Pause,
+	music.Next:     linuxsendspin.Next,
+	music.Previous: linuxsendspin.Previous,
 }
 
 func (m *musicService) command(intent music.Command) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	cmd, supported := sendspinCommands[intent]
-	ready := m.enabled && m.running && m.runningRevision == m.revision
-	if !intent.CanDispatch(ready, supported) {
-		return
-	}
-	switch intent {
-	case music.Play:
-		m.player.PlayMusic()
-	case music.Stop:
+	// Stop is a local safety action even with no companion, or a server
+	// that does not advertise the network Stop command.
+	if intent == music.Stop {
 		m.player.StopMusic()
 	}
+	w := m.worker
+	if !m.enabled || w == nil || w.revision != m.revision || !w.ready.Ready {
+		return
+	}
+	if intent == music.Stop {
+		select {
+		case <-w.commands:
+		default:
+		}
+	}
+	if intent == music.Play {
+		// This can resume local audio even when the remote queue is already
+		// playing and does not offer Play. Privacy still owns the final veto.
+		m.player.PlayMusic()
+	}
+	cmd := sendspinCommands[intent]
+	canDispatch := intent.CanDispatch(true, w.ready.Supports(cmd))
+	if intent == music.Stop || intent == music.Play || canDispatch {
+		// A separate explicit transport action takes ownership from the key.
+		w.resumePaused, w.pausePending = false, time.Time{}
+	}
+	if !canDispatch {
+		return
+	}
+	w.queue(cmd)
+}
+
+func (w *musicWorker) queue(cmd linuxsendspin.Command) bool {
 	// Latest explicit intent wins; privacy is independently enforced in Mixer.
 	select {
-	case <-m.commands:
+	case <-w.commands:
 	default:
 	}
 	select {
-	case m.commands <- cmd:
+	case w.commands <- linuxsendspin.CommandRequest{Command: cmd, Generation: w.ready.Generation}:
+		return true
 	default:
+		return false
 	}
 }
 
 func (m *musicService) Run(ctx context.Context) {
 	var cancel context.CancelFunc
 	var done chan error
+	var worker *musicWorker
 	var retry <-chan time.Time
-	stop := func() {
+	var retryRevision uint64
+	clear := func() {
 		m.mu.Lock()
-		m.running = false
-		m.mu.Unlock()
+		defer m.mu.Unlock()
+		if m.worker != nil {
+			m.worker = nil
+			m.player.StopMusic()
+		}
+	}
+	stop := func() {
+		clear()
 		if cancel != nil {
 			cancel()
 			<-done
 			cancel = nil
 			done = nil
 		}
-		m.player.StopMusic()
 	}
 	defer stop()
 	for {
-		enabled, url, revision := m.snapshot()
+		enabled, revision := m.snapshot()
+		if worker != nil && worker.revision != revision {
+			stop()
+			worker = nil
+			continue // Settings may have changed again while joining the old process.
+		}
+		if retryRevision != revision {
+			retry = nil
+		}
 		if enabled && done == nil && retry == nil {
+			w := &musicWorker{revision: revision, commands: make(chan linuxsendspin.CommandRequest, 1)}
 			childCtx, childCancel := context.WithCancel(ctx)
+			m.mu.Lock()
+			if revision != m.revision || ctx.Err() != nil {
+				m.mu.Unlock()
+				childCancel()
+				if ctx.Err() != nil {
+					return
+				}
+				continue
+			}
+			worker, m.worker = w, w
+			m.mu.Unlock()
 			cancel = childCancel
 			done = make(chan error, 1)
-			m.mu.Lock()
-			m.running, m.runningRevision = true, revision
-			m.mu.Unlock()
-			// Enabling/reconnection never releases an existing Stop/privacy latch.
-			// TODO(Sendspin): Make readiness and the command queue worker-scoped.
-			// Launch is not proof of a ready connection, and a command queued
-			// as the old worker exits can reach its replacement on retry.
-			opts := linuxsendspin.Options{Name: m.name, URL: url, StateDir: musicStateDir, Executable: musicExecutable, Output: m.player, Commands: m.commands}
-			go func(result chan error) { result <- m.run(childCtx, opts) }(done)
+			opts := linuxsendspin.Options{Name: m.name, StateDir: musicStateDir, Executable: musicExecutable, Output: m.player, Commands: w.commands,
+				OnReadiness: func(ready linuxsendspin.Readiness) {
+					m.mu.Lock()
+					defer m.mu.Unlock()
+					if m.worker != w || w.revision != m.revision || childCtx.Err() != nil {
+						return
+					}
+					if w.ready.Ready && !ready.Ready {
+						m.player.StopMusic()
+					}
+					w.updateReadiness(ready)
+				},
+			}
+			go func(result chan error) {
+				endpoint, err := m.discover(childCtx)
+				if err != nil {
+					result <- err
+					return
+				}
+				opts.URL = endpoint
+				result <- m.run(childCtx, opts)
+			}(done)
 		}
 		select {
 		case <-ctx.Done():
 			return
 		case <-m.changed:
-			m.mu.Lock()
-			stale := m.runningRevision != m.revision
-			m.mu.Unlock()
-			if stale {
-				stop()
-				retry = nil
-			}
 		case <-retry:
 			retry = nil
 		case err := <-done:
-			m.mu.Lock()
-			m.running = false
-			m.mu.Unlock()
+			clear()
 			cancel()
 			cancel = nil
 			done = nil
-			m.player.StopMusic()
 			if ctx.Err() == nil {
 				log.Printf("Sendspin stopped (%v); voice and BLE remain available", err)
 			}
+			retryRevision = worker.revision
+			worker = nil
 			retry = time.After(5 * time.Second)
 		}
 	}
+}
+
+// Discovery is Wi-Fi only and refuses to guess between different servers.
+// mDNS supplies a dial address, never credentials or proof of identity.
+func discoverMusic(ctx context.Context) (string, error) {
+	iface, err := net.InterfaceByName("wlan0")
+	if err != nil {
+		return "", errors.New("sendspin: Wi-Fi interface unavailable for discovery")
+	}
+	browseCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	entries := make(chan *zeroconf.ServiceEntry, 8)
+	done := make(chan error, 1)
+	go func() {
+		done <- zeroconf.Browse(browseCtx, "_sendspin-server._tcp", "local.", entries,
+			zeroconf.SelectIfaces([]net.Interface{*iface}), zeroconf.SelectIPTraffic(zeroconf.IPv4))
+	}()
+	return chooseMusicEndpoint(ctx, entries, done)
+}
+
+func chooseMusicEndpoint(ctx context.Context, entries <-chan *zeroconf.ServiceEntry, done <-chan error) (string, error) {
+	var instance, endpoint string
+	ambiguous := false
+	accept := func(entry *zeroconf.ServiceEntry) {
+		if url := musicEndpointFromAdvertisement(entry); url != "" {
+			if instance != "" && (instance != entry.Instance || endpoint != url) {
+				ambiguous = true
+			}
+			instance, endpoint = entry.Instance, url
+		}
+	}
+	// zeroconf can be blocked delivering an entry even after cancellation.
+	// Keep draining until Browse exits, including on ambiguous results.
+	for {
+		select {
+		case err := <-done:
+			if ctx.Err() != nil {
+				return "", ctx.Err()
+			}
+			if err != nil {
+				return "", errors.New("sendspin: mDNS browse failed")
+			}
+			if entries != nil {
+				for entry := range entries {
+					accept(entry)
+				}
+			}
+			if ambiguous {
+				return "", errors.New("sendspin: multiple servers discovered; advertise only one")
+			}
+			if endpoint == "" {
+				return "", errors.New("sendspin: no compatible server discovered on Wi-Fi")
+			}
+			return endpoint, nil
+		case entry, ok := <-entries:
+			if ok {
+				accept(entry)
+			} else {
+				entries = nil
+			}
+		}
+	}
+}
+
+func musicEndpointFromAdvertisement(entry *zeroconf.ServiceEntry) string {
+	if entry == nil || entry.Instance == "" || entry.Port < 1 || entry.Port > 65535 {
+		return ""
+	}
+	path := ""
+	for _, txt := range entry.Text {
+		if value, found := strings.CutPrefix(txt, "path="); found {
+			if path != "" || value != "/sendspin" {
+				return ""
+			}
+			path = value
+		}
+	}
+	if path == "" {
+		return ""
+	}
+	for _, ip := range entry.AddrIPv4 {
+		if addr := ip.To4(); addr != nil && addr.IsGlobalUnicast() {
+			return "ws://" + net.JoinHostPort(addr.String(), strconv.Itoa(entry.Port)) + path
+		}
+	}
+	return ""
 }
 
 // Dot adds its music controls before letting Proxy emit the sole ListEntitiesDone.
@@ -217,8 +405,22 @@ var (
 	speakerVolumeKey = speakerVolume.Key()
 	speakerMuteKey   = controls.SpeakerMute.Key()
 	musicKey         = controls.Sendspin.Key()
-	musicURLKey      = controls.SendspinURL.Key()
 )
+
+var musicButtons = []struct {
+	entity *api.ListEntitiesButtonResponse
+	intent music.Command
+}{
+	{musicButton("sendspin_pause", "Pause music", "mdi:pause"), music.Pause},
+	{musicButton("sendspin_next", "Next track", "mdi:skip-next"), music.Next},
+	{musicButton("sendspin_previous", "Previous track", "mdi:skip-previous"), music.Previous},
+}
+
+func musicButton(id, name, icon string) *api.ListEntitiesButtonResponse {
+	return &api.ListEntitiesButtonResponse{
+		ObjectId: id, Key: (&esphome.Base{ObjectID: id}).Key(), Name: name, Icon: icon,
+	}
+}
 
 func (d *biscuitControls) sensorSources() sensors.Sources {
 	var sources sensors.Sources
@@ -289,10 +491,7 @@ func (d *biscuitControls) writable() controls.Bindings {
 	if d.music != nil {
 		bindings = append(bindings,
 			controls.Sendspin.Bind(func(_ *esphome.Conn, v *api.SwitchCommandRequest) error {
-				return report(d.music.configure(&v.State, nil))
-			}),
-			controls.SendspinURL.Bind(func(_ *esphome.Conn, v *api.TextCommandRequest) error {
-				return report(d.music.configure(nil, &v.State))
+				return report(d.music.configure(v.State))
 			}),
 			controls.SendspinPlay.Bind(func(_ *esphome.Conn, _ *api.ButtonCommandRequest) error {
 				d.music.command(music.Play)
@@ -314,9 +513,25 @@ func (d *biscuitControls) Handle(ctx context.Context, c *esphome.Conn, msg proto
 		}
 	}
 	switch v := msg.(type) {
+	case *api.ButtonCommandRequest:
+		if d.music != nil && v.DeviceId == 0 {
+			for _, button := range musicButtons {
+				if v.Key == button.entity.Key {
+					d.music.command(button.intent)
+					return nil
+				}
+			}
+		}
 	case *api.ListEntitiesRequest:
 		if err := d.writable().List(c.Send); err != nil {
 			return err
+		}
+		if d.music != nil {
+			for _, button := range musicButtons {
+				if err := c.Send(proto.Clone(button.entity)); err != nil {
+					return err
+				}
+			}
 		}
 		if err := d.sensorSources().List(c.Send); err != nil {
 			return err
@@ -373,8 +588,8 @@ func (d *biscuitControls) state(c *esphome.Conn) error {
 		states = append(states, d.updates.states()...)
 	}
 	if d.music != nil {
-		enabled, url, _ := d.music.snapshot()
-		states = append(states, &api.SwitchStateResponse{Key: musicKey, State: enabled}, &api.TextStateResponse{Key: musicURLKey, State: url})
+		enabled, _ := d.music.snapshot()
+		states = append(states, &api.SwitchStateResponse{Key: musicKey, State: enabled})
 	}
 	bindings := d.writable()
 	if err := bindings.SendStates(c.Send, states); err != nil {

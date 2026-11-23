@@ -5,6 +5,7 @@ import android.net.Uri
 import android.os.Build
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -20,20 +21,29 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.AbsoluteAlignment
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.scale
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.*
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.encore.engine.mobile.Mobile
@@ -47,7 +57,7 @@ private val Muted = Color(0xffa0afbd)
 @Composable
 internal fun EncoreScreen(state: EncoreState, onStart: () -> Unit, onTalk: () -> Unit, onStop: () -> Unit,
     onMuted: (Boolean) -> Unit, noiseKey: () -> String,
-    musicToken: () -> String, onMusicConnect: (String) -> Unit, onMusicDisconnect: () -> Unit,
+    musicToken: () -> String, onMusicEnable: (String?) -> Unit, onMusicDisconnect: () -> Unit,
     onMusicCommand: (String) -> Unit, onDismiss: () -> Unit, onUpdate: () -> Unit = {},
     onBluetooth: () -> Unit = {},
     reducedMotion: Boolean = systemReducedMotion(),
@@ -57,7 +67,7 @@ internal fun EncoreScreen(state: EncoreState, onStart: () -> Unit, onTalk: () ->
     dashboardAuth: DashboardAuth? = null,
     dashboardContent: (@Composable () -> Unit)? = null,
     onChooseHome: () -> Unit = {}, onNotificationSettings: () -> Unit = {}, onSetup: () -> Unit = {},
-    onStopAlert: (Long) -> Unit = { onStop() }) {
+    onStopAlert: (Long) -> Unit = { onStop() }, onMusicRevoke: () -> Unit = {}) {
     val voiceVisible = state.interactionVisible || state.microphoneVisible
     val runningTimers = state.timers.takeIf { state.running && state.connected && state.voiceKnown }.orEmpty()
     val ringing = state.voiceKnown && state.alertVisible && state.alert
@@ -94,6 +104,9 @@ internal fun EncoreScreen(state: EncoreState, onStart: () -> Unit, onTalk: () ->
         if (dashboardAuth?.attempt?.origin == pickerOrigin) dashboardAuth?.cancel()
         pickerOrigin = null
     }
+    val music = state.music
+    val showMusic = music.enabled && !music.stopped && music.groupPlayback != "stopped" &&
+        (music.playing || music.groupPlayback == "paused")
     fun closeSettings() { settingsVisible = false }
     fun closePanel() {
         if (panel == null) timersExpanded = false
@@ -136,7 +149,17 @@ internal fun EncoreScreen(state: EncoreState, onStart: () -> Unit, onTalk: () ->
                 Box(Modifier.fillMaxSize()) {
                     if (dashboardContent != null) dashboardContent()
                     else Dashboard(state, microphonePermissionGranted, onStart, onPairHomeAssistant,
-                        dashboardAuth, settingsVisible, displayOrigin, displayPages, swipeEnabled, reducedMotion)
+                        dashboardAuth, settingsVisible, displayOrigin, displayPages, swipeEnabled, reducedMotion,
+                        nowPlaying = if (showMusic) ({ minimize ->
+                            if (!voiceVisible) NowPlaying(music, onMusicCommand, state.audioInterrupted, landscape, minimize)
+                        }) else null,
+                        miniPlayer = { expand ->
+                            if (!voiceVisible) Box(Modifier.fillMaxSize().systemBarsPadding().padding(horizontal = 16.dp)
+                                .padding(bottom = if (landscape) 68.dp else 132.dp),
+                                contentAlignment = if (landscape) AbsoluteAlignment.BottomLeft else Alignment.BottomCenter) {
+                                MiniPlayer(music, onMusicCommand, state.audioInterrupted, expand)
+                            }
+                        })
                 }
                 if (!settingsVisible && !sheetVisible && (legacyVisible || pendingWake || dockTap != 0)) {
                     val buttons: @Composable () -> Unit = {
@@ -215,8 +238,8 @@ internal fun EncoreScreen(state: EncoreState, onStart: () -> Unit, onTalk: () ->
                     Surface(Modifier.fillMaxSize().testTag("settings-screen").semantics { paneTitle = "Satellite settings" }) {
                         if (choosing != null) DashboardPicker(choosing, displayPages.takeIf { choosing == displayOrigin }.orEmpty(),
                             dashboardAuth, ::closePicker) { saveDisplay(choosing, it); closeSettings() }
-                        else SettingsContent(state, noiseKey, musicToken, onMusicConnect, onMusicDisconnect, onMusicCommand, onUpdate, onBluetooth,
-                            dashboardAuth, onChooseHome, onNotificationSettings, { closeSettings(); onSetup() }, ::closeSettings,
+                        else SettingsContent(state, noiseKey, musicToken, onMusicEnable, onMusicDisconnect, onMusicCommand, onUpdate, onBluetooth,
+                            dashboardAuth, onChooseHome, onNotificationSettings, { closeSettings(); onSetup() }, onMusicRevoke, ::closeSettings,
                             displayOrigin, displayPages, { pickerOrigin = it }, { saveDisplay(displayOrigin, it) })
                     }
                 }
@@ -283,16 +306,183 @@ internal fun EncoreScreen(state: EncoreState, onStart: () -> Unit, onTalk: () ->
     }
 }
 
+@Composable private fun NowPlaying(music: MusicState, command: (String) -> Unit, interrupted: Boolean,
+    landscape: Boolean, minimize: () -> Unit) {
+    val artwork: @Composable (Modifier) -> Unit = { modifier ->
+        val cover = music.artwork
+        Surface(modifier, shape = RoundedCornerShape(24.dp), shadowElevation = 12.dp, color = Color(0xff152e36)) {
+            if (cover != null) {
+                Image(cover.asImageBitmap(), contentDescription = "Album cover",
+                    modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
+            } else Box(Modifier.fillMaxSize().background(Brush.linearGradient(listOf(Color(0xff315752), Ink))),
+                contentAlignment = Alignment.Center) {
+                MusicGlyph("track", Mint, Modifier.size(76.dp))
+            }
+        }
+    }
+    val details: @Composable (Modifier) -> Unit = { modifier ->
+        Column(modifier, horizontalAlignment = if (landscape) Alignment.Start else Alignment.CenterHorizontally) {
+            val align = if (landscape) TextAlign.Start else TextAlign.Center
+            Column(horizontalAlignment = if (landscape) Alignment.Start else Alignment.CenterHorizontally,
+                modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite }) {
+                Text(musicPlaybackLabel(music, interrupted), color = Mint, letterSpacing = 1.4.sp,
+                    style = MaterialTheme.typography.labelLarge)
+                Spacer(Modifier.height(8.dp))
+                Text(music.title.ifBlank { "Sendspin music" }, textAlign = align, color = Color.White,
+                    style = if (landscape) MaterialTheme.typography.displaySmall else MaterialTheme.typography.headlineMedium,
+                    maxLines = 2, overflow = TextOverflow.Ellipsis)
+                if (music.artist.isNotBlank()) Text(music.artist, textAlign = align, color = Muted,
+                    style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            Spacer(Modifier.height(16.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                MusicIconButton(Mobile.SendspinPrevious, "Previous", Mobile.SendspinPrevious in music.commands, command)
+                MusicPlayPause(music, interrupted, command, prominent = true)
+                MusicIconButton(Mobile.SendspinNext, "Next", Mobile.SendspinNext in music.commands, command)
+                MusicIconButton(Mobile.SendspinStop, "Stop music", true, command)
+            }
+        }
+    }
+    BoxWithConstraints(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color(0xff19343b), Ink)))
+        .systemBarsPadding().padding(top = 16.dp, bottom = if (landscape) 64.dp else 128.dp),
+        contentAlignment = Alignment.Center) {
+        val coverSize = if (landscape) minOf((maxWidth - 120.dp) * .42f, maxHeight * .78f, 440.dp)
+            else minOf(maxWidth - 56.dp, maxHeight * .40f, 380.dp)
+        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(top = 8.dp, bottom = 12.dp)
+            .testTag("now-playing"), horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(if (landscape) 24.dp else 12.dp)) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                DisplayTime(landscape, Modifier.testTag("now-playing-time"))
+                IconButton(onClick = minimize, modifier = Modifier.size(48.dp)
+                    .semantics { contentDescription = "Minimize" }) {
+                    MusicGlyph("expand", Mint, Modifier.size(24.dp).rotate(180f))
+                }
+            }
+            if (landscape) {
+                Box(Modifier.fillMaxWidth().absolutePadding(left = 32.dp, right = 88.dp), contentAlignment = Alignment.Center) {
+                    Row(Modifier.widthIn(max = 960.dp).fillMaxWidth().padding(horizontal = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(24.dp)) {
+                        artwork(Modifier.size(coverSize))
+                        details(Modifier.weight(1f))
+                    }
+                }
+            } else {
+                Column(Modifier.widthIn(max = 480.dp).fillMaxWidth().padding(horizontal = 28.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    artwork(Modifier.size(coverSize))
+                    details(Modifier.fillMaxWidth())
+                }
+            }
+        }
+    }
+}
+
+@Composable private fun MiniPlayer(music: MusicState, command: (String) -> Unit, interrupted: Boolean, expand: () -> Unit) {
+    Surface(Modifier.widthIn(max = 360.dp).fillMaxWidth().testTag("floating-player"),
+        shape = RoundedCornerShape(20.dp), shadowElevation = 10.dp, color = Color(0xff1e383e)) {
+        Row(Modifier.padding(horizontal = 8.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+            TextButton(onClick = expand, modifier = Modifier.weight(1f).semantics { contentDescription = "Expand Now Playing" }) {
+                val cover = music.artwork
+                if (cover != null) Image(cover.asImageBitmap(), null, Modifier.size(32.dp).clip(RoundedCornerShape(6.dp)))
+                else MusicGlyph("track", Mint)
+                Column(Modifier.padding(start = 8.dp).weight(1f)) {
+                    Text(musicPlaybackLabel(music, interrupted), style = MaterialTheme.typography.labelSmall, color = Mint)
+                    Text(music.title.ifBlank { "Sendspin music" }, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                MusicGlyph("expand", Mint, Modifier.size(18.dp))
+            }
+            MusicPlayPause(music, interrupted, command, prominent = false)
+            MusicIconButton(Mobile.SendspinStop, "Stop music", true, command)
+        }
+    }
+}
+
+private fun musicPlaybackLabel(music: MusicState, interrupted: Boolean) = when {
+    !music.playing -> "Paused"
+    interrupted -> "Silent on this tablet"
+    else -> "Now playing"
+}
+
+@Composable private fun MusicPlayPause(music: MusicState, interrupted: Boolean, command: (String) -> Unit, prominent: Boolean) {
+    val resume = music.playing && interrupted
+    val pause = music.playing && !interrupted
+    val glyph = if (pause) Mobile.SendspinPause else Mobile.SendspinPlay
+    val label = when {
+        resume -> "Resume on this tablet"
+        pause -> "Pause"
+        else -> "Play"
+    }
+    val enabled = resume || glyph in music.commands
+    if (prominent) {
+        FilledIconButton(onClick = { command(if (resume) "resume" else glyph) }, enabled = enabled,
+            modifier = Modifier.size(56.dp).semantics { contentDescription = label },
+            colors = IconButtonDefaults.filledIconButtonColors(containerColor = Mint, contentColor = Ink)) {
+            MusicGlyph(glyph, LocalContentColor.current)
+        }
+    } else {
+        MusicIconButton(glyph, label, enabled) { command(if (resume) "resume" else it) }
+    }
+}
+
+@Composable private fun MusicIconButton(action: String, label: String, enabled: Boolean, command: (String) -> Unit) {
+    IconButton(onClick = { command(action) }, enabled = enabled, modifier = Modifier.semantics { contentDescription = label },
+        colors = IconButtonDefaults.iconButtonColors(contentColor = Color(0xffd7e8e8), disabledContentColor = Color(0xff688089))) {
+        MusicGlyph(action, LocalContentColor.current)
+    }
+}
+
+@Composable private fun MusicGlyph(action: String, color: Color, modifier: Modifier = Modifier.size(24.dp)) {
+    Canvas(modifier) {
+        scale(size.width / 24f, size.height / 24f, pivot = Offset.Zero) {
+            fun bar(x: Float, y: Float, width: Float, height: Float) =
+                drawRoundRect(color, Offset(x, y), Size(width, height), CornerRadius(1.3f))
+            fun triangle(base: Float, tip: Float) = drawPath(Path().apply {
+                moveTo(base, 5f); lineTo(tip, 12f); lineTo(base, 19f); close()
+            }, color)
+            when (action) {
+                Mobile.SendspinPlay -> triangle(8f, 19f)
+                Mobile.SendspinPause -> { bar(6f, 5f, 4f, 14f); bar(14f, 5f, 4f, 14f) }
+                Mobile.SendspinPrevious -> { bar(4f, 5f, 2f, 14f); triangle(19f, 7f) }
+                Mobile.SendspinNext -> { triangle(5f, 17f); bar(18f, 5f, 2f, 14f) }
+                Mobile.SendspinStop -> bar(6f, 6f, 12f, 12f)
+                "expand" -> drawPath(Path().apply {
+                    moveTo(5f, 15f); lineTo(12f, 8f); lineTo(19f, 15f)
+                }, color, style = Stroke(width = 2f, cap = StrokeCap.Round))
+                "track" -> {
+                    bar(3f, 10f, 2.5f, 4f); bar(8f, 6f, 2.5f, 12f)
+                    bar(13f, 3f, 2.5f, 18f); bar(18f, 8f, 2.5f, 8f)
+                }
+            }
+        }
+    }
+}
+
 @OptIn(ExperimentalLayoutApi::class)
 @Composable private fun MusicControls(music: MusicState, command: (String) -> Unit, interrupted: Boolean) {
     Column(Modifier.fillMaxWidth()) {
-        Text(music.title.ifEmpty { "Sendspin · ${music.status}" }, maxLines = 1, style = MaterialTheme.typography.titleMedium)
+        val inactiveStatus = when {
+            music.stopped -> "Stopped on this tablet"
+            music.groupPlayback == "stopped" -> "Stopped"
+            music.groupPlayback == "paused" -> "Paused"
+            music.playing && interrupted -> "Silent on this tablet"
+            else -> ""
+        }
+        val status = inactiveStatus.ifEmpty { if (music.playing) "Now playing" else music.status }
+        Text(music.title.ifEmpty { "Sendspin · $status" }, maxLines = 1, overflow = TextOverflow.Ellipsis,
+            style = MaterialTheme.typography.titleMedium, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
         if (music.artist.isNotEmpty()) Text(music.artist, color = MaterialTheme.colorScheme.onSurfaceVariant,
             maxLines = 1, style = MaterialTheme.typography.bodySmall)
+        if (music.title.isNotEmpty() && inactiveStatus.isNotEmpty()) Text(inactiveStatus, color = MaterialTheme.colorScheme.onSurfaceVariant)
         FlowRow {
-            if (music.playing && interrupted) TextButton(onClick = { command("resume") }) { Text("Resume audio") }
-            val action = if (music.playing) Mobile.SendspinPause else Mobile.SendspinPlay
-            TextButton(onClick = { command(action) }, enabled = action in music.commands) { Text(if (music.playing) "Pause" else "Play") }
+            val resume = music.playing && interrupted && !music.stopped
+            val pause = music.playing && !music.stopped
+            val action = if (pause) Mobile.SendspinPause else Mobile.SendspinPlay
+            TextButton(onClick = { command(if (resume) "resume" else action) },
+                enabled = resume || action in music.commands || (music.stopped && music.playing)) {
+                Text(if (resume) "Resume on this tablet" else if (pause) "Pause" else "Play")
+            }
+            TextButton(onClick = { command(Mobile.SendspinStop) }, enabled = !music.stopped) { Text("Stop music") }
+            TextButton(onClick = { command(Mobile.SendspinPrevious) }, enabled = Mobile.SendspinPrevious in music.commands) { Text("Previous") }
             TextButton(onClick = { command(Mobile.SendspinNext) }, enabled = Mobile.SendspinNext in music.commands) { Text("Next") }
         }
     }
@@ -306,7 +496,8 @@ internal fun trustedNavigation(origin: String, value: String): Boolean {
 
 @Composable private fun Dashboard(state: EncoreState, microphonePermissionGranted: Boolean,
     onRequestPermission: () -> Unit, onPairHomeAssistant: () -> Unit, auth: DashboardAuth?, settingsVisible: Boolean,
-    origin: String, pages: List<DashboardPage>, swipeEnabled: Boolean, reducedMotion: Boolean) {
+    origin: String, pages: List<DashboardPage>, swipeEnabled: Boolean, reducedMotion: Boolean,
+    nowPlaying: (@Composable (minimize: () -> Unit) -> Unit)?, miniPlayer: @Composable (expand: () -> Unit) -> Unit) {
     val needsPermission = !state.running && !microphonePermissionGranted
     if (needsPermission || state.needsHomeAssistantSetup) {
         Box(Modifier.fillMaxSize().background(Color(0xff101d28)).padding(bottom = 88.dp), contentAlignment = Alignment.Center) {
@@ -329,7 +520,8 @@ internal fun trustedNavigation(origin: String, value: String): Boolean {
             }
         }
     } else {
-        DashboardCarousel(pages, swipeEnabled, reducedMotion) { page, visible ->
+        DashboardCarousel(pages, swipeEnabled, reducedMotion, nowPlaying, miniPlayer,
+            musicFocused = state.music.playing && !state.audioInterrupted && !state.voiceActive) { page, visible ->
             if (auth != null && auth.lostOrigin == origin) {
                 DashboardSignInNeeded(onPhone = if (supportsDashboardBridge()) ({ auth.start(origin) }) else null,
                     onTablet = auth::manualSignIn)
@@ -354,13 +546,12 @@ internal fun DashboardSignInNeeded(onPhone: (() -> Unit)?, onTablet: () -> Unit)
 }
 
 @Composable private fun SettingsContent(state: EncoreState, noiseKey: () -> String,
-    musicToken: () -> String, onMusicConnect: (String) -> Unit, onMusicDisconnect: () -> Unit,
+    musicToken: () -> String, onMusicEnable: (String?) -> Unit, onMusicDisconnect: () -> Unit,
     onMusicCommand: (String) -> Unit, onUpdate: () -> Unit, onBluetooth: () -> Unit, auth: DashboardAuth?,
-    onChooseHome: () -> Unit, onNotificationSettings: () -> Unit, onSetup: () -> Unit, close: () -> Unit,
+    onChooseHome: () -> Unit, onNotificationSettings: () -> Unit, onSetup: () -> Unit, onMusicRevoke: () -> Unit, close: () -> Unit,
     displayOrigin: String, displayPages: List<DashboardPage>, chooseDashboards: (String) -> Unit,
     updateDashboards: (List<DashboardPage>) -> Unit) {
     var details by remember { mutableStateOf(false) }
-    var sendspin by remember { mutableStateOf("") }
     val dashboardSignIn = auth?.takeIf { displayOrigin.startsWith("https://") && supportsDashboardBridge() }
     val account = dashboardSignIn?.saved?.takeIf { it.origin() == displayOrigin }
     Column(Modifier.fillMaxSize().systemBarsPadding().imePadding(), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -376,7 +567,7 @@ internal fun DashboardSignInNeeded(onPhone: (() -> Unit)?, onTablet: () -> Unit)
                     Text(state.name, style = MaterialTheme.typography.bodyMedium)
                 }
             }
-            if (state.music.enabled) MusicControls(state.music, onMusicCommand, state.audioInterrupted)
+            if (state.music.enabled && !state.music.awaitingServer) MusicControls(state.music, onMusicCommand, state.audioInterrupted)
             HorizontalDivider()
             Column {
                 Text("Device", Modifier.semantics { heading() }, style = MaterialTheme.typography.titleMedium)
@@ -398,18 +589,52 @@ internal fun DashboardSignInNeeded(onPhone: (() -> Unit)?, onTablet: () -> Unit)
                 Modifier.semantics { stateDescription = if (details) "Expanded" else "Collapsed" }) { details = !details }
             if (details) {
                 var secret by remember { mutableStateOf("") }
-                Text("Sendspin", Modifier.semantics { heading() }, style = MaterialTheme.typography.titleMedium)
-                OutlinedTextField(sendspin, { sendspin = it }, Modifier.fillMaxWidth(), label = { Text("Sendspin host:port") }, singleLine = true)
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    TextButton(onClick = { onMusicConnect(sendspin) }) { Text("Connect music") }
-                    TextButton(onClick = onMusicDisconnect) { Text("Disconnect") }
+                var musicSecret by remember { mutableStateOf("") }
+                var revoke by remember { mutableStateOf(false) }
+                var serverDraft by remember { mutableStateOf<String?>(null) }
+                serverDraft?.let { draft ->
+                    val endpoint = MusicEndpoint.manual(draft)
+                    AlertDialog(onDismissRequest = { serverDraft = null }, title = { Text("Specify a Sendspin server") },
+                        text = {
+                            OutlinedTextField(draft, { serverDraft = it }, label = { Text("Host and port") },
+                                modifier = Modifier.fillMaxWidth(), singleLine = true, isError = draft.isNotBlank() && endpoint == null,
+                                supportingText = { Text("Enter host:port, optionally followed by a path. Example: music.local:8927") })
+                        },
+                        confirmButton = {
+                            TextButton(enabled = endpoint != null, onClick = { endpoint?.let { serverDraft = null; onMusicEnable(it.setting) } }) {
+                                Text("Save and connect")
+                            }
+                        },
+                        dismissButton = { TextButton(onClick = { serverDraft = null }) { Text("Cancel") } })
                 }
+                if (revoke) AlertDialog(onDismissRequest = { revoke = false }, title = { Text("Revoke Sendspin pairing?") },
+                    text = { Text("Music turns off, all trusted servers are removed, and the old pairing token stops working.") },
+                    confirmButton = { TextButton(onClick = { revoke = false; musicSecret = ""; onMusicRevoke() }) { Text("Revoke pairing") } },
+                    dismissButton = { TextButton(onClick = { revoke = false }) { Text("Cancel") } })
+                Text("Sendspin", Modifier.semantics { heading() }, style = MaterialTheme.typography.titleMedium)
+                val status = if (state.music.enabled) "Sendspin · ${state.music.status}"
+                    else if (state.manualMusicServer == null) "Off · finds a Sendspin server on this network when enabled" else "Off"
+                Text(status, Modifier.semantics { liveRegion = LiveRegionMode.Polite }, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (state.musicProblem.isNotEmpty()) {
+                    Text(state.musicProblem, Modifier.semantics { liveRegion = LiveRegionMode.Polite }, color = MaterialTheme.colorScheme.error)
+                }
+                state.manualMusicServer?.let { Text("Server: $it", color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                if (state.music.enabled) SettingsAction("Turn off music", onClick = onMusicDisconnect)
+                else SettingsAction("Enable music") { onMusicEnable(state.manualMusicServer) }
+                SettingsAction(if (state.manualMusicServer == null) "Specify server" else "Edit server") {
+                    serverDraft = state.manualMusicServer.orEmpty()
+                }
+                if (state.manualMusicServer != null) SettingsAction("Connect by auto-discovery") { onMusicEnable(null) }
                 Text("Pairing and recovery", Modifier.semantics { heading() }, style = MaterialTheme.typography.titleMedium)
                 if (!state.needsHomeAssistantSetup) {
                     SettingsAction("Reveal ESPHome encryption key") { secret = noiseKey() }
                 }
-                SettingsAction("Reveal Sendspin pairing token") { secret = musicToken() }
                 if (secret.isNotEmpty()) SelectionContainer { Text(secret, style = MaterialTheme.typography.bodySmall) }
+                SettingsAction(if (musicSecret.isEmpty()) "Reveal Sendspin pairing token" else "Hide Sendspin pairing token") {
+                    musicSecret = if (musicSecret.isEmpty()) musicToken() else ""
+                }
+                if (musicSecret.isNotEmpty()) SelectionContainer { Text(musicSecret, style = MaterialTheme.typography.bodySmall) }
+                SettingsAction("Revoke all Sendspin trust") { revoke = true }
                 account?.let { Text("Dashboard session ID: ${it.clientID()}", style = MaterialTheme.typography.bodySmall) }
             }
         }

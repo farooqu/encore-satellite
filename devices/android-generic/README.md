@@ -227,7 +227,7 @@ these devices, acoustic timings or model-backed enrollment/training.
    before the first dashboard; **Show only clock** removes the dashboard pages.
    The pages slide into view unless Android animations are disabled. Dashboards
    stay loaded when you switch pages, including when you return to the clock.
-   There is no automatic page change or screensaver.
+   There is no screensaver; only active Now Playing can trigger an idle return.
 
    Encore hides the Home Assistant sidebar and Lovelace header in the display
    WebView, without changing the dashboard or installing a Home Assistant plugin.
@@ -258,21 +258,44 @@ these devices, acoustic timings or model-backed enrollment/training.
      sign out from that tablet's dashboard. No need to re-pair ESPHome.
    Manual sign-in still works, including when the QR flow is unavailable. The
    tablet WebView permits only same-origin navigation (no external-IdP allowlist).
-5. Optionally connect a **current Noise-capable Sendspin server** by host:port in
-   **Settings → Connection details**. Reveal the Sendspin pairing token there and provision
-   it on the server. The player uses encrypted, Keystore-protected identity/trust;
-   it does not silently fall back to plaintext or admit unpaired playback.
-   Older plaintext-only servers are not compatible. Music can be disconnected
-   without changing voice, and microphone mute does not disable music. A voice
-   turn reduces the music track gain to 15%, retaining player volume/mute and sync.
+5. Sendspin is off by default. In **Settings → Connection details**, choose
+   **Enable music**. Encore automatically browses for `_sendspin-server._tcp.`
+   on the local network and connects when it finds exactly one compatible server.
+   If none or more than one are found, it waits and tries again. Choose
+   **Specify server** at any time to connect to a `host:port` with an optional
+   path (default `/sendspin`). The app remembers the address until you choose
+   **Connect by auto-discovery**. This setting is local to Android, not exposed
+   through ESPHome. Neither connection method grants trust. Reveal the
+   independent pairing token locally and enter it in the **Noise-capable**
+   server's pairing UI. The app stores
+   identity and trust with Android Keystore encryption. Unpaired playback and
+   plaintext-only servers are not supported.
+   **Turn off music** stops discovery and playback, and keeps trust;
+   **Revoke all Sendspin trust** also removes trusted servers and rotates the
+   token without replacing the device identity. Keep the token private.
+
+   Use Music Assistant for queues and grouping. The clock page becomes
+   **Now Playing** with the time, large album art when supplied, play/pause,
+   local Stop and supported skip controls. Swipe to a dashboard to use the
+   floating player. After leaving full Now Playing, Encore returns to the clock
+   after 30 seconds without touch only while music is playing with audio focus.
+   **Minimize** keeps the floating player on the clock and dashboards without
+   an automatic return. Tap its title to expand. The player yields to voice and
+   timer panels and disappears when the group or tablet stops.
+   Playback controls are also on the main Satellite settings page. A voice turn reduces music
+   track gain to 20% of its current player volume without pausing the group.
+   **Stop music**, explicitly enabling microphone privacy, and Android's
+   headphone/route-loss signal latch local music output off. Releasing privacy
+   does not resume playback; choose **Play** explicitly. Voice Stop still
+   cancels voice independently of music.
 
 The foreground service owns audio and network sockets independently of dashboard
 reloads and Activity rotation. The notification's **Stop satellite** action stops
 it until Encore returns to the foreground; reopening never silently reverses
 persisted microphone privacy. The service does not start itself in the background
-after reboot or process death.
-The music server address/connection is entered explicitly each time; identity and
-pairing records persist. The screen stays awake while the Activity is visible.
+after reboot or process death. An enabled player resumes discovery or reconnects
+to the manually selected address when Encore next starts, without clearing a
+saved local Stop. The screen stays awake while the Activity is visible.
 
 ## Use Encore as the Android Home screen
 

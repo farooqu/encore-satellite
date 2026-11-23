@@ -2,7 +2,10 @@ package com.encore.satellite
 
 import android.Manifest
 import android.app.*
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.media.AudioAttributes
@@ -13,6 +16,7 @@ import android.net.nsd.NsdServiceInfo
 import android.os.Binder
 import android.os.Build
 import android.os.IBinder
+import androidx.core.content.ContextCompat
 import com.encore.engine.mobile.Mobile
 import com.encore.engine.mobile.Runtime
 import kotlinx.coroutines.*
@@ -39,6 +43,14 @@ class EncoreService : Service() {
     private var espHomeAdvertisement: NsdManager.RegistrationListener? = null
     private var musicHost: MusicHost? = null
     private var music: MusicPlayer? = null
+    private var musicRetry: Job? = null
+    private val musicPrefs by lazy { getSharedPreferences("sendspin", MODE_PRIVATE) }
+    private val musicDiscovery by lazy { MusicDiscovery(this, ::musicDiscovered) }
+    private val musicRoute = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (intent.action == AudioManager.ACTION_AUDIO_BECOMING_NOISY) stopMusic()
+        }
+    }
     private var light: LightSensorHost? = null
     private var microphoneForeground = false
     internal var awaitingUpdateMicrophone = false
@@ -57,6 +69,9 @@ class EncoreService : Service() {
         super.onCreate()
         audio = AudioIo(this)
         bluetooth = BluetoothHost(this)
+        mutable.value = mutable.value.copy(manualMusicServer = musicPrefs.getString("manual_server", null))
+        ContextCompat.registerReceiver(this, musicRoute, IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY),
+            ContextCompat.RECEIVER_NOT_EXPORTED)
         runCatching {
             Mobile.openWithBluetoothDefault(filesDir.resolve("engine").absolutePath, audio, bluetooth.supported).also {
                 it.configureHardware(Build.MANUFACTURER.orEmpty(), Build.MODEL.orEmpty())
@@ -91,15 +106,20 @@ class EncoreService : Service() {
                             mutable.value = next
                             if (espHomeChanged && next.running) {
                                 updateAdvertisements(engine, next.esphome)
-                                if (next.esphome == "paired" && microphoneForeground && !next.muted) {
-                                    runCatching { startMicrophone() }.onFailure {
-                                        setMuted(true)
-                                        problem("Microphone unavailable. Check permission and privacy controls before unmuting.")
+                                if (next.esphome == "paired") {
+                                    if (microphoneForeground && !next.muted) {
+                                        runCatching { startMicrophone() }.onFailure {
+                                            setMuted(true)
+                                            problem("Microphone unavailable. Check permission and privacy controls before unmuting.")
+                                        }
                                     }
+                                    if (musicEnabled() && !mutable.value.music.enabled) startMusic()
                                 }
                             }
-                            focus.update(next.voiceActive || next.music.playing, resume = newVoiceActivity)
-                            music?.duck(next.voiceActive)
+                            val current = mutable.value
+                            focus.update(current.voiceActive || (current.music.playing && !current.music.stopped),
+                                resume = newVoiceActivity && current.voiceActive)
+                            music?.duck(current.voiceActive)
                         }.onFailure {
                             engine.setMonitorVisible(mutable.value.monitorId, false)
                             audio.clearVisualization()
@@ -155,7 +175,7 @@ class EncoreService : Service() {
                     bluetoothStart -> ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
                     updateReconnect -> ServiceInfo.FOREGROUND_SERVICE_TYPE_NONE // pre-34 has no type requirement for this work
                     else -> ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
-                }) or
+                }) or (if (musicEnabled()) ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK else 0) or
                     (if (microphoneForeground) ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE else 0))
             else startForeground(1, notification)
             val engine = checkNotNull(runtime) { "Engine unavailable" }
@@ -177,9 +197,12 @@ class EncoreService : Service() {
                 mutable.value = mutable.value.copy(esphome = esphome)
                 updateAdvertisements(engine, esphome)
             }
-            if (enableMicrophone && intent?.getBooleanExtra("unmute", false) == true) engine.setMuted(false)
+            val unmute = enableMicrophone && intent?.getBooleanExtra("unmute", false) == true
+            if (unmute) engine.setMuted(false)
             if (microphoneForeground && !EncoreState.parse(engine.snapshot(audio.captureReady), mutable.value).muted) startMicrophone()
-            if (intent?.action == "music") connectMusic(intent.getStringExtra("address").orEmpty())
+            if (unmute) musicPrefs.edit().remove("privacy").apply()
+            if (intent?.action == "music") enableMusic(intent.getStringExtra("manual_server"))
+            else if (!mutable.value.music.enabled && musicEnabled()) startMusic()
             if (bluetoothStart) setBluetoothEnabled(true)
         } catch (error: Exception) {
             if (bluetoothStart) {
@@ -211,10 +234,15 @@ class EncoreService : Service() {
     }
 
     fun setMuted(value: Boolean) {
-        if (value) inhibitPresentation("muted", true)
+        if (value) {
+            inhibitPresentation("muted", true)
+            musicPrefs.edit().putBoolean("privacy", true).putBoolean("stopped", true).apply()
+            music?.stopped(true)
+        }
         runCatching {
             runtime?.setMuted(value)
             if (value) stopMicrophone() else if (mutable.value.running) startMicrophone()
+            if (!value) musicPrefs.edit().remove("privacy").apply()
         }.onFailure {
             runtime?.let { engine -> runCatching { engine.setMuted(true) } }
             stopMicrophone()
@@ -264,26 +292,125 @@ class EncoreService : Service() {
         runCatching { checkNotNull(runtime).pairHomeAssistant() }
             .onFailure { problem("Could not start Home Assistant pairing. Try again.") }
     }
-    fun musicToken(): String = runCatching { host().pairingToken() }.getOrElse { problem("Sendspin secure storage unavailable"); "" }
+    private fun musicProblem(message: String) { mutable.value = mutable.value.copy(musicProblem = message) }
+    internal fun musicEnabled() = musicPrefs.getBoolean("enabled", false)
+    fun musicToken(): String = runCatching { host().pairingToken() }
+        .getOrElse { musicProblem("Sendspin secure storage unavailable"); "" }
     private fun host(): MusicHost = musicHost ?: MusicHost(this).also { musicHost = it }
-    fun connectMusic(address: String) {
-        if (!mutable.value.running) { problem("Start the satellite before connecting Sendspin"); return }
-        if (mutable.value.esphome != "paired") { problem("Pair with Home Assistant before connecting Sendspin"); return }
-        disconnectMusic()
-        runCatching {
-            MusicPlayer(mutable.value.name, host()) { next -> mutable.value = mutable.value.copy(music = next) }
-                .also { music = it; focus.update(mutable.value.voiceActive || mutable.value.music.playing, resume = true)
-                    it.interrupted(!focus.focused); it.duck(mutable.value.voiceActive); it.connect(address) }
-        }.onFailure { disconnectMusic(); problem("Sendspin: ${it.message}") }
-    }
-    fun disconnectMusic() { music?.close(); music = null; mutable.value = mutable.value.copy(music = MusicState()) }
-    fun musicCommand(command: String) {
-        if (command == "resume") {
-            if (mutable.value.running && mutable.value.music.playing) focus.update(true, resume = true)
+    private fun enableMusic(server: String?) {
+        if (mutable.value.esphome != "paired") {
+            musicProblem("Pair with Home Assistant before connecting Sendspin")
             return
         }
-        if (command == "play" && command in mutable.value.music.commands) focus.update(true, resume = true)
-        music?.command(command)
+        val endpoint = server?.let(MusicEndpoint::manual)
+        if (server != null && endpoint == null) {
+            musicProblem("Enter a Sendspin host and port, without a scheme or credentials")
+            return
+        }
+        runCatching {
+            check(musicPrefs.edit().remove("address").putString("manual_server", endpoint?.setting).putBoolean("enabled", true).commit())
+            mutable.value = mutable.value.copy(manualMusicServer = endpoint?.setting)
+            startMusic()
+        }.onFailure { musicProblem("Could not save Sendspin setting") }
+    }
+    private fun startMusic() {
+        // Keep discovery and connections off until initial ESPHome pairing succeeds.
+        if (!mutable.value.running || mutable.value.esphome != "paired") return
+        closeMusic()
+        musicProblem("")
+        val server = mutable.value.manualMusicServer
+        val endpoint = server?.let(MusicEndpoint::manual)
+        when {
+            endpoint != null -> connectMusic(endpoint)
+            server != null -> {
+                mutable.value = mutable.value.copy(music = MusicState(enabled = true, awaitingServer = true, status = "Invalid saved server"))
+                musicProblem("Edit the saved Sendspin server or use auto-discovery")
+            }
+            else -> {
+                mutable.value = mutable.value.copy(music = MusicState(enabled = true, awaitingServer = true, status = "Looking for a server…"))
+                musicDiscovery.start()
+            }
+        }
+    }
+    private fun retryMusic() {
+        musicRetry?.cancel()
+        musicRetry = scope.launch {
+            delay(5_000)
+            musicRetry = null
+            if (musicEnabled()) startMusic()
+        }
+    }
+    private fun musicDiscovered(endpoint: MusicEndpoint?, message: String) {
+        if (endpoint == null) {
+            mutable.value = mutable.value.copy(music = MusicState(enabled = true, awaitingServer = true, status = "Waiting for a server"))
+            musicProblem(message)
+            retryMusic()
+            return
+        }
+        connectMusic(endpoint)
+    }
+    private fun connectMusic(endpoint: MusicEndpoint) {
+        runCatching {
+            MusicPlayer(mutable.value.name, host(), ::retryMusic) { next ->
+                mutable.value = mutable.value.copy(music = next)
+                focus.update(mutable.value.voiceActive || (next.playing && !next.stopped))
+                music?.interrupted(!focus.focused)
+            }.also {
+                music = it
+                it.interrupted(!focus.focused)
+                it.stopped(musicPrefs.getBoolean("stopped", false) || musicPrefs.getBoolean("privacy", false))
+                it.duck(mutable.value.voiceActive)
+                it.connect(endpoint)
+            }
+        }.onFailure {
+            closeMusic()
+            mutable.value = mutable.value.copy(music = MusicState(enabled = true, status = "Could not start Sendspin"))
+            musicProblem("Sendspin unavailable; check secure storage")
+        }
+    }
+    private fun closeMusic() {
+        musicRetry?.cancel()
+        musicRetry = null
+        musicDiscovery.stop()
+        music?.close()
+        music = null
+        mutable.value = mutable.value.copy(music = MusicState())
+        focus.update(mutable.value.voiceActive)
+    }
+    fun disconnectMusic() {
+        closeMusic()
+        musicProblem(if (musicPrefs.edit().putBoolean("enabled", false).commit()) "" else "Could not save Sendspin setting")
+    }
+    fun revokeMusic() {
+        closeMusic()
+        runCatching {
+            check(musicPrefs.edit().putBoolean("enabled", false).commit())
+            host().revokeAll()
+            musicHost = null
+            musicProblem("")
+        }.onFailure { musicProblem("Could not revoke Sendspin pairing") }
+    }
+    private fun stopMusic() {
+        music?.stopped(true)
+        if (music != null) musicPrefs.edit().putBoolean("stopped", true).apply()
+    }
+    fun musicCommand(command: String) {
+        val player = music ?: return
+        when (command) {
+            Mobile.SendspinStop -> { stopMusic(); player.command(command) }
+            Mobile.SendspinPlay, "resume" -> {
+                if (musicPrefs.getBoolean("privacy", false)) { musicProblem("Turn off microphone privacy before playing music"); return }
+                if (command == "resume" || (mutable.value.music.stopped && player.playing)) {
+                    if (!player.playing) return
+                } else if (!player.command(command)) return
+                focus.update(true, resume = true)
+                if (!focus.focused) return
+                musicPrefs.edit().remove("stopped").apply()
+                musicProblem("")
+                player.stopped(false)
+            }
+            else -> player.command(command)
+        }
     }
     fun dismissProblem() { runtime?.dismissProblem(); mutable.value = mutable.value.copy(problem = "") }
     private fun problem(message: String) { mutable.value = mutable.value.copy(problem = message) }
@@ -333,11 +460,11 @@ class EncoreService : Service() {
         inhibitPresentation("muted", true)
         if (!awaitingUpdateMicrophone) runtime?.let { runCatching { it.setMuted(true) } }
         stopMicrophone()
+        closeMusic()
         bluetooth.running(false)
         runtime?.close()
         light?.close()
         light = null
-        disconnectMusic()
         val manager = getSystemService(NsdManager::class.java)
         advertisements.forEach { runCatching { manager.unregisterService(it) } }
         advertisements.clear()
@@ -348,7 +475,7 @@ class EncoreService : Service() {
         stopForeground(STOP_FOREGROUND_REMOVE)
     }
 
-    override fun onDestroy() { shutdown(); scope.cancel(); audio.release(); super.onDestroy() }
+    override fun onDestroy() { unregisterReceiver(musicRoute); shutdown(); scope.cancel(); audio.release(); super.onDestroy() }
 }
 
 /** Desired playback is not a focus grant. Only a new intent retries a lost/denied grant. */

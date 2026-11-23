@@ -149,15 +149,38 @@ def biscuit_lock(source):
     return hashlib.sha256(data).hexdigest(), lock["sha256"]
 
 
-def verify_biscuit_sources(receipt, manifest, sources):
-    _, pins = biscuit_lock(receipt["source"])
+def verify_biscuit_sources(receipt, manifest, sources, rootfs):
+    source = receipt["source"]
+    _, pins = biscuit_lock(source)
     with tarfile.open(sources["alpine"]) as archive:
         for name in ("alpine-source.tar.gz", "go-source.tar.gz"):
             with archive.extractfile(name) as stream:
                 require(hashlib.file_digest(stream, "sha256").hexdigest() == pins[name], f"unexpected {name}")
         for name in ("go.mod", "go.sum"):
-            require(archive.extractfile(name).read() == run("git", "show", f"{receipt['source']}:{name}"),
+            require(archive.extractfile(name).read() == run("git", "show", f"{source}:{name}"),
                     f"source kit {name} differs from receipt source")
+        # Historical starters and native pairs predate the AArch64 companion.
+        # Key the requirement to the receipt's source, not the candidate's claims.
+        if run("git", "ls-tree", "--name-only", source, "--", "platforms/linuxsendspin/native/arm64-musl.cmake"):
+            with tarfile.open(fileobj=io.BytesIO(rootfs), mode="r:gz") as runtime:
+                music = json.load(runtime.extractfile("etc/encore-sendspin.json"), object_pairs_hook=unique)
+                lock = run("git", "show", f"{source}:platforms/linuxsendspin/dependencies.lock.json")
+                require(music["schema"] == 1 and music["target"] == "arm64" and music["dependencies"] == json.loads(lock),
+                        "Sendspin provenance differs from the receipt source")
+                artifacts = music["artifacts"]
+                require(runtime.extractfile("usr/share/licenses/encore/sendspin/dependencies.lock.json").read() == lock,
+                        "packaged Sendspin dependency lock differs from the receipt source")
+                require("notices/README.txt" in artifacts, "Sendspin provenance lacks notices")
+                deployed = {"encore-sendspin": "usr/local/bin/encore-sendspin"}
+                deployed.update({name: "usr/share/licenses/encore/sendspin/" + name.removeprefix("notices/")
+                                 for name in artifacts if name.startswith("notices/")})
+                for name, path in deployed.items():
+                    with runtime.extractfile(path) as stream:
+                        require(hashlib.file_digest(stream, "sha256").hexdigest() == artifacts[name],
+                                f"packaged Sendspin artifact differs from provenance: {name}")
+            with archive.extractfile("sendspin-source.tar.gz") as stream:
+                require(hashlib.file_digest(stream, "sha256").hexdigest() == artifacts["source.tar.gz"],
+                        "Sendspin source kit differs from the packaged companion")
     with tarfile.open(sources["kernel"]) as archive:
         kernel = json.load(archive.extractfile("manifest.json"), object_pairs_hook=unique)
         require(kernel["source_sha256"] == pins["linux-source.tar.gz"] and
@@ -339,8 +362,8 @@ def prepare(spec, output, aapt="aapt", apksigner="apksigner"):
         paths["ota"] = ota
         receipt["compatibility"] = {"format": NATIVE_STARTER}
         receipt["ota"] = record(ota)
-        manifest, _ = inspect_native_pair(receipt, paths["artifact"])
-        verify_biscuit_sources(receipt, manifest, sources)
+        manifest, files = inspect_native_pair(receipt, paths["artifact"])
+        verify_biscuit_sources(receipt, manifest, sources, files["rootfs.tar.gz"])
     elif starter:
         manifest, rootfs, _ = load_biscuit_starter(paths["artifact"], receipt["artifact"]["sha256"])
         receipt["ota"] = {"name": "rootfs.tar.gz", "sha256": hashlib.sha256(rootfs).hexdigest(), "size": len(rootfs)}
@@ -350,7 +373,7 @@ def prepare(spec, output, aapt="aapt", apksigner="apksigner"):
         require(hashes.keys() <= tracked and manifest.get("sources") == hashes,
                 "ARM64 build inputs differ from the clean release source")
         receipt["compatibility"] = {"format": ARM64_STARTER}
-        verify_biscuit_sources(receipt, manifest, sources)
+        verify_biscuit_sources(receipt, manifest, sources, rootfs)
     elif main_android:
         receipt["identity"] = "main"
     else:
@@ -412,7 +435,8 @@ def verify_assets(directory, receipt, *, signed):
                 "ARM64 starter compatibility mismatch")
         with zipfile.ZipFile(path) as zipfile_:
             manifest = json.loads(zipfile_.read("manifest.json"), object_pairs_hook=unique)
-        verify_biscuit_sources(receipt, manifest, {role: directory / item["name"] for role, item in receipt["sources"].items()})
+            rootfs = zipfile_.read("rootfs.tar.gz")
+        verify_biscuit_sources(receipt, manifest, {role: directory / item["name"] for role, item in receipt["sources"].items()}, rootfs)
     require(gzip.decompress((directory / receipt["sources"]["encore"]["name"]).read_bytes()) ==
             run("git", "archive", "--format=tar", receipt["source"]), "Encore archive differs from exact source")
 

@@ -63,9 +63,9 @@ does not need this rename for physical preflight; no device migration is perform
   unqualified.
 - Source-backed speaker routing, conservative software volume, 16→48 kHz stereo
   output to card 0/device 23, filtered voice interpolation and source-scoped drain.
-- Optional official Sendspin SDK companion with authenticated Music Assistant
-  pairing was built for the retired ARMv7 package. The ARM64 starter does not
-  ship a music companion; voice still uses Encore's ALSA mixer.
+- On images with the official Sendspin SDK companion installed, authenticated
+  Music Assistant playback uses the same production ALSA output as voice.
+  Sendspin is off by default and independent of the Incubator voice backend.
 - Authoritative hardware privacy-state reads around acquisition/delivery, buffer
   invalidation on mute, Action start/stop, volume buttons and a full-ring renderer.
   Driver-first mute is not toggled a second time. Never read `power_button_state`.
@@ -196,7 +196,7 @@ The Dot 2 mappings follow the pinned Techo5 wiring, not generic PC key guesses:
 |---|---|---|
 | + | 115 | Raise the shared physical speaker gain one step immediately; holding repeats every 200 ms. |
 | − | 114 | Lower that gain one step immediately; holding repeats every 200 ms down to silence. |
-| Action | 138 | Start manual Incubator voice when idle; stop a ringing timer or active voice and local music otherwise. |
+| Action | 138 | Dismiss a ringing timer or stop foreground voice/announcements and local music first. Otherwise pause/resume eligible [Sendspin music](#sendspin-music), or start manual Incubator voice when idle. |
 | Mute | 113 | Immediately inhibit capture/activation and silence voice/music, then follow the authoritative hardware privacy state. |
 
 The untuned master range is 0..120 (silence..unity), independently starting at
@@ -402,7 +402,7 @@ default to DROP; OUTPUT is allowed. The package owns these device filter tables.
 | TCP 6055, native Voice Incubator protocol 2 | Listens only after ESPHome pairing, on Wi-Fi. **Unauthenticated**; use only on a trusted LAN/VLAN, never port-forward. |
 | UDP 5353 | mDNS multicast destinations and unicast replies on Wi-Fi. |
 | DHCP and selected ICMP/IPv6 discovery | Allowed on Wi-Fi for address configuration, diagnostics and network operation. |
-| Sendspin | No inbound port: outbound authenticated connection and its replies only. |
+| Sendspin | Outbound authenticated connection only; optional discovery uses the existing Wi-Fi mDNS rule. |
 
 Loopback and established/related replies are allowed. Unlisted inbound ports,
 including TCP 22, remain closed. Physical USB serial is a separate root console,
@@ -410,32 +410,44 @@ not a firewall exception. Host packet tests do not qualify the Dot's vendor kern
 
 ## Sendspin music
 
-The following describes the optional companion integration exercised with the
-retired ARMv7 package, not setup instructions for the current ARM64 starter.
+On ARM64 images that include `/usr/local/bin/encore-sendspin`, the encrypted
+ESPHome endpoint exposes **Sendspin music**, **Resume
+music**, **Stop music**, **Pause music**, **Next track** and **Previous track**.
+There is no duplicate music media-player entity: use Music Assistant and its
+Home Assistant integration for music queues, grouping and ongoing playback.
+Music being off or the server being absent does not stop voice, BLE or first-boot
+Improv.
 
-The encrypted ESPHome endpoint exposes `Sendspin music`, `Sendspin server`,
-`Resume music` and `Stop music` in the Incubator package. Set the server to
-`ws://YOUR_MA_HOST:8927/sendspin`, then enable music. This is a WebSocket carrier
-for the SDK's authenticated Noise protocol, **not** permission for plaintext or
-guest playback. There is no automatic discovery or duplicate media-player
-entity: use Music Assistant and its HA integration for queues and media controls.
-Music being OFF or MA being absent does not stop voice, BLE or first-boot Improv.
+1. Enable the Sendspin provider on a Music Assistant version that supports
+   encrypted Sendspin and the device pairing-token setup. Leave **Sendspin
+   music** off on Biscuit. On the physical USB console, privately run
+   `encore-sendspin pairing-token --state /data/encore/sendspin`.
+2. Enable **Sendspin music** on Biscuit. It automatically discovers the
+   Sendspin provider on Wi-Fi. Plaintext and guest playback are not allowed.
+3. When the receiver appears in Music Assistant's player settings, open its
+   setup and paste the token from step 1 into the pairing-token prompt. After
+   pairing completes, press **Resume music** on Biscuit, then choose it as the
+   player in Music Assistant to start a queue.
 
-On initial pairing, leave music OFF and use the physical USB console privately:
-`encore-sendspin pairing-token --state /data/encore/sendspin`. Enter that token in
-Music Assistant's player setup, after enabling music so the receiver connects.
-Do not publish the token, pass it in the server URL or put it in logs. Maintenance
-commands require exclusive access, so turn music OFF before obtaining the token
-or running `encore-sendspin revoke-all --state /data/encore/sendspin`. Revocation
-retains the receiver identity, removes all trusted servers and rotates the token;
-the next connection requires pairing again. Trust survives rootfs-slot updates
-in the private `/data/encore/sendspin` directory. Corrupt state fails closed,
-not into an unpaired guest mode. Losing this private directory loses identity.
+Biscuit browses `_sendspin-server._tcp.local.` on Wi-Fi for the
+advertised IPv4 address, SRV port and `path=/sendspin`. It connects only when it
+sees one compatible server. If it doesn't connect, check that multicast is
+available between Biscuit and Music Assistant and that only one server is
+advertising. Discovery finds the address without granting trust. Biscuit does
+not advertise `_sendspin._tcp.local.` or open an inbound player port.
+
+Do not publish the token or put it in logs. Turn the
+music switch off before reading the token or running
+`encore-sendspin revoke-all --state /data/encore/sendspin`; maintenance needs the
+same exclusive lock as the player. Revocation retains the receiver identity,
+removes all trusted servers, rotates the token and requires pairing again. Trust
+survives rootfs-slot updates in the private `/data/encore/sendspin` directory.
+Corrupt state fails closed. Losing that directory loses the receiver identity.
 
 The companion is a separate C++20 process connected only by an inherited,
 versioned Unix packet socket. No HTTP PCM sink or new network control listener
 is installed. It negotiates PCM16/48 kHz/stereo; the Go mixer bounds music to
-100 ms plus a 20 ms DMA window and bounded IPC, and reports frames actually
+100 ms plus a 40 ms DMA lead and bounded IPC, and reports frames actually
 consumed according to ALSA delay and the SDK's raw monotonic clock. Voice uses
 separate queues and a filtered 16→48 kHz converter; voice Drain waits only for
 voice. The driver cannot atomically stop and snapshot DMA. A cancellation that
@@ -443,21 +455,43 @@ drops shared DMA discards uncertain frames and fences affected voice/music;
 music reconnects with a fresh epoch rather than replaying potentially heard
 samples or claiming they were consumed. Underruns similarly reset the output
 clock without terminating the runtime. Ordinary volume changes do not drop DMA
-and take effect within the bounded 20 ms window.
+and apply to newly mixed frames.
 Aggregate engine activity ducks **music only** to current user gain × 0.2 with
 a 20 ms ramp. Countdown alone does not duck; ringing timers do. Physical volume
 still applies the conservative Dot master limit to the combined, pre-limited
 signal, including simultaneous sources and filter overshoot. This route is
 not a claim that the Dot's single speaker is physically stereo.
 
-Privacy and Stop silence music immediately. Unmuting, reconnecting, a new stream
-or voice completion cannot clear that latch: use **Resume music** explicitly
-(and resume the MA queue if it is stopped). Enabling/reconfiguring also requires
-an explicit Resume. Action starts voice when idle and stops foreground voice
-and music otherwise. This does not pause the MA group or turn music into a voice
-session. Automatic room targeting, “play here” intents, wake-over-music and AEC
-are not implemented. Physical presentation latency, acoustic quality, power,
-CPU/RAM, underruns, Wi-Fi/BLE coexistence and timer recovery remain Dot tests.
+Privacy and **Stop music** silence local music even when no server command can
+be sent. Enabling, changing servers or losing the ready connection also latches
+local audio off. Biscuit reconnects in the background but does not replay old
+commands or clear that latch. Once the authenticated player is ready and hardware
+privacy is clear, press **Resume music** again. If a group is already playing,
+this can restore local sound even when the server does not offer a Play command.
+Pause, Next and Previous act on the Music Assistant group only when the server
+advertises them; Stop sends a group command on a best-effort basis in addition to
+always stopping the speaker. No ESPHome entity or setting is added for Action.
+
+When nothing in the foreground needs dismissal and hardware privacy is clear,
+Action pauses a known-playing Sendspin group. If the group is playing but the
+local speaker was stopped, Action resumes just the speaker instead, even if the
+server does not advertise Play. An Action-paused group can be resumed with the
+next press. These are best-effort group commands: if the required command is
+unavailable, the press does nothing rather than opening the microphone.
+
+The pinned Sendspin SDK reports Playing and Stopped, not a distinct Paused state,
+and Music Assistant reports Stopped on pause. Biscuit therefore offers Action
+resume only if it observes the same authenticated group go from Playing to
+Stopped within five seconds of its own Action Pause. This intent is not saved;
+regrouping, disconnect, new playback or another explicit transport control clears
+it. The wire does not acknowledge Pause, so an unrelated stop in that short
+window is indistinguishable. Cold idle, externally paused, disabled, unknown
+or disconnected music falls back to the existing voice action. Use Music
+Assistant or **Resume music** to resume an externally paused group.
+
+Automatic room targeting, “play here” intents, wake-over-music and music AEC are
+not implemented. Physical presentation latency, acoustic quality, power, CPU/RAM,
+underruns, Wi-Fi/BLE coexistence and timer recovery remain Dot tests.
 
 ## Build, fresh install and updates
 

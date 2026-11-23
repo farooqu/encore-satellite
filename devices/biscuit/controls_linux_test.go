@@ -18,6 +18,7 @@ import (
 	"github.com/farooqu/encore-satellite/core/session"
 	"github.com/farooqu/encore-satellite/platforms/linux"
 	"github.com/farooqu/encore-satellite/platforms/linux/input"
+	"github.com/farooqu/encore-satellite/platforms/linuxsendspin"
 )
 
 func TestButtonDiscoveryRequiresBoardHardwareGroups(t *testing.T) {
@@ -131,8 +132,8 @@ func buttonEvents(t *testing.T, gate *linux.Privacy, audio func() *buttonAudio, 
 	}
 }
 
-func pairedButtonEvents(t *testing.T, gate *linux.Privacy, engine *session.Engine, player *speaker) func(uint16, int32) {
-	a := &buttonAudio{engine: engine, player: player}
+func pairedButtonEvents(t *testing.T, gate *linux.Privacy, engine *session.Engine, player *speaker, music *musicService) func(uint16, int32) {
+	a := &buttonAudio{engine: engine, player: player, music: music}
 	return buttonEvents(t, gate, func() *buttonAudio { return a }, nil)
 }
 
@@ -188,7 +189,7 @@ func buttonMusic(t *testing.T) (*speaker, func() int16) {
 func TestButtonsVolumeTapHoldReleaseAndLimits(t *testing.T) {
 	s, sample := buttonMusic(t)
 	e := session.New(s)
-	key := pairedButtonEvents(t, linux.NewPrivacy(func() (bool, error) { return false, nil }), e, s)
+	key := pairedButtonEvents(t, linux.NewPrivacy(func() (bool, error) { return false, nil }), e, s, nil)
 	key(114, 1)
 	buttonWait(t, "minus did not lower speaker gain", func() bool { return sample() == 5900 })
 	// This keypad reports only down/up; software must repeat while held.
@@ -228,6 +229,110 @@ func (l *buttonLink) Send(c session.Command) error {
 	}
 }
 
+func TestButtonsActionSendspinPlayPause(t *testing.T) {
+	s, sample := buttonMusic(t)
+	e := session.New(s)
+	l := &buttonLink{commands: make(chan string, 16)}
+	if _, err := e.Attach(l); err != nil {
+		t.Fatal(err)
+	}
+	m := newMusic(Config{Sendspin: true}, nil, s)
+	w := &musicWorker{commands: make(chan linuxsendspin.CommandRequest, 1)}
+	m.worker = w
+	update := func(generation, group uint64, playing, stopped bool, commands uint32) {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		w.updateReadiness(linuxsendspin.Readiness{Generation: generation, Group: group, Ready: true,
+			Commands: commands, Playing: playing, Stopped: stopped})
+	}
+	const playPause = (1 << (linuxsendspin.Play - 1)) | (1 << (linuxsendspin.Pause - 1))
+	key := pairedButtonEvents(t, linux.NewPrivacy(func() (bool, error) { return false, nil }), e, s, m)
+	expectMusic := func(command linuxsendspin.Command, generation uint64) {
+		t.Helper()
+		select {
+		case got := <-w.commands:
+			if want := (linuxsendspin.CommandRequest{Command: command, Generation: generation}); got != want {
+				t.Fatalf("got %+v, want %+v", got, want)
+			}
+		case voice := <-l.commands:
+			t.Fatalf("Action sent voice command %q instead of music command %v", voice, command)
+		case <-time.After(time.Second):
+			t.Fatal("Action did not send music command", command)
+		}
+	}
+	update(1, 1, true, false, playPause)
+	key(138, 1)
+	expectMusic(linuxsendspin.Pause, 1)
+	key(138, 2)
+	key(138, 1)
+	// A volume key after the repeated events lets the actual evdev loop drain
+	// them before we deliver a Stopped state, with no sleep-based assertion.
+	key(114, 1)
+	key(114, 0)
+	buttonWait(t, "evdev reader did not process queued presses", func() bool {
+		steps, _ := s.outputState()
+		return steps < 50
+	})
+	if len(w.commands) != 0 {
+		t.Fatal("held Action repeated Pause")
+	}
+	key(138, 0)
+	update(2, 1, false, true, 0)
+	key(138, 1) // Unsupported Play is a no-op and does not lose a resumable pause.
+	key(138, 0)
+	key(115, 1)
+	key(115, 0)
+	buttonWait(t, "evdev reader did not process unavailable Play", func() bool {
+		steps, _ := s.outputState()
+		return steps == 50
+	})
+	if len(w.commands) != 0 || len(l.commands) != 0 {
+		t.Fatal("unavailable Play emitted a music or voice command")
+	}
+	update(3, 1, false, true, playPause)
+	key(138, 1)
+	expectMusic(linuxsendspin.Play, 3)
+	key(138, 0)
+	update(4, 1, true, false, 0) // No controller commands, but local Stop can resume.
+	s.StopMusic()
+	buttonWait(t, "local Stop did not silence music", func() bool { return sample() == 0 })
+	key(138, 1)
+	buttonWait(t, "Action did not resume local Stop without Play support", func() bool { return sample() == 6000 })
+	if len(w.commands) != 0 || len(l.commands) != 0 {
+		t.Fatal("local resume sent a group or voice command")
+	}
+	key(138, 0)
+	key(138, 1) // Now audible, but still no Pause support.
+	key(138, 0)
+	key(114, 1)
+	key(114, 0)
+	buttonWait(t, "evdev reader did not process unavailable Pause", func() bool {
+		steps, _ := s.outputState()
+		return steps < 50
+	})
+	if len(w.commands) != 0 || len(l.commands) != 0 {
+		t.Fatal("unavailable Pause emitted a music or voice command")
+	}
+	update(5, 1, true, false, playPause)
+	key(138, 1)
+	expectMusic(linuxsendspin.Pause, 5)
+	key(138, 0)
+	update(6, 1, false, true, playPause)
+	update(7, 2, false, true, playPause) // Joining a cold idle group cannot retain Action pause.
+	key(138, 1)
+	select {
+	case voice := <-l.commands:
+		if voice != "start" {
+			t.Fatalf("idle Action sent %q", voice)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("idle group advertised Play and hijacked Action")
+	}
+	if len(w.commands) != 0 {
+		t.Fatal("Action resumed a different group")
+	}
+}
+
 func TestButtonsActionStopsAlertBeforeStartingVoice(t *testing.T) {
 	s, sample := buttonMusic(t)
 	e := session.New(s)
@@ -237,7 +342,32 @@ func TestButtonsActionStopsAlertBeforeStartingVoice(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	key := pairedButtonEvents(t, linux.NewPrivacy(func() (bool, error) { return false, nil }), e, s)
+	m := newMusic(Config{Sendspin: true}, nil, s)
+	w := &musicWorker{commands: make(chan linuxsendspin.CommandRequest, 1), ready: linuxsendspin.Readiness{
+		Generation: 1, Group: 1, Ready: true, Playing: true, Commands: 1 << (linuxsendspin.Pause - 1),
+	}}
+	m.worker = w
+	key := pairedButtonEvents(t, linux.NewPrivacy(func() (bool, error) { return false, nil }), e, s, m)
+	announced := make(chan error, 1)
+	go func() {
+		_, err := e.Announce(t.Context(), func(ctx context.Context, _ func([]int16) error) error {
+			<-ctx.Done()
+			return ctx.Err()
+		})
+		announced <- err
+	}()
+	buttonWait(t, "announcement did not acquire foreground", func() bool { return e.Snapshot().Output.Owner == "announcement" })
+	key(138, 1)
+	key(138, 0)
+	select {
+	case err := <-announced:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Action did not cancel announcement: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Action did not stop announcement ahead of music")
+	}
+	s.PlayMusic()
 	if err := e.Handle(g, session.Event{Kind: "timer_ringing"}); err != nil {
 		t.Fatal(err)
 	}
@@ -253,6 +383,9 @@ func TestButtonsActionStopsAlertBeforeStartingVoice(t *testing.T) {
 	key(138, 0)
 	buttonWait(t, "timer/Action did not silence music", func() bool { return !e.Snapshot().Alert && sample() == 0 })
 	s.PlayMusic()
+	m.mu.Lock()
+	w.updateReadiness(linuxsendspin.Readiness{Generation: 2, Group: 1, Ready: true, Stopped: true})
+	m.mu.Unlock()
 	key(138, 1)
 	buttonWait(t, "idle Action did not start voice", func() bool { return e.Snapshot().Phase == "listening" })
 	if command := <-l.commands; command != "start" {
@@ -265,11 +398,17 @@ func TestButtonsActionStopsAlertBeforeStartingVoice(t *testing.T) {
 		t.Fatal("held Action retriggered voice cancellation")
 	}
 	buttonWait(t, "Action voice did not duck music", func() bool { return sample() == 1200 })
+	m.mu.Lock()
+	w.updateReadiness(linuxsendspin.Readiness{Generation: 3, Group: 1, Ready: true, Playing: true, Commands: 1 << (linuxsendspin.Pause - 1)})
+	m.mu.Unlock()
 	key(138, 0)
 	key(138, 1)
 	buttonWait(t, "second Action did not stop voice/music", func() bool { return e.Snapshot().Phase == "recovering" && sample() == 0 })
 	if command := <-l.commands; command != "cancel" {
 		t.Fatalf("active Action sent %q", command)
+	}
+	if len(w.commands) != 0 {
+		t.Fatal("foreground Action sent a music command")
 	}
 }
 
@@ -283,7 +422,12 @@ func TestButtonsMuteHonorsDriverLagAndBlocksAction(t *testing.T) {
 	}
 	var driver atomic.Bool
 	gate := linux.NewPrivacy(func() (bool, error) { return driver.Load(), nil })
-	key := pairedButtonEvents(t, gate, e, s)
+	m := newMusic(Config{Sendspin: true}, nil, s)
+	w := &musicWorker{commands: make(chan linuxsendspin.CommandRequest, 1), ready: linuxsendspin.Readiness{
+		Generation: 1, Group: 1, Ready: true, Playing: true, Commands: 1 << (linuxsendspin.Pause - 1),
+	}}
+	m.worker = w
+	key := pairedButtonEvents(t, gate, e, s, m)
 	key(113, 1) // Driver state still reports old unmuted value during its lag.
 	buttonWait(t, "mute did not immediately silence speaker/voice", func() bool { return e.Snapshot().Muted && sample() == 0 })
 	key(113, 0)
@@ -321,6 +465,9 @@ func TestButtonsMuteHonorsDriverLagAndBlocksAction(t *testing.T) {
 	}
 	if sample() != 0 {
 		t.Fatal("unmuting restarted stopped music")
+	}
+	if len(w.commands) != 0 {
+		t.Fatal("muted Action sent a group command")
 	}
 	select {
 	case command := <-l.commands:
@@ -381,7 +528,7 @@ func TestVolumeCuePhysicalPressNotHeldRepeatOrHA(t *testing.T) {
 	}
 	e := session.New(s)
 	e.SetActivityHandler(s.SetVoiceActive)
-	key := pairedButtonEvents(t, linux.NewPrivacy(func() (bool, error) { return false, nil }), e, s)
+	key := pairedButtonEvents(t, linux.NewPrivacy(func() (bool, error) { return false, nil }), e, s, nil)
 	nonzero := func() int {
 		pcm.mu.Lock()
 		defer pcm.mu.Unlock()

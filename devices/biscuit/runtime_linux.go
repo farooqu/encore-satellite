@@ -244,8 +244,12 @@ func Run(parent context.Context, c Config, probeReference bool) error {
 	}
 	controls.Proxy, controls.player, controls.management, controls.ring = proxy, player, admin, ringPolicy
 	controls.announcements, controls.microphone = announcements.New(engine), sensors.NewMicrophone(muted)
+	// The production ALSA mixer provides the same music output contract on
+	// both bases. Gate on the shipped companion, not the kernel or Go arch.
 	if packagedExecutable(musicExecutable) {
 		controls.music = newMusic(c, saved, player)
+	} else if c.Sendspin {
+		log.Print("Sendspin configured but companion is not installed; voice and BLE remain available")
 	}
 	voiceListener, err := net.Listen("tcp4", ":6055")
 	if err != nil {
@@ -263,7 +267,7 @@ func Run(parent context.Context, c Config, probeReference bool) error {
 		engine.SetMuted(true)
 		stop()
 	}()
-	buttonsAudio.Store(&buttonAudio{engine: engine, player: player})
+	buttonsAudio.Store(&buttonAudio{engine: engine, player: player, music: controls.music})
 	start(func() error {
 		select {
 		case <-ctx.Done():

@@ -76,6 +76,7 @@ func buttonGroup(name string) uint8 {
 type buttonAudio struct {
 	engine *session.Engine
 	player *speaker
+	music  *musicService
 }
 
 func buttons(ctx context.Context, d *input.Device, gate *linux.Privacy, audio func() *buttonAudio, apiAction chan<- struct{}) error {
@@ -186,7 +187,11 @@ func buttons(ctx context.Context, d *input.Device, gate *linux.Privacy, audio fu
 		case 138:
 			muted, _ := gate.Check(func() {
 				s := engine.Snapshot()
-				if s.Phase == "idle" && !s.Active && !s.Alert {
+				idle := !s.Active && !s.Alert
+				if idle && (s.Phase == "idle" || s.Phase == "disconnected") && buttonGroup(d.Name) == 4 && a.music.actionPlayback() {
+					return
+				}
+				if idle && s.Phase == "idle" {
 					_ = engine.StartManual()
 				} else {
 					player.StopMusic()

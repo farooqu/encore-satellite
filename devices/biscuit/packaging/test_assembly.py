@@ -459,6 +459,65 @@ class RootfsTests(unittest.TestCase):
             self.assertEqual(t.extractfile("usr/local/sbin/usb-rescue").read(), (HERE / "usb-rescue").read_bytes())
             self.assertTrue(set(obsolete).isdisjoint(t.getnames()))
 
+    def test_starter_replaces_legacy_sendspin_with_verified_arm64_and_notices(self):
+        elf = bytearray(176)
+        elf[:6] = b"\x7fELF\x02\x01"
+        struct.pack_into("<H", elf, 18, 183)
+        struct.pack_into("<Q", elf, 32, 64)
+        struct.pack_into("<HH", elf, 54, 56, 2)
+        struct.pack_into("<I", elf, 64, 1)  # PT_LOAD
+        lock = starter_build.SENDSPIN / "dependencies.lock.json"
+        inputs = [starter_build.SENDSPIN / "build.py", lock, starter_build.SENDSPIN / "bridge_linux.go",
+                  HERE / "sendspin.sh", *(p for p in (starter_build.SENDSPIN / "native").rglob("*") if p.is_file())]
+        record = {"schema": 1, "target": "arm64", "dependencies": json.loads(lock.read_bytes()),
+                  "integration_sha256": {str(p.relative_to(starter_build.ROOT)): arm64_assemble.sha(p.read_bytes())
+                                         for p in inputs}}
+        artifacts = {"encore-sendspin": elf, "source.tar.gz": b"source kit", "notices/README.txt": b"notices"}
+        BACKUP.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=BACKUP) as d:
+            directory = Path(d)
+            (directory / "notices").mkdir()
+
+            def write_bundle():
+                for name, data in artifacts.items():
+                    (directory / name).write_bytes(data)
+                record["artifacts"] = {name: arm64_assemble.sha(data) for name, data in artifacts.items()}
+                (directory / "provenance.json").write_text(json.dumps(record))
+
+            write_bundle()
+            music = starter_build.load_sendspin(directory, target="arm64")
+            base = io.BytesIO()
+            with tarfile.open(fileobj=base, mode="w:gz") as archive:
+                for name in ("usr/local/bin/encore-sendspin", "etc/encore-sendspin.json",
+                             "usr/share/licenses/encore/sendspin/obsolete"):
+                    info = tarfile.TarInfo(name)
+                    info.size = 6
+                    archive.addfile(info, io.BytesIO(b"legacy"))
+            root = starter_build.starter_rootfs(base.getvalue(), {}, sendspin=music)
+            with tarfile.open(fileobj=io.BytesIO(root)) as archive:
+                path = "usr/local/bin/encore-sendspin"
+                self.assertEqual(archive.getnames().count(path), 1)
+                self.assertEqual(archive.getmember(path).mode, 0o755)
+                self.assertEqual(archive.extractfile(path).read(), elf)
+                self.assertEqual(archive.getnames().count("etc/encore-sendspin.json"), 1)
+                self.assertEqual(json.load(archive.extractfile("etc/encore-sendspin.json")), record)
+                self.assertEqual(archive.extractfile("usr/share/licenses/encore/sendspin/README.txt").read(), b"notices")
+                self.assertEqual(archive.extractfile("usr/share/licenses/encore/sendspin/dependencies.lock.json").read(), lock.read_bytes())
+                self.assertNotIn("usr/share/licenses/encore/sendspin/obsolete", archive.getnames())
+                self.assertFalse(any(name.endswith("source.tar.gz") for name in archive.getnames()))
+
+            (directory / "source.tar.gz").write_bytes(b"changed source kit")
+            with self.assertRaisesRegex(ValueError, "checksum mismatch: source.tar.gz"):
+                starter_build.load_sendspin(directory, target="arm64")
+            for offset, value, message in ((18, 40, "AArch64 ELF"), (120, 3, "statically linked AArch64"),
+                                           (120, 2, "static AArch64 Sendspin")):
+                with self.subTest(offset=offset, value=value):
+                    artifacts["encore-sendspin"] = corrupt = bytearray(elf)
+                    struct.pack_into("<H", corrupt, offset, value)
+                    write_bundle()
+                    with self.assertRaisesRegex(ValueError, message):
+                        starter_build.load_sendspin(directory, target="arm64")
+
 
 if __name__ == "__main__":
     unittest.main()

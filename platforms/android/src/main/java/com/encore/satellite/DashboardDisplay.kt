@@ -94,19 +94,30 @@ private fun dashboardPages(data: JSONArray): List<DashboardPage> =
         DashboardPage(path, entry.optString("title").trim().take(160).ifBlank { path })
     }.distinctBy { it.path }
 
-@Composable private fun DisplayClock() {
-    val context = LocalContext.current
-    val locale = LocalConfiguration.current.locales[0]
-    val timeFormat = DateFormat.getTimeFormat(context)
-    val dateFormat = DateFormat.getLongDateFormat(context)
-    val dayFormat = java.text.SimpleDateFormat("EEEE", locale)
+@Composable private fun displayDate(): Date {
     val now by produceState(System.currentTimeMillis()) {
         while (true) {
             delay(60_000 - value % 60_000)
             value = System.currentTimeMillis()
         }
     }
-    val date = Date(now)
+    return Date(now)
+}
+
+@Composable internal fun DisplayTime(landscape: Boolean, modifier: Modifier = Modifier) {
+    val format = DateFormat.getTimeFormat(LocalContext.current)
+    format.timeZone = TimeZone.getDefault()
+    Text(format.format(displayDate()), modifier, color = Color(0xfff1f7fa), maxLines = 1,
+        style = if (landscape) MaterialTheme.typography.displayMedium else MaterialTheme.typography.headlineLarge)
+}
+
+@Composable private fun DisplayClock() {
+    val context = LocalContext.current
+    val locale = LocalConfiguration.current.locales[0]
+    val timeFormat = DateFormat.getTimeFormat(context)
+    val dateFormat = DateFormat.getLongDateFormat(context)
+    val dayFormat = java.text.SimpleDateFormat("EEEE", locale)
+    val date = displayDate()
     // The user can change time zones while the app is acting as Android Home.
     val zone = TimeZone.getDefault()
     timeFormat.timeZone = zone
@@ -131,11 +142,12 @@ private fun dashboardPages(data: JSONArray): List<DashboardPage> =
 }
 
 @Composable internal fun DashboardCarousel(pages: List<DashboardPage>, swipeEnabled: Boolean, reducedMotion: Boolean = false,
-    content: @Composable (DashboardPage, Boolean) -> Unit) = if (pages.isEmpty()) {
-    DisplayClock()
-} else key(pages.map { it.path }) {
+    nowPlaying: (@Composable (minimize: () -> Unit) -> Unit)? = null,
+    miniPlayer: (@Composable (expand: () -> Unit) -> Unit)? = null,
+    musicFocused: Boolean = false,
+    content: @Composable (DashboardPage, Boolean) -> Unit) = key(pages.map { it.path }) {
     // Page 0 is the clock. Start on the first configured dashboard if there is one.
-    val pager = rememberPagerState(initialPage = 1) { pages.size + 1 }
+    val pager = rememberPagerState(initialPage = if (pages.isEmpty()) 0 else 1) { pages.size + 1 }
     val scope = rememberCoroutineScope()
     val motionDisabled by rememberUpdatedState(reducedMotion)
     fun navigate(target: Int) {
@@ -144,9 +156,35 @@ private fun dashboardPages(data: JSONArray): List<DashboardPage> =
             else pager.animateScrollToPage(target, animationSpec = tween(240))
         }
     }
-    val navigation = if (swipeEnabled) Modifier.testTag("dashboard-carousel")
+    val page = pager.settledPage
+    val hasMusic = nowPlaying != null
+    var minimized by remember(hasMusic) { mutableStateOf(false) }
+    var openedMusic by remember(hasMusic, minimized) { mutableStateOf(false) }
+    val fullMusic = page == 0 && hasMusic && !minimized
+    if (fullMusic && swipeEnabled && !openedMusic) SideEffect { openedMusic = true }
+    var touching by remember { mutableStateOf(false) }
+    var touchSequence by remember { mutableIntStateOf(0) }
+    val observeTouches = if (openedMusic && swipeEnabled && pages.isNotEmpty()) Modifier.pointerInput(Unit) {
+        try {
+            awaitEachGesture {
+                awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                touching = true
+                do {
+                    val event = awaitPointerEvent(PointerEventPass.Initial)
+                } while (event.changes.any { it.pressed })
+                touching = false
+                touchSequence++
+            }
+        } finally { touching = false }
+    } else Modifier
+    LaunchedEffect(page, openedMusic, swipeEnabled, musicFocused, touching, touchSequence) {
+        if (openedMusic && swipeEnabled && musicFocused && page != 0 && !touching) {
+            delay(30_000)
+            navigate(0)
+        }
+    }
+    val navigation = if (swipeEnabled && pages.isNotEmpty()) Modifier.testTag("dashboard-carousel")
         .semantics {
-            val page = pager.settledPage
             customActions = buildList {
                 if (page > 0) add(CustomAccessibilityAction("Previous display page") { navigate(page - 1); true })
                 if (page < pages.size) add(CustomAccessibilityAction("Next display page") { navigate(page + 1); true })
@@ -180,15 +218,23 @@ private fun dashboardPages(data: JSONArray): List<DashboardPage> =
                 }
             }
         } else Modifier
-    // Keep the clock and all configured WebViews mounted. Let our gesture observer arbitrate
-    // with the WebView, rather than letting the pager compete for its touch stream.
-    HorizontalPager(state = pager, modifier = Modifier.fillMaxSize().then(navigation),
-        userScrollEnabled = false, beyondViewportPageCount = pages.size,
-        key = { index -> if (index == 0) "clock" else pages[index - 1].path }) { index ->
-        val visible = index == pager.settledPage
-        Box(Modifier.fillMaxSize().semantics { if (!visible) hideFromAccessibility() }
-            .focusProperties { canFocus = visible }) {
-            if (index == 0) DisplayClock() else content(pages[index - 1], visible)
+    Box(Modifier.fillMaxSize().then(observeTouches)) {
+        // Keep the configured WebViews mounted; only the clock page swaps content.
+        HorizontalPager(state = pager, modifier = Modifier.fillMaxSize().then(navigation),
+            userScrollEnabled = false, beyondViewportPageCount = pages.size,
+            key = { index -> if (index == 0) "clock" else pages[index - 1].path }) { index ->
+            val visible = index == page
+            Box(Modifier.fillMaxSize().semantics { if (!visible) hideFromAccessibility() }
+                .focusProperties { canFocus = visible }) {
+                when {
+                    index != 0 -> content(pages[index - 1], visible)
+                    nowPlaying != null && !minimized && swipeEnabled -> nowPlaying { minimized = true }
+                    else -> DisplayClock()
+                }
+            }
+        }
+        if (hasMusic && !fullMusic && swipeEnabled) {
+            miniPlayer?.invoke { minimized = false; navigate(0) }
         }
     }
 }

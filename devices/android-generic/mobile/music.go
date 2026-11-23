@@ -7,6 +7,7 @@ import "github.com/farooqu/encore-satellite/core/music"
 const (
 	SendspinPlay     = string(music.Play)
 	SendspinPause    = string(music.Pause)
+	SendspinStop     = string(music.Stop)
 	SendspinNext     = string(music.Next)
 	SendspinPrevious = string(music.Previous)
 )
