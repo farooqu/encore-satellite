@@ -3,3 +3,8 @@
 - For Encore's native Voice Incubator sessions, [Voice Preview Edition running OHF Voice Incubator firmware](https://github.com/OHF-Voice/firmware-voice-incubator) is the default for what a user can do in each state and what the satellite does in response. Match the behavior, not the hardware or implementation.
 - Before changing wake, monitoring, Stop, follow-up, intercom, privacy, or model replacement, compare the actual Voice PE firmware and protocol paths at a named revision. Check the companion app when it owns part of the behavior. Distinguish source findings from on-device observations.
 - Depart from Voice PE only to solve a concrete problem, such as protecting microphone privacy, preventing stale audio or events from affecting a new turn, or accommodating target hardware. In the relevant project docs, record the Voice PE behavior and revision, what Encore does instead, why matching would be worse, and how to verify the exception. Treat unexplained differences as gaps, not precedents.
+
+## Shipping changes
+
+- Before Ship delivers changes, restack unpublished work when fixups or unrelated changes obscure the logical commits. Keep an already clean stack and never rewrite published commits.
+- Write the final commit subjects and trailers using the [release note conventions](release/publishing.md#conventional-commits). If delivery squashes commits, carry the relevant release note wording and trailers into the squash commit.
