@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -16,17 +17,15 @@ import (
 	"github.com/farooqu/encore-satellite/platforms/linuxble"
 )
 
-// Scanner uses BlueZ to own discovery and a receive-only HCI socket to retain
-// exact AD bytes (not a lossy reconstruction of Device1's cached properties).
-// BlueZ discovery is active scanning; do NOT advertise StateAndMode for this
-// scanner. On kernels without discovery filters, ordinary discovery may also
-// include BR/EDR inquiry and controller duplicate filtering remains enabled.
-// It never writes raw scan commands behind bluetoothd's back.
+// Scanner uses BlueZ for active discovery and, where supported, passive
+// advertisement monitoring. A receive-only HCI socket preserves exact AD
+// bytes in either mode without competing with bluetoothd for radio ownership.
 type Scanner struct {
-	mu      sync.Mutex
-	conn    *dbus.Conn
-	adapter dbus.ObjectPath
-	index   uint16
+	mu         sync.Mutex
+	conn       *dbus.Conn
+	adapter    dbus.ObjectPath
+	index      uint16
+	modeSwitch bool
 }
 
 func OpenScanner(ctx context.Context) (*Scanner, error) {
@@ -58,14 +57,31 @@ func OpenScanner(ctx context.Context) (*Scanner, error) {
 		c.Close()
 		return nil, err
 	}
-	return &Scanner{conn: c, adapter: adapter, index: uint16(i)}, nil
+	monitor := objects[adapter][monitorMgrIfc]
+	types, _ := monitor["SupportedMonitorTypes"].Value().([]string)
+	features, known := monitor["SupportedFeatures"].Value().([]string)
+	// An offloaded monitor may filter the controller's reports to its pattern.
+	// Only the software path has been qualified for unfiltered raw reports.
+	modeSwitch := slices.Contains(types, "or_patterns") && known && !slices.Contains(features, "controller-patterns")
+	return &Scanner{conn: c, adapter: adapter, index: uint16(i), modeSwitch: modeSwitch}, nil
 }
 
-func (s *Scanner) Scan(ctx context.Context, active bool, ready func() error, found func(ble.Advertisement)) (err error) {
+func (s *Scanner) SupportsScanModeSwitch() bool { return s.modeSwitch }
+
+func (s *Scanner) Scan(ctx context.Context, active bool, ready func() error, found func(ble.Advertisement)) error {
+	return s.scan(ctx, active, linuxble.Monitor, ready, found)
+}
+
+type captureAdvertisements func(context.Context, uint16, func() error, func(ble.Advertisement)) error
+
+func (s *Scanner) scan(ctx context.Context, active bool, capture captureAdvertisements, ready func() error, found func(ble.Advertisement)) (err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !active {
-		return errors.New("bluez: discovery supports active scanning only")
+		if !s.modeSwitch {
+			return errors.New("bluez: passive scanning is not supported on this adapter")
+		}
+		return s.scanPassive(ctx, capture, ready, found)
 	}
 	o := object(s.conn, s.adapter)
 	filter := map[string]dbus.Variant{"Transport": dbus.MakeVariant("le"), "DuplicateData": dbus.MakeVariant(true)}
@@ -86,7 +102,7 @@ func (s *Scanner) Scan(ctx context.Context, active bool, ready func() error, fou
 			}
 		}
 	}()
-	return linuxble.Monitor(ctx, s.index, func() error {
+	return capture(ctx, s.index, func() error {
 		if err := o.CallWithContext(ctx, adapterIfc+".StartDiscovery", 0).Err; err != nil {
 			// An interrupted call may have reached bluetoothd. Closing this
 			// private bus connection releases its discovery session too.

@@ -90,7 +90,8 @@ func (s scanner) Scan(ctx context.Context, _ bool, ready func() error, _ func(bl
 }
 
 type stateTestScanner struct {
-	fail chan struct{}
+	fail   chan struct{}
+	report chan struct{}
 }
 
 func (s stateTestScanner) Scan(ctx context.Context, active bool, ready func() error, found func(ble.Advertisement)) error {
@@ -109,8 +110,14 @@ func (s stateTestScanner) Scan(ctx context.Context, active bool, ready func() er
 		a.Address++
 	}
 	found(a)
-	<-ctx.Done()
-	return ctx.Err()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-s.report:
+			found(a)
+		}
+	}
 }
 
 func TestScannerStateAndModeRequests(t *testing.T) {
@@ -127,7 +134,7 @@ func TestScannerStateAndModeRequests(t *testing.T) {
 		{"switchable", true, passive},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			radio := stateTestScanner{fail: make(chan struct{})}
+			radio := stateTestScanner{fail: make(chan struct{}), report: make(chan struct{}, 1)}
 			p := bluetooth.New(radio, bluetooth.Options{Enabled: true, ModeSwitch: tc.modeSwitch})
 			l := &pipeListener{conns: make(chan net.Conn), done: make(chan struct{})}
 			s := &esphome.Server{Handler: p, Info: esphome.Info{BluetoothFeatures: p.Features()}, Logger: slog.New(slog.DiscardHandler)}
@@ -155,15 +162,19 @@ func TestScannerStateAndModeRequests(t *testing.T) {
 					t.Fatalf("got %v, want %s with mode %s and configured mode %s", got, state, mode, tc.configured)
 				}
 			}
-			checkScan := func(mode api.BluetoothScannerMode, address uint64) {
+			checkAdvertisement := func(address uint64) {
 				t.Helper()
-				checkState(esphome.ScannerStarting, mode)
-				checkState(esphome.ScannerRunning, mode)
 				ads := &api.BluetoothLERawAdvertisementsResponse{}
 				receive(t, peer, ads)
 				if len(ads.Advertisements) == 0 || ads.Advertisements[0].Address != address {
 					t.Fatalf("got %v, want raw advertisements from %x", ads, address)
 				}
+			}
+			checkScan := func(mode api.BluetoothScannerMode, address uint64) {
+				t.Helper()
+				checkState(esphome.ScannerStarting, mode)
+				checkState(esphome.ScannerRunning, mode)
+				checkAdvertisement(address)
 			}
 			send(t, peer, &api.SubscribeBluetoothLEAdvertisementsRequest{Flags: 1})
 			if tc.modeSwitch {
@@ -174,6 +185,11 @@ func TestScannerStateAndModeRequests(t *testing.T) {
 				checkScan(passive, 0xc0ffee123456)
 			} else {
 				checkScan(active, 0xc0ffee123457)
+				send(t, peer, &api.BluetoothScannerSetModeRequest{Mode: passive})
+				send(t, peer, &api.DeviceInfoRequest{})
+				receive(t, peer, &api.DeviceInfoResponse{})
+				radio.report <- struct{}{}
+				checkAdvertisement(0xc0ffee123457)
 			}
 			p.SetPaused(true)
 			checkState(esphome.ScannerStopped, tc.configured)
@@ -182,13 +198,9 @@ func TestScannerStateAndModeRequests(t *testing.T) {
 			checkState(esphome.ScannerStarting, tc.configured)
 			checkState(esphome.ScannerFailed, tc.configured) // Radio failed before ready; no RUNNING.
 
-			unsupported := api.BluetoothScannerMode(2)
-			if !tc.modeSwitch {
-				unsupported = passive
-			}
-			send(t, peer, &api.BluetoothScannerSetModeRequest{Mode: unsupported})
+			send(t, peer, &api.BluetoothScannerSetModeRequest{Mode: api.BluetoothScannerMode(2)})
 			if _, err := peer.Read(make([]byte, 1)); err != io.EOF {
-				t.Fatalf("unsupported mode must be rejected, read error = %v", err)
+				t.Fatalf("invalid mode must be rejected, read error = %v", err)
 			}
 		})
 	}

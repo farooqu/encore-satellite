@@ -21,23 +21,24 @@ import (
 // locks are held during radio I/O. Control messages coalesce rather than spawn
 // workers, and advertisements are expendable when the bounded queue fills.
 type Proxy struct {
-	scanner    ble.Scanner
-	mu         sync.Mutex
-	controlMu  sync.Mutex // Serialize persistence and application across clients.
-	conn       *esphome.Conn
-	active     bool
-	paused     bool
-	cancel     context.CancelFunc
-	wake       chan struct{}
-	dropped    atomic.Uint64
-	enabled    bool
-	save       func(bool) error
-	central    func(func(string, uint16, []byte), func(string)) (ble.Central, error)
-	pairing    bool
-	modeSwitch bool
-	links      *connections
-	switchKey  uint32
-	states     map[*esphome.Conn]*stateSubscription
+	scanner       ble.Scanner
+	mu            sync.Mutex
+	controlMu     sync.Mutex // Serialize persistence and application across clients.
+	conn          *esphome.Conn
+	active        bool
+	paused        bool
+	cancel        context.CancelFunc
+	wake          chan struct{}
+	dropped       atomic.Uint64
+	enabled       bool
+	save          func(bool) error
+	central       func(func(string, uint16, []byte), func(string)) (ble.Central, error)
+	pairing       bool
+	modeSwitch    bool
+	defaultActive bool
+	links         *connections
+	switchKey     uint32
+	states        map[*esphome.Conn]*stateSubscription
 }
 
 // Options holds host integration, not separate user switches. Enabled is the
@@ -46,12 +47,15 @@ type Proxy struct {
 // must successfully initialize GATT and its pairing agent before returning.
 // Pairing is true only on platforms implementing bonding; ModeSwitch is true
 // only when Scan honors both active and passive radio modes.
+// DefaultActive sets the switchable scanner's configured and initial mode;
+// a fixed scanner is always active.
 type Options struct {
-	Enabled     bool
-	SaveEnabled func(bool) error
-	OpenCentral func(func(string, uint16, []byte), func(string)) (ble.Central, error)
-	Pairing     bool
-	ModeSwitch  bool
+	Enabled       bool
+	SaveEnabled   func(bool) error
+	OpenCentral   func(func(string, uint16, []byte), func(string)) (ble.Central, error)
+	Pairing       bool
+	ModeSwitch    bool
+	DefaultActive bool
 }
 
 func New(scanner ble.Scanner, options Options) *Proxy {
@@ -59,6 +63,7 @@ func New(scanner ble.Scanner, options Options) *Proxy {
 	// scanning capability. This is not an initialized or simulated radio.
 	sw := &esphome.Switch{Base: esphome.Base{ObjectID: "bluetooth_proxy"}}
 	b := &Proxy{scanner: scanner, wake: make(chan struct{}, 1), enabled: options.Enabled,
+		active: options.DefaultActive, defaultActive: options.DefaultActive,
 		save: options.SaveEnabled, central: options.OpenCentral, pairing: options.Pairing,
 		modeSwitch: options.ModeSwitch, switchKey: sw.Key(), states: make(map[*esphome.Conn]*stateSubscription)}
 	b.links = newConnections(b)
@@ -158,11 +163,13 @@ func (b *Proxy) handle(c *esphome.Conn, msg proto.Message) (bool, error) {
 		b.closed(c)
 		return true, nil
 	case *api.BluetoothScannerSetModeRequest:
-		if !b.modeSwitch {
-			return true, errors.New("bluetooth: platform has fixed active scanning")
-		}
 		if m.Mode != api.BluetoothScannerMode_BLUETOOTH_SCANNER_MODE_ACTIVE && m.Mode != api.BluetoothScannerMode_BLUETOOTH_SCANNER_MODE_PASSIVE {
 			return true, errors.New("assist: invalid Bluetooth scanner mode")
+		}
+		if !b.modeSwitch {
+			// This request has no error response. Leave the fixed scanner and
+			// its advertisement subscription alone rather than close the connection.
+			return true, nil
 		}
 		b.mu.Lock()
 		defer b.mu.Unlock()
@@ -192,13 +199,14 @@ func (b *Proxy) closed(c *esphome.Conn) {
 	defer b.mu.Unlock()
 	if b.conn == c {
 		b.conn = nil
+		b.active = b.defaultActive
 		b.changed()
 	}
 }
 
 func (b *Proxy) scannerState(state esphome.ScannerState, active bool) *api.BluetoothScannerStateResponse {
 	configured := api.BluetoothScannerMode_BLUETOOTH_SCANNER_MODE_PASSIVE
-	if b.scanner != nil && !b.modeSwitch {
+	if b.scanner != nil && (!b.modeSwitch || b.defaultActive) {
 		configured = api.BluetoothScannerMode_BLUETOOTH_SCANNER_MODE_ACTIVE
 	}
 	mode := api.BluetoothScannerMode_BLUETOOTH_SCANNER_MODE_PASSIVE

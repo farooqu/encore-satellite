@@ -42,6 +42,9 @@ def starter_rootfs(base, binaries, version=None, ca=None, *, locked=False, sends
     files = {
         **{"usr/local/bin/" + name: (data, 0o755) for name, data in binaries.items()},
         "etc/encore-base": ((FORMAT + "\n").encode(), 0o644),
+        # BlueZ scan timing is in 0.625 ms units: 20 ms every 100 ms in either mode.
+        "etc/bluetooth/main.conf": (b"[LE]\nScanIntervalDiscovery=160\nScanWindowDiscovery=32\n"
+                                    b"ScanIntervalAdvMonitor=160\nScanWindowAdvMonitor=32\n", 0o644),
     }
     if sendspin is not None:
         record, artifacts = sendspin

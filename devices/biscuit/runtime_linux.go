@@ -230,7 +230,10 @@ func Run(parent context.Context, c Config, probeReference bool) error {
 	defer scanner.Close()
 	saved := &settings{path: ConfigPath, config: c}
 	proxy := bluetooth.New(scanner, bluetooth.Options{
-		Enabled: c.BluetoothProxy, Pairing: true,
+		Enabled: c.BluetoothProxy, Pairing: true, ModeSwitch: scanner.SupportsScanModeSwitch(),
+		// HA defaults to Auto for an active-configured proxy. Auto requests
+		// passive scanning except during on-demand active windows.
+		DefaultActive: true,
 		SaveEnabled: func(enabled bool) error {
 			return saved.update(func(next *Config) { next.BluetoothProxy = enabled })
 		},

@@ -13,7 +13,13 @@ import sys
 import tempfile
 
 import aiohttp
-from aioesphomeapi import APIClient, InvalidEncryptionKeyAPIError
+from aioesphomeapi import (
+    APIClient,
+    BluetoothProxyFeature,
+    BluetoothScannerMode,
+    BluetoothScannerState,
+    InvalidEncryptionKeyAPIError,
+)
 from aioesphomeapi.api_pb2 import BluetoothDeviceConnectionResponse
 from aioesphomeapi.core import BluetoothConnectionDroppedError, BluetoothGATTAPIError
 
@@ -32,6 +38,56 @@ async def radio_state(http, control, path="/state", **expected):
             if all(state[k] == v for k,v in expected.items()):
                 return state
             await asyncio.sleep(0.01)
+
+
+async def scan_mode_switching(start):
+    proc, client, _ = await start(mode_switch=True)
+    try:
+        await client.connect(login=True)
+        info = await client.device_info()
+        flags = info.bluetooth_proxy_feature_flags
+        assert flags == 47 | BluetoothProxyFeature.FEATURE_STATE_AND_MODE, info
+
+        states, reports, slots, connections = [], [], [], []
+        client.subscribe_bluetooth_scanner_state(states.append)
+        client.subscribe_bluetooth_le_raw_advertisements(reports.append)
+        client.subscribe_bluetooth_connections_free(lambda free, *_: slots.append(free))
+
+        passive, active = BluetoothScannerMode.PASSIVE, BluetoothScannerMode.ACTIVE
+        advertisement = b"\x02\x01\x06\x03\xff\x34\x12"
+        scan_response = advertisement + b"\x04\x09Lab"
+
+        async def check_scan(mode, data, since):
+            await until(lambda: states and states[-1].state == BluetoothScannerState.RUNNING
+                        and states[-1].mode == mode and len(reports) > since
+                        and bytes(reports[-1].advertisements[0].data) == data)
+            assert states[-1].configured_mode == active
+            assert reports[-1].advertisements[0].address == 0xc0ffee123456
+
+        await check_scan(active, scan_response, 0)
+        await until(lambda: slots and slots[-1] == 3)
+        address = 0xc0ffee123456
+        unsubscribe = await client.bluetooth_device_connect(
+            address, lambda *args: connections.append(args), feature_flags=flags, address_type=1,
+        )
+        try:
+            await until(lambda: slots[-1] == 2)
+            connected_slots = len(slots)
+            for mode, data in ((passive, advertisement), (active, scan_response), (passive, advertisement)):
+                since = len(reports)
+                client.bluetooth_scanner_set_mode(mode)
+                await check_scan(mode, data, since)
+                assert await client.bluetooth_gatt_read(address, 0x15) == b"\x19\x82\xe3"
+                assert all(free == 2 for free in slots[connected_slots:]), slots
+                assert connections == [(True, 77, 0)], connections
+            await client.bluetooth_device_disconnect(address)
+        finally:
+            unsubscribe()
+        print("PASS scan modes over Noise: starts active, switches both ways, and preserves GATT")
+    finally:
+        await client.disconnect()
+        proc.terminate()
+        await asyncio.wait_for(proc.wait(), 10)
 
 
 async def generation_handoffs(start, key):
@@ -175,9 +231,12 @@ async def main():
     with tempfile.TemporaryDirectory(dir=".amp/in/orb-backup") as directory:
         state = Path(directory) / "enabled"
 
-        async def start():
-            proc = await asyncio.create_subprocess_exec(sys.argv[1], stdout=asyncio.subprocess.PIPE,
-                env={**os.environ, "BLE_TEST_PSK": key, "BLE_TEST_STATE": str(state)})
+        async def start(*, mode_switch=False):
+            proc = await asyncio.create_subprocess_exec(
+                sys.argv[1], stdout=asyncio.subprocess.PIPE,
+                env={**os.environ, "BLE_TEST_PSK": key, "BLE_TEST_STATE": str(state),
+                     "BLE_TEST_MODE_SWITCH": str(mode_switch).lower()},
+            )
             endpoints = json.loads(await asyncio.wait_for(proc.stdout.readline(), 10))
             host, port = endpoints["api"].split(":")
             return proc, APIClient(host, int(port), "", noise_psk=key), endpoints["control"]
@@ -431,6 +490,8 @@ async def main():
             proc.terminate()
             await asyncio.wait_for(proc.wait(),10)
         await generation_handoffs(start,key)
+        state.write_text("true")
+        await scan_mode_switching(start)
 
 
 if __name__ == "__main__":

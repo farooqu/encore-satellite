@@ -518,6 +518,21 @@ class RootfsTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, message):
                         starter_build.load_sendspin(directory, target="arm64")
 
+    def test_starter_overlays_bluez_active_and_passive_scan_timing(self):
+        archive = io.BytesIO()
+        path = "etc/bluetooth/main.conf"
+        original = b"[LE]\nScanIntervalDiscovery=18\nScanWindowDiscovery=18\nScanIntervalAdvMonitor=96\nScanWindowAdvMonitor=48\n"
+        with tarfile.open(fileobj=archive, mode="w:gz") as t:
+            member = tarfile.TarInfo("./" + path)
+            member.size = len(original)
+            t.addfile(member, io.BytesIO(original))
+        packed = starter_build.starter_rootfs(archive.getvalue(), {}, locked=True)
+        with tarfile.open(fileobj=io.BytesIO(packed), mode="r:gz") as t:
+            self.assertEqual(t.getnames().count(path), 1)
+            self.assertEqual(t.extractfile(path).read(),
+                             b"[LE]\nScanIntervalDiscovery=160\nScanWindowDiscovery=32\n"
+                             b"ScanIntervalAdvMonitor=160\nScanWindowAdvMonitor=32\n")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -14,25 +14,36 @@ with the proxy OFF; forwarding advertisements does not provision Wi-Fi.
 - `platforms/linuxble/bluez` uses Linux Bluetooth and BlueZ D-Bus for discovery,
   GATT client operations, bonding and the Improv GATT server. A receive-only
   HCI socket preserves actual raw advertising bytes, address type and RSSI.
-  BlueZ discovery is active scanning; it does not pretend to offer passive/active
-  mode switching. No raw scan/reset commands compete with bluetoothd.
+  On Biscuit, active mode uses BlueZ discovery. Passive mode registers a
+  BlueZ software advertisement monitor on its own D-Bus connection and reads
+  raw HCI reports, not the monitor's pattern-matched callbacks. An adapter
+  without `or_patterns` support, or with controller pattern offload, stays
+  fixed-active. Another client's active discovery prevents passive scanning;
+  Encore reports scan failure rather than stopping the other client. Mode
+  changes release only the scan session, not GATT links or the controller.
 - `backends/bluetooth` implements the ESPHome native proxy protocol against
   `go-esphome-device v0.0.18`. Capability mask 47 is scan, active connections,
-  remote service caching, pairing, and raw advertisements. It does not advertise
-  cache clearing, connection-parameter setting, scanner-mode switching, or
-  extended advertisements. A scan-only direct-H4 host advertises only scan/raw
-  (and mode switching only if actually supported), never active GATT or pairing.
+  remote service caching, pairing, and raw advertisements. Biscuit adds
+  `FEATURE_STATE_AND_MODE` (64) when the scanner supports both modes. Biscuit
+  starts in active mode until the subscriber requests another mode. Home
+  Assistant uses this configured mode to default to **Auto** when no option
+  is saved: Auto requests passive and opens temporary active scan windows on
+  demand. Existing Home Assistant preferences are preserved. Neither mask
+  advertises cache clearing, connection-parameter setting or extended
+  advertisements. A scan-only direct-H4 host advertises scan/raw (and mode
+  switching only if supported), never active GATT or pairing.
 - Fixed-active proxies send scanner state on the advertisement subscription,
   with both the scan mode and configured mode set to active. `RUNNING` follows
   scanner readiness; pause/OFF and scan failure are distinct states. This is
   independent of advertisement delivery and slot allocation. Home Assistant
   Core 2026.11.1 with `bleak-esphome` 4.0.0 listens for these packets only when
   `FEATURE_STATE_AND_MODE` is set. Its frontend displays a missing current
-  mode as **No scanning**, even while receiving advertisements. Do not set that
-  bit for BlueZ discovery: HA can then send passive-mode requests, which this
-  scanner cannot honor. The compatible client fix is to listen for optional
-  state packets on raw subscriptions, while keeping mode commands, mode
-  settings and the first-state retry watchdog gated by the existing bit.
+  mode as **No scanning**, even while receiving advertisements. Fixed-mode
+  proxies leave the bit unset and ignore unsupported mode requests without
+  closing the API connection. [bleak-esphome PR #448](https://github.com/Bluetooth-Devices/bleak-esphome/pull/448)
+  listens for optional state packets on raw subscriptions, while keeping mode
+  commands, mode settings and the first-state retry watchdog gated by the
+  existing bit.
 - Just Works bonding uses a private `NoInputNoOutput` agent scoped to the
   requested device. PIN/passkey entry and numeric confirmation are rejected,
   not invented or silently approved. No global discoverability/default pairing
@@ -74,6 +85,15 @@ Linux Bluetooth stack, or an HCI user channel with bluetoothd stopped. It is
 Never open `/dev/stpbt` directly alongside btbridge. Unlike the direct scanner's
 18.75 ms/200 ms budget, BlueZ discovery's scan duty cycle is owned by BlueZ;
 audio/Wi-Fi coexistence needs target measurement, not an assumed identical budget.
+
+The Biscuit starter and native OTA rootfs set both BlueZ active discovery and
+passive monitoring to a 20 ms window every 100 ms (20% nominal duty cycle).
+In a channel-36 Office trial with confirmed 20% timings, passive transferred
+16–25 Mb/s and active transferred 29–43 Mb/s; all 72 pings returned. Stock
+50%-duty passive transferred under 1 Mb/s in an earlier run. The temporary
+monitor trial did not qualify Home Assistant passive delivery, long-term
+presence latency or GATT reconnects. The timing change does not affect GATT
+connection slots.
 
 ## Echo Dot 2 prerequisites (Biscuit, Alpine AArch64)
 
@@ -151,11 +171,13 @@ lost func(string)) (*bluez.Central, error)` opens a private GATT client/agent.
 Wrap its concrete return in `Options.OpenCentral` returning `ble.Central`.
 
 `bluetooth.New(scanner ble.Scanner, options bluetooth.Options) *bluetooth.Proxy`
-takes `Enabled`, `SaveEnabled func(bool) error`, `OpenCentral`, `Pairing` and
-`ModeSwitch`. On the BlueZ path use `Pairing: true, ModeSwitch: false` only after
-base validation. `SaveEnabled` must atomically save the schema1
-`bluetooth_proxy` bool in `/data/encore/config.json`; a failure leaves both live
-and saved state unchanged. It is called before applying a switch change.
+takes `Enabled`, `SaveEnabled func(bool) error`, `OpenCentral`, `Pairing`,
+`ModeSwitch` and `DefaultActive`. After base validation Biscuit uses
+`Pairing: true` and `DefaultActive: true`, and takes
+`ModeSwitch` from `scanner.SupportsScanModeSwitch()`. `SaveEnabled` must
+atomically save the schema1 `bluetooth_proxy` bool in `/data/encore/config.json`;
+a failure leaves both live and saved state unchanged. It is called before
+applying a switch change.
 
 `(*Proxy).Serve(ctx context.Context, listener net.Listener, info esphome.Info,
 key esphome.PSK) error` runs the voice-independent control endpoint and rejects
@@ -213,6 +235,7 @@ mkdir -p .amp/in/orb-backup
 go build -race -o .amp/in/orb-backup/ble-fixture ./lab/bluetooth/satellite
 lab/.venv/bin/python lab/test_bluetooth.py .amp/in/orb-backup/ble-fixture
 lab/.venv/bin/python lab/test_bluetooth_ha.py .amp/in/orb-backup/ble-fixture
+lab/.venv/bin/python lab/test_bluetooth_ha.py .amp/in/orb-backup/ble-fixture --auto
 ```
 
 This runs real Noise/protobuf against a **virtual** radio: wrong-key rejection,
@@ -225,13 +248,30 @@ during delayed cleanup, delayed OFF/ON and successor-client generation handoffs,
 stale slot-refresh ordering, preempted-read terminal errors, failed central
 cleanup with no false acknowledgement or successor lease, disconnect overflow,
 pause/resume, OFF traffic stop, rapid toggles,
-process-restart persistence and failed-save atomicity.
+process-restart persistence and failed-save atomicity. The same suite opts a
+virtual radio into shared passive/active switching and checks scanner state,
+scan-response data and GATT reads across both transitions. The private BlueZ
+bus fixture also exercises active → passive → active with a GATT read in each
+mode and verifies that a competing discovery session ends only Encore's
+passive monitor.
+
+On a physical Office Biscuit running 0.2.2 with BlueZ 5.82 and kernel
+6.1.178-encore-biscuit-arm64-stpfix1, a temporary BlueZ monitor delivered 34
+primary reports from a known beacon in 59.970 seconds of controller-confirmed
+passive scan. Primary reports returned in active mode after cleanup. This was
+a backend feasibility trial, not a test of this Encore build or of live GATT
+continuity. On a test build, hold a bench GATT link open from HA, switch modes
+both ways without toggling the proxy, and verify reads, notifications,
+advertisements and slot count before, during and after. Then reconnect to an
+uncached peer while passive to cover the BlueZ `ConnectDevice` path.
 
 The second suite boots disposable HA and exercises its actual ESPHome config
 flow, single default-OFF switch, raw-advertisement parsing, multi-source Bleak
 routing, CCCD notifications, cached-service reconnect, competing client
 rejection, ATT handle/value limits, OFF disconnect, pause/resume, failed-save
 isolation and config-entry unload/reload. Controls work with no voice backend.
+With `--auto`, it also verifies HA chooses Auto for a new entry, scans
+passively at idle and returns to passive after an on-demand active sweep.
 Both suites contact only ephemeral loopback listeners and do not modify
 production HA. Their GATT peer and pairing outcomes are virtual; neither suite
 qualifies BlueZ/RF bonding or changed-service cache invalidation on a real peer.

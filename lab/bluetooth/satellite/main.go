@@ -35,6 +35,7 @@ type radio struct {
 	closeGate                     chan struct{}
 	closing                       bool
 	failClose                     bool
+	modeSwitch                    bool
 }
 
 func (r *radio) Scan(ctx context.Context, active bool, ready func() error, found func(ble.Advertisement)) error {
@@ -44,6 +45,11 @@ func (r *radio) Scan(ctx context.Context, active bool, ready func() error, found
 	if err := ready(); err != nil {
 		return err
 	}
+	data := []byte{2, 1, 6, 3, 0xff, 0x34, 0x12}
+	if r.modeSwitch && active {
+		// Model a local name available only in a scan response.
+		data = append(data, 4, 0x09, 'L', 'a', 'b')
+	}
 	tick := time.NewTicker(50 * time.Millisecond)
 	defer tick.Stop()
 	for {
@@ -51,7 +57,7 @@ func (r *radio) Scan(ctx context.Context, active bool, ready func() error, found
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-tick.C:
-			found(ble.Advertisement{Address: 0xc0ffee123456, AddressType: 1, RSSI: -73, Data: []byte{2, 1, 6, 3, 0xff, 0x34, 0x12}})
+			found(ble.Advertisement{Address: 0xc0ffee123456, AddressType: 1, RSSI: -73, Data: data})
 		}
 	}
 }
@@ -211,8 +217,8 @@ func main() {
 	}
 	state := os.Getenv("BLE_TEST_STATE")
 	b, _ := os.ReadFile(state)
-	r := &radio{links: make(map[string]bool)}
-	p := bluetooth.New(r, bluetooth.Options{Enabled: string(b) == "true", Pairing: true, SaveEnabled: func(on bool) error {
+	r := &radio{links: make(map[string]bool), modeSwitch: os.Getenv("BLE_TEST_MODE_SWITCH") == "true"}
+	p := bluetooth.New(r, bluetooth.Options{Enabled: string(b) == "true", Pairing: true, ModeSwitch: r.modeSwitch, DefaultActive: true, SaveEnabled: func(on bool) error {
 		r.Lock()
 		fail := r.failSave
 		r.Unlock()

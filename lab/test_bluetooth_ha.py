@@ -14,24 +14,27 @@ import sys
 import tempfile
 
 import aiohttp
-from aioesphomeapi import APIClient
+from aioesphomeapi import APIClient, BluetoothProxyFeature
 from aioesphomeapi.api_pb2 import BluetoothDeviceConnectionResponse
 from aioesphomeapi.core import BluetoothGATTAPIError
-from habluetooth import get_manager
+from habluetooth import BluetoothScanningMode, get_manager
 from homeassistant import loader
 from homeassistant.bootstrap import async_from_config_dict
+from homeassistant.components.esphome.const import CONF_BLUETOOTH_SCANNING_MODE
 from homeassistant.core import HomeAssistant
 
 from test_bluetooth import radio_state, until
 
 
 async def main():
+    auto = "--auto" in sys.argv[2:]
     key = base64.b64encode(os.urandom(32)).decode()
     with tempfile.TemporaryDirectory(dir=".amp/in/orb-backup") as directory:
         state = Path(directory) / "enabled"
         proc = await asyncio.create_subprocess_exec(
             sys.argv[1], stdout=asyncio.subprocess.PIPE,
-            env={**os.environ, "BLE_TEST_PSK": key, "BLE_TEST_STATE": str(state)},
+            env={**os.environ, "BLE_TEST_PSK": key, "BLE_TEST_STATE": str(state),
+                 "BLE_TEST_MODE_SWITCH": str(auto).lower()},
         )
         endpoints = json.loads(await asyncio.wait_for(proc.stdout.readline(), 10))
         host, port = endpoints["api"].split(":")
@@ -63,7 +66,9 @@ async def main():
             switches = [s.entity_id for s in hass.states.async_all("switch") if s.entity_id.startswith("switch.encore_ble_fixture")]
             assert switches == [entity], switches
             data = entry.runtime_data
-            assert data.device_info.bluetooth_proxy_feature_flags == 47
+            assert data.device_info.bluetooth_proxy_feature_flags == (
+                47 | BluetoothProxyFeature.FEATURE_STATE_AND_MODE if auto else 47
+            )
             assert data.device_info.voice_assistant_feature_flags == 0
             async with aiohttp.ClientSession() as http:
                 await radio_state(http, control, scans=0, opens=0, closes=0, blocked=0)
@@ -85,6 +90,17 @@ async def main():
                 assert device.details["address_type"] == 1
                 service_info = manager.async_last_service_info(device.address, True)
                 assert service_info.rssi == -73 and service_info.manufacturer_data == {0x1234: b""}
+                if auto:
+                    scanner = next(s for s in manager.async_current_scanners() if s.source == service_info.source)
+                    await until(lambda: CONF_BLUETOOTH_SCANNING_MODE in entry.options)
+                    assert entry.options[CONF_BLUETOOTH_SCANNING_MODE] == BluetoothScanningMode.AUTO.value
+                    assert scanner.configured_mode == BluetoothScanningMode.ACTIVE
+                    await until(lambda: scanner.current_mode == BluetoothScanningMode.PASSIVE)
+                    async with asyncio.TaskGroup() as tasks:
+                        tasks.create_task(manager.async_request_active_scan(1))
+                        await until(lambda: scanner.current_mode == BluetoothScanningMode.ACTIVE)
+                    await until(lambda: scanner.current_mode == BluetoothScanningMode.PASSIVE)
+                    print("PASS real HA defaults to Auto, scans passively, and returns to passive after an active sweep")
                 # Import after HA installs its real multi-source Bleak router.
                 from bleak import BleakClient
 
