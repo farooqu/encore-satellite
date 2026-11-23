@@ -537,6 +537,26 @@ class PipelineTests(unittest.TestCase):
             product_versions.check_train_change(next_train, later)
             self.assertEqual(product_versions.product_identity(next_train, target)["version"], "0.10.1-dev.1")
 
+    def test_dev_plan_opens_train_even_if_legacy_release_has_the_same_base(self):
+        legacy = self.source
+        self.git("tag", "android-assistant-r1000000090", legacy)
+        target = "android-assistant"
+        policy = self.repo / "release/dev-trains.json"
+        policy.write_text(json.dumps({target: {"base": "0.10.0", "first_revision": 1000000091, "ordering_major": 1}}))
+        self.git("add", str(policy))
+        self.git("commit", "-qm", "chore(release): open Assistant Dev train")
+        source = self.git("rev-parse", "HEAD").strip()
+        registry, _ = inventory()
+        release = {"tag_name": "android-assistant-r1000000090", "immutable": True, "draft": False,
+                   "prerelease": True, "assets": [{"name": name} for name in ("encore-satellite-assistant.apk", "SHA256SUMS")]}
+        with (patch.object(dev_plan, "ROOT", self.repo), patch.object(check, "ROOT", self.repo),
+              patch.object(biscuit_dev, "ROOT", self.repo),
+              patch.object(biscuit_dev, "identity", side_effect=lambda sha: ("0.10.0", 1000000090 + (sha != legacy))),
+              patch.object(dev_plan, "identity", return_value=("0.10.0", 1000000091))):
+            result = dev_plan.plan(source, [release], registry, [target])
+        self.assertEqual(result["targets"], [target])
+        self.assertEqual(result["identities"][target]["version"], "0.10.0-dev.1")
+
     def test_stable_bumps_take_strongest_change_per_affected_product(self):
         def commit(subject, path):
             entry = self.repo / path

@@ -8,7 +8,7 @@ import subprocess
 
 from biscuit_dev import ANCHOR, CONVENTIONAL, identity
 from check import ROOT, changed_paths, select
-from product_versions import check_train_change, dev_tag_target, product_identity
+from product_versions import check_train_change, dev_tag_target, product_identity, trains
 
 ASSISTANT = "android-assistant"
 TARGETS = {"android-generic": "Android", "biscuit": "Biscuit", ASSISTANT: "Android Assistant"}
@@ -149,6 +149,7 @@ def plan(source, releases, registry, armed):
     history = git("rev-list", "--first-parent", source).splitlines()
     check_train_change(source, history[1])
     baselines = published_baselines(history, releases)
+    current_trains = trains(source)
 
     selected = []
     identities = {}
@@ -158,8 +159,8 @@ def plan(source, releases, registry, armed):
         section = [f"## {name}", ""]
         baseline = baselines.get(target)
         current = product_identity(source, target)
-        new_train = (baseline and current["version"] != current["core_version"] and
-                     current["version"].split("-dev.")[0] != product_identity(baseline, target)["version"].split("-dev.")[0])
+        train = current_trains.get(target)
+        new_train = baseline and train is not None and train != trains(baseline).get(target)
         if target not in armed:
             reason = "automatic Dev is disabled"
         elif baseline and not new_train and target not in affected(changed_paths(baseline, source), registry):

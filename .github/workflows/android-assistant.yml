@@ -3,6 +3,7 @@ run-name: >-
   ${{ github.event_name == 'workflow_run' && format('Automatic Dev · {0}', github.event.workflow_run.head_sha) ||
       github.event_name == 'pull_request' && format('PR #{0} · APK checks', github.event.pull_request.number) ||
       inputs.publish && format('Manual · Publish APK {0}', inputs.version) ||
+      inputs.sign_only && 'Manual · Signed APK candidate' ||
       format('Manual · Unsigned APK candidate {0}', inputs.version) }}
 
 on:
@@ -21,6 +22,10 @@ on:
         default: '0.1.0'
       publish:
         description: Sign and publish an immutable GitHub prerelease from protected main
+        type: boolean
+        default: false
+      sign_only:
+        description: Sign the exact protected-main candidate and upload it as a workflow artifact without publishing
         type: boolean
         default: false
 
@@ -65,12 +70,17 @@ jobs:
         id: release
         env:
           MANUAL_PUBLISH: ${{ inputs.publish == true }}
+          SIGN_ONLY: ${{ inputs.sign_only == true }}
           VERSION: ${{ inputs.version || '0.1.0' }}
           MANUAL_ALLOWED: ${{ github.repository == 'farooqu/encore-satellite' && github.ref == 'refs/heads/main' && github.ref_protected }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$SOURCE"
+          if [[ "$MANUAL_PUBLISH" == true && "$SIGN_ONLY" == true ]]; then
+            echo '::error::Select either publish or sign_only, not both.'
+            exit 1
+          fi
           publish=false
           revision=$GITHUB_RUN_NUMBER
           if [[ "$GITHUB_EVENT_NAME" == workflow_run ]]; then
@@ -105,8 +115,11 @@ jobs:
             read -r core revision display <<< "$identity"
             if [[ -n "$display" && "$display" != "$core" ]]; then VERSION=$display; fi
             publish=true
+          elif [[ "$SIGN_ONLY" == true ]]; then
+            test "$MANUAL_ALLOWED" = true
+            read -r core revision VERSION <<< "$(python3 release/product_versions.py "$SOURCE" android-assistant)"
           fi
-          if [[ "$publish" == true ]]; then
+          if [[ "$publish" == true || "$SIGN_ONLY" == true ]]; then
             git rev-list --first-parent origin/main | grep -Fx "$SOURCE" >/dev/null
             gh api "repos/$GITHUB_REPOSITORY/commits/$SOURCE" --jq '.commit.verification.verified' | grep -Fx true
           fi
@@ -199,7 +212,7 @@ jobs:
   sign:
     needs: build
     if: >-
-      needs.build.outputs.publish == 'true' &&
+      (needs.build.outputs.publish == 'true' || (github.event_name == 'workflow_dispatch' && inputs.sign_only)) &&
       github.repository == 'farooqu/encore-satellite' && github.ref == 'refs/heads/main' && github.ref_protected
     environment: ${{ github.event_name == 'workflow_run' && 'android-dev-signing' || 'android-signing' }}
     runs-on: ubuntu-24.04
@@ -254,6 +267,7 @@ jobs:
 
   publish:
     needs: [build, sign]
+    if: needs.build.outputs.publish == 'true'
     concurrency:
       group: release-publication
       queue: max

@@ -62,6 +62,11 @@ the legacy installed ordering floors. Pin the source before qualifying the
 compatible devices before opening publication. A source that missed `.1` can
 be retried at the same SHA; do not move the counter origin.
 
+For Assistant, dispatch **Android Assistant · Checks and Dev release** on
+protected `main` with `sign_only=true` and `publish=false`. The workflow uses
+the exact source-derived APK identity and protected Android signer, and returns
+an Actions artifact without creating a tag or GitHub release.
+
 Tablet and Biscuit still require **both** a higher revision and a higher signed
 `core_version`. New builds use `<ordering_major>.0.<revision>` only for
 ordering and artifact identity. The signed `display_version` is what the new
