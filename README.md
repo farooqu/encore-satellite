@@ -1,5 +1,11 @@
 # Encore Satellite
 
+[![Latest Android Tablet release][tablet-version]](devices/android-generic/README.md#install-the-signed-apk) [![Latest Biscuit release][biscuit-version]](devices/biscuit/INSTALL.md) [![Latest Android Assistant release][assistant-version]](devices/android-assistant/README.md#install-the-signed-apk)
+
+[tablet-version]: https://img.shields.io/github/v/release/farooqu/encore-satellite?include_prereleases&display_name=release&filter=Android%20*&label=
+[biscuit-version]: https://img.shields.io/github/v/release/farooqu/encore-satellite?include_prereleases&display_name=release&filter=Biscuit%20ARM64%20*&label=
+[assistant-version]: https://img.shields.io/github/v/release/farooqu/encore-satellite?include_prereleases&display_name=release&filter=Encore%20Satellite%20Assistant%20*&label=
+
 Encore connects Android phones, tablets, and older speakers to
 [Voice Incubator](https://github.com/OHF-Voice/voice-incubator), the Open Home
 Foundation's testbed for Home Assistant voice.
