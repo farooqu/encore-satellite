@@ -219,13 +219,15 @@ these devices, acoustic timings or model-backed enrollment/training.
    defaults On but needs local access and scan approval. Dashboard, Android Home
    and remote installs are optional. Choose **Done** to use Encore without a
    dashboard; **Settings → Setup** reopens the checklist.
-4. In Encore, open **Settings → Dashboards**, enter the Home Assistant server
-   address (for example `https://home.example`), and tap **Choose dashboards**.
+4. Tap the Encore display, then open **Settings → Dashboards**. Enter the Home
+   Assistant server address (for example `https://home.example`) and tap **Choose dashboards**.
    Sign in on the tablet, then select up to five Home Assistant dashboard views
    in the order you want them and tap **Save**. Encore opens the first selection.
    Swipe left or right across the display to switch pages. The clock is the page
    before the first dashboard; **Show only clock** removes the dashboard pages.
-   There is no idle timer or screensaver.
+   The pages slide into view unless Android animations are disabled. Dashboards
+   stay loaded when you switch pages, including when you return to the clock.
+   There is no automatic page change or screensaver.
 
    Encore hides the Home Assistant sidebar and Lovelace header in the display
    WebView, without changing the dashboard or installing a Home Assistant plugin.
@@ -334,14 +336,15 @@ Home support on Portal.
 - The panel grows to fit, up to half the screen, then scrolls under a fixed
   header. **×** or **Back** stops an active turn, including playback drain;
   after normal completion, the transcript stays for six seconds or until
-  dismissed. Transcripts are not persisted. Close the panel to return to the
-  main controls and mute the mic.
+  dismissed. Transcripts are not persisted. Close the panel and tap the display
+  to reveal the microphone control.
 - Incoming audio and remote mic sessions keep their existing edge indicator and
   Stop/privacy controls. Fresh mic RMS and measured playback animate that edge;
   queued audio and missing samples do not create motion. Reduced motion removes
   the traveling highlight. No enrollment or wake-training capability is added.
-- The idle controls sit on the right in landscape and along the bottom in
-  portrait. The gear opens full-screen Settings, where music controls live.
+- Tap the display to reveal the idle controls, on the right in landscape and
+  along the bottom in portrait. They hide five seconds after the last tap.
+  The gear opens full-screen Settings, where music controls live.
   On a running Bluetooth-first install the primary action can explicitly start
   the microphone. Muting clears session pre-roll, cancels active voice, and
   releases the microphone. Android screenshots remain disabled for the running

@@ -18,6 +18,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.platform.LocalDensity
@@ -249,8 +250,36 @@ class EncoreScreenTest {
         compose.onNodeWithTag("privacy").performClick()
         advance(400)
         compose.onNodeWithTag("voice-edge-glow").assertDoesNotExist()
+        revealDock()
         compose.onNodeWithTag("privacy").assertIsOn()
         compose.runOnIdle { assertTrue((42L to false) in visibility) }
+    }
+
+    @Test fun idleDockAppearsOnlyOnTapAndHidesAfterInactivity() {
+        compose.mainClock.autoAdvance = false
+        val state = mutableStateOf(ready())
+        compose.setContent {
+            EncoreScreen(state.value, {}, {}, {}, { state.value = ready().copy(muted = it) }, { "" }, { "" }, {}, {}, {}, {})
+        }
+        val display = compose.onNodeWithTag("satellite-display")
+        val gear = compose.onNodeWithTag("open-settings")
+        gear.assertDoesNotExist()
+        display.performTouchInput { swipeLeft() }
+        advance(32)
+        gear.assertDoesNotExist()
+        capture("android-idle-dock-hidden")
+
+        revealDock()
+        gear.assertIsDisplayed()
+        capture("android-idle-dock-revealed")
+        advance(4_000)
+        compose.onNodeWithTag("privacy").performTouchInput { click() }
+        advance(4_000)
+        compose.onNodeWithTag("privacy").assertIsOn()
+        gear.assertIsDisplayed()
+        advance(1_100)
+        gear.assertDoesNotExist()
+        compose.onNodeWithTag("privacy").assertDoesNotExist()
     }
 
     @OptIn(ExperimentalTestApi::class)
@@ -326,6 +355,7 @@ class EncoreScreenTest {
         assertEquals(1, stops)
         assertFalse("Closing the panel changed mute", privacy)
         compose.onNodeWithTag("voice-transcript").assertDoesNotExist()
+        revealDock()
         compose.onNodeWithTag("privacy").assertContentDescriptionEquals("Mute mic").performTouchInput { click() }
         assertTrue(privacy)
         compose.onNodeWithTag("dashboard-tile").performTouchInput { click() }
@@ -558,6 +588,7 @@ class EncoreScreenTest {
         stop.performTouchInput { click() }
         compose.onNodeWithTag("timer-sheet").assertDoesNotExist()
         compose.onNodeWithText("4:38 · 2 timers").assertIsDisplayed()
+        revealDock()
         compose.onNodeWithTag("talk").assertIsNotEnabled()
         assertEquals(listOf(41L), stops)
     }
@@ -733,6 +764,7 @@ class EncoreScreenTest {
                 })
         }
         val screen = compose.onNodeWithTag("dashboard-content").fetchSemanticsNode().boundsInRoot
+        revealDock()
         val talk = compose.onNodeWithTag("talk").fetchSemanticsNode().boundsInRoot
         val gear = compose.onNodeWithTag("open-settings")
         val settings = gear.fetchSemanticsNode().boundsInRoot
@@ -757,7 +789,8 @@ class EncoreScreenTest {
         else compose.onNodeWithText("Done").performTouchInput { click() }
         advance(32)
         settingsScreen.assertDoesNotExist()
-        gear.assertIsDisplayed()
+        gear.assertDoesNotExist()
+        revealDock()
 
         val glow = compose.onNodeWithTag("voice-edge-glow")
         compose.onNodeWithTag("talk").performTouchInput { click() }
@@ -774,7 +807,7 @@ class EncoreScreenTest {
         compose.onNodeWithTag("stop").performTouchInput { click() }
         advance(32)
         glow.assertDoesNotExist()
-        gear.assertIsDisplayed()
+        gear.assertDoesNotExist()
     }
 
     private fun assertVoiceStatusIsAccessibleOnly(status: String) {
@@ -783,8 +816,14 @@ class EncoreScreenTest {
     }
 
     private fun openSettings() {
+        revealDock()
         compose.onNodeWithTag("open-settings").performClick()
         advance(400)
+    }
+
+    private fun revealDock() {
+        compose.onNodeWithTag("satellite-display").performTouchInput { click(Offset(width * .9f, height * .2f)) }
+        advance(32)
     }
 
     private fun advance(milliseconds: Long) {
@@ -805,6 +844,7 @@ class EncoreScreenTest {
                     Text("Bluetooth-first startup · API 34 test fixture", color = androidx.compose.ui.graphics.Color.White)
                 })
         }
+        revealDock()
         compose.onNodeWithContentDescription("Start microphone").assertIsEnabled()
         compose.onNodeWithTag("privacy").assertIsNotEnabled()
         capture("android-bluetooth-first")
@@ -858,6 +898,7 @@ class EncoreScreenTest {
 
         compose.runOnIdle { state.value = EncoreState.parse(EncoreStateTest.snapshot(active = false, announcing = false, output = "", owner = ""), state.value) }
         compose.onNodeWithTag("voice-edge-glow").assertDoesNotExist()
+        revealDock()
         compose.onNodeWithTag("talk").assertIsNotEnabled()
         compose.onNodeWithTag("open-settings").assertIsEnabled()
         compose.runOnIdle { state.value = EncoreState.parse(EncoreStateTest.snapshot(active = false, announcing = false, output = "", owner = "", talkAllowed = true), state.value) }
@@ -926,15 +967,18 @@ class EncoreScreenTest {
         val selected = mutableStateOf(emptyList<DashboardPage>())
         val choosing = mutableStateOf(true)
         val dashboardTouches = mutableListOf<Int>()
+        val dashboardCreations = mutableListOf<String>()
         compose.setContent {
             MaterialTheme(colorScheme = darkColorScheme(primary = Color(0xff97e6d4), surface = Color(0xff152330))) {
                 Surface(Modifier.fillMaxSize()) {
                     if (choosing.value) Box(contentAlignment = Alignment.TopCenter) {
                         DashboardChoices(available, selected.value) { selected.value = it }
-                    } else DashboardCarousel(selected.value, swipeEnabled = true) { page ->
-                        Box(Modifier.fillMaxSize()) {
+                    } else DashboardCarousel(selected.value, swipeEnabled = true) { page, _ ->
+                        Box(Modifier.fillMaxSize().testTag(page.path)
+                            .background(if (page == available.first()) Color(0xff153a38) else Color(0xff152330))) {
                             Text("Showing ${page.title}", Modifier.align(Alignment.Center))
                             AndroidView(factory = { context -> View(context).apply {
+                                dashboardCreations += page.path
                                 setOnTouchListener { view, event ->
                                     dashboardTouches += event.actionMasked
                                     view.parent.requestDisallowInterceptTouchEvent(true)
@@ -968,7 +1012,14 @@ class EncoreScreenTest {
             assertFalse(MotionEvent.ACTION_CANCEL in dashboardTouches)
             dashboardTouches.clear()
         }
+        compose.mainClock.autoAdvance = false
         display.performTouchInput { swipeLeft() }
+        advance(96)
+        val arriving = compose.onNodeWithTag(available.first().path).assertIsDisplayed()
+        assertTrue("Incoming dashboard should still be sliding into view",
+            arriving.fetchSemanticsNode().boundsInRoot.width in 1f..<display.fetchSemanticsNode().boundsInRoot.width)
+        capture("android-dashboard-slide")
+        compose.mainClock.autoAdvance = true
         compose.onNodeWithText("Showing Room 1").assertIsDisplayed()
         compose.runOnIdle {
             assertEquals(MotionEvent.ACTION_DOWN, dashboardTouches.first())
@@ -985,6 +1036,10 @@ class EncoreScreenTest {
         capture("android-clock-carousel")
         display.performTouchInput { swipeLeft() }
         compose.onNodeWithText("Showing Room 4").assertIsDisplayed()
+        compose.runOnIdle {
+            assertEquals("Swiping must not recreate any native dashboard view",
+                selected.value.map { it.path }.sorted(), dashboardCreations.sorted())
+        }
         compose.runOnIdle { selected.value = emptyList() }
         display.assertDoesNotExist()
         compose.onNodeWithTag("display-clock").assertIsDisplayed()

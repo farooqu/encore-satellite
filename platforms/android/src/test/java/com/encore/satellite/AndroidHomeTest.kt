@@ -10,6 +10,7 @@ import android.content.pm.PackageManager.PERMISSION_DENIED
 import android.content.pm.PackageManager.PERMISSION_GRANTED
 import android.os.Process
 import android.provider.Settings
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.lifecycle.Lifecycle
@@ -133,8 +134,11 @@ class AndroidHomeTest {
         android.declareComponentUnbindable(ComponentName(app, EncoreService::class.java))
         android.setUnbindServiceCallsOnServiceDisconnected(false)
         ActivityScenario.launch(MainActivity::class.java).use {
-            val gear = compose.onNodeWithTag("open-settings")
-            gear.performClick()
+            fun openSettings() {
+                compose.onNodeWithTag("satellite-display").performTouchInput { click(Offset(width * .9f, height * .2f)) }
+                compose.onNodeWithTag("open-settings").performClick()
+            }
+            openSettings()
             val choose = compose.onNodeWithText("Choose Home app")
             val notificationSettings = compose.onNodeWithText("Manage notifications")
             choose.assertIsDisplayed()
@@ -152,7 +156,7 @@ class AndroidHomeTest {
                 assertEquals(Settings.ACTION_HOME_SETTINGS, intent.action)
                 assertTrue(intent.flags and Intent.FLAG_ACTIVITY_NEW_TASK != 0)
             }
-            gear.performClick()
+            openSettings()
             notificationSettings.performTouchInput { click() }
             compose.runOnIdle {
                 val intent = android.nextStartedActivity

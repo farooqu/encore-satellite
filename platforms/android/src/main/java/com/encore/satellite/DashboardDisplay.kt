@@ -4,12 +4,15 @@ import android.annotation.SuppressLint
 import android.text.format.DateFormat
 import android.view.View
 import android.webkit.*
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.text.BasicText
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.TextAutoSize
@@ -18,6 +21,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.PointerEventPass
@@ -31,6 +35,7 @@ import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.customActions
+import androidx.compose.ui.semantics.hideFromAccessibility
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -43,6 +48,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.URI
@@ -123,15 +129,26 @@ private fun dashboardPages(data: JSONArray): List<DashboardPage> =
     }
 }
 
-@Composable internal fun DashboardCarousel(pages: List<DashboardPage>, swipeEnabled: Boolean,
-    content: @Composable (DashboardPage) -> Unit) {
+@Composable internal fun DashboardCarousel(pages: List<DashboardPage>, swipeEnabled: Boolean, reducedMotion: Boolean = false,
+    content: @Composable (DashboardPage, Boolean) -> Unit) = if (pages.isEmpty()) {
+    DisplayClock()
+} else key(pages.map { it.path }) {
     // Page 0 is the clock. Start on the first configured dashboard if there is one.
-    var page by remember(pages) { mutableIntStateOf(if (pages.isEmpty()) 0 else 1) }
-    val navigation = if (swipeEnabled && pages.isNotEmpty()) Modifier.testTag("dashboard-carousel")
+    val pager = rememberPagerState(initialPage = 1) { pages.size + 1 }
+    val scope = rememberCoroutineScope()
+    val motionDisabled by rememberUpdatedState(reducedMotion)
+    fun navigate(target: Int) {
+        scope.launch {
+            if (motionDisabled) pager.scrollToPage(target)
+            else pager.animateScrollToPage(target, animationSpec = tween(240))
+        }
+    }
+    val navigation = if (swipeEnabled) Modifier.testTag("dashboard-carousel")
         .semantics {
+            val page = pager.settledPage
             customActions = buildList {
-                if (page > 0) add(CustomAccessibilityAction("Previous display page") { page--; true })
-                if (page < pages.size) add(CustomAccessibilityAction("Next display page") { page++; true })
+                if (page > 0) add(CustomAccessibilityAction("Previous display page") { navigate(page - 1); true })
+                if (page < pages.size) add(CustomAccessibilityAction("Next display page") { navigate(page + 1); true })
             }
         }.pointerInput(pages) {
             val swipeDistance = 56.dp.toPx()
@@ -139,6 +156,7 @@ private fun dashboardPages(data: JSONArray): List<DashboardPage> =
                 // Observe before the embedded WebView claims touch. Leave taps, vertical scrolling and
                 // multi-touch to the content; cancel its drag only after a deliberate horizontal swipe.
                 val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                val page = pager.targetPage
                 var claimed = false
                 while (true) {
                     val change = awaitPointerEvent(PointerEventPass.Initial).changes.singleOrNull() ?: break
@@ -155,14 +173,22 @@ private fun dashboardPages(data: JSONArray): List<DashboardPage> =
                     val released = change.changedToUp()
                     change.consume()
                     if (!change.pressed) {
-                        if (released && canSwitch) page = target
+                        if (released && canSwitch) navigate(target)
                         break
                     }
                 }
             }
         } else Modifier
-    Box(Modifier.fillMaxSize().then(navigation)) {
-        if (page == 0) DisplayClock() else content(pages[page - 1])
+    // Keep the clock and all configured WebViews mounted. Let our gesture observer arbitrate
+    // with the WebView, rather than letting the pager compete for its touch stream.
+    HorizontalPager(state = pager, modifier = Modifier.fillMaxSize().then(navigation),
+        userScrollEnabled = false, beyondViewportPageCount = pages.size,
+        key = { index -> if (index == 0) "clock" else pages[index - 1].path }) { index ->
+        val visible = index == pager.settledPage
+        Box(Modifier.fillMaxSize().semantics { if (!visible) hideFromAccessibility() }
+            .focusProperties { canFocus = visible }) {
+            if (index == 0) DisplayClock() else content(pages[index - 1], visible)
+        }
     }
 }
 

@@ -5,6 +5,8 @@ import android.net.Uri
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -22,6 +24,9 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
@@ -97,22 +102,49 @@ internal fun EncoreScreen(state: EncoreState, onStart: () -> Unit, onTalk: () ->
         BoxWithConstraints(Modifier.fillMaxSize().background(Ink)) {
             val landscape = maxWidth > maxHeight
             val swipeEnabled = !settingsVisible && !sheetVisible && !legacyVisible && !pendingWake
-            Box(Modifier.fillMaxSize().semantics { if (settingsVisible) hideFromAccessibility() }
-                .focusProperties { canFocus = !settingsVisible }) {
+            var dockTap by remember(swipeEnabled) { mutableIntStateOf(0) }
+            LaunchedEffect(dockTap) {
+                if (dockTap != 0) {
+                    delay(5_000)
+                    dockTap = 0
+                }
+            }
+            val revealDock = if (swipeEnabled) Modifier.pointerInput(Unit) {
+                awaitEachGesture {
+                    // Observe taps without stealing them from the dashboard or the dock buttons.
+                    val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                    while (true) {
+                        val change = awaitPointerEvent(PointerEventPass.Initial).changes.singleOrNull() ?: break
+                        if (change.id != down.id || (change.position - down.position).getDistance() > viewConfiguration.touchSlop ||
+                            change.uptimeMillis - down.uptimeMillis >= viewConfiguration.longPressTimeoutMillis) break
+                        if (!change.pressed) {
+                            if (change.changedToUpIgnoreConsumed()) dockTap++
+                            break
+                        }
+                    }
+                }
+            } else Modifier
+            Box(Modifier.fillMaxSize().testTag("satellite-display").semantics {
+                if (settingsVisible) hideFromAccessibility()
+                else if (swipeEnabled && dockTap == 0) {
+                    customActions = listOf(CustomAccessibilityAction("Show satellite controls") { dockTap++; true })
+                }
+            }.focusProperties { canFocus = !settingsVisible }.then(revealDock)) {
                 Box(Modifier.fillMaxSize()) {
                     if (dashboardContent != null) dashboardContent()
                     else Dashboard(state, microphonePermissionGranted, onStart, onPairHomeAssistant,
-                        dashboardAuth, settingsVisible, displayOrigin, displayPages, swipeEnabled)
+                        dashboardAuth, settingsVisible, displayOrigin, displayPages, swipeEnabled, reducedMotion)
                 }
-                if (!settingsVisible && !sheetVisible) {
+                if (!settingsVisible && !sheetVisible && (legacyVisible || pendingWake || dockTap != 0)) {
                     val buttons: @Composable () -> Unit = {
                         val startMicrophone = state.running && !state.microphoneReady && !state.muted
-                        FilledIconButton(onClick = when {
+                        val primaryAction = when {
                             state.alertVisible -> ::stopAlert
                             legacyVisible -> onStop
                             startMicrophone -> onStart
                             else -> onTalk
-                        },
+                        }
+                        FilledIconButton(onClick = { if (swipeEnabled) dockTap++; primaryAction() },
                             enabled = legacyVisible || startMicrophone ||
                                 (state.running && state.voiceKnown && state.connected && state.microphoneReady && state.captureReady &&
                                     !state.muted && !state.inhibited && state.talkAllowed && state.talkReady),
@@ -141,7 +173,7 @@ internal fun EncoreScreen(state: EncoreState, onStart: () -> Unit, onTalk: () ->
                                 Canvas(Modifier.size(18.dp)) { drawRoundRect(color, cornerRadius = CornerRadius(3.dp.toPx())) }
                             } else Icon(painterResource(R.drawable.ic_trigger_assistant), contentDescription = null)
                         }
-                        MuteButton(state, onMuted)
+                        MuteButton(state, { if (swipeEnabled) dockTap++; onMuted(it) })
                         FilledIconButton(onClick = { settingsVisible = true }, enabled = !legacyVisible,
                             colors = IconButtonDefaults.filledIconButtonColors(containerColor = Ink, contentColor = Mint,
                                 disabledContainerColor = Color(0xff38434d), disabledContentColor = Color(0xff9ca8b1)),
@@ -264,7 +296,7 @@ internal fun trustedNavigation(origin: String, value: String): Boolean {
 
 @Composable private fun Dashboard(state: EncoreState, microphonePermissionGranted: Boolean,
     onRequestPermission: () -> Unit, onPairHomeAssistant: () -> Unit, auth: DashboardAuth?, settingsVisible: Boolean,
-    origin: String, pages: List<DashboardPage>, swipeEnabled: Boolean) {
+    origin: String, pages: List<DashboardPage>, swipeEnabled: Boolean, reducedMotion: Boolean) {
     val needsPermission = !state.running && !microphonePermissionGranted
     if (needsPermission || state.needsHomeAssistantSetup) {
         Box(Modifier.fillMaxSize().background(Color(0xff101d28)).padding(bottom = 88.dp), contentAlignment = Alignment.Center) {
@@ -287,11 +319,15 @@ internal fun trustedNavigation(origin: String, value: String): Boolean {
             }
         }
     } else {
-        DashboardCarousel(pages, swipeEnabled) { page ->
+        DashboardCarousel(pages, swipeEnabled, reducedMotion) { page, visible ->
             if (auth != null && auth.lostOrigin == origin) {
                 DashboardSignInNeeded(onPhone = if (supportsDashboardBridge()) ({ auth.start(origin) }) else null,
                     onTablet = auth::manualSignIn)
-            } else DashboardWebView(origin, origin + page.path, state.reload, auth, hidden = settingsVisible)
+            } else {
+                var reload by remember { mutableIntStateOf(state.reload) }
+                LaunchedEffect(state.reload) { if (visible) reload = state.reload }
+                DashboardWebView(origin, origin + page.path, reload, auth, hidden = settingsVisible || !visible)
+            }
         }
     }
 }
