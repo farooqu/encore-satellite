@@ -35,6 +35,7 @@ import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.customActions
+import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.hideFromAccessibility
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
@@ -254,8 +255,8 @@ private fun dashboardPages(data: JSONArray): List<DashboardPage> =
     update: (List<DashboardPage>) -> Unit) {
     var address by remember(origin) { mutableStateOf(origin) }
     val server = homeAssistantOrigin(address)
-    Text("Dashboards", style = MaterialTheme.typography.titleMedium)
-    if (pages.isEmpty()) Text("No dashboards selected. Encore shows the clock.")
+    Text("Dashboards", Modifier.semantics { heading() }, style = MaterialTheme.typography.titleMedium)
+    if (pages.isEmpty()) Text("Showing the clock", color = MaterialTheme.colorScheme.onSurfaceVariant)
     pages.forEachIndexed { index, page ->
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("${index + 1}. ${page.title}", Modifier.weight(1f), maxLines = 2, overflow = TextOverflow.Ellipsis)
@@ -266,8 +267,8 @@ private fun dashboardPages(data: JSONArray): List<DashboardPage> =
     }
     OutlinedTextField(address, { address = it }, label = { Text("Home Assistant address") }, singleLine = true,
         placeholder = { Text("https://home.example") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+        supportingText = { Text("Server address only. Use HTTPS if available.") },
         modifier = Modifier.fillMaxWidth())
-    Text("Enter the server address, without a dashboard path. Prefer HTTPS.", style = MaterialTheme.typography.bodySmall)
     TextButton(onClick = { server?.let(choose) }, enabled = server != null) { Text("Choose dashboards") }
     if (pages.isNotEmpty()) TextButton(onClick = { update(emptyList()) }) { Text("Show only clock") }
 }

@@ -98,7 +98,7 @@ class EncoreScreenTest {
         var requests = 0
         var taps = 0
         compose.setContent {
-            EncoreScreen(state.value, { requests++ }, {}, {}, {}, { "" }, { "" }, {}, {}, {}, {},
+            EncoreScreen(state.value, { requests++ }, {}, {}, {}, { "test encryption key" }, { "" }, {}, {}, {}, {},
                 microphonePermissionGranted = microphonePermission.value,
                 onPairHomeAssistant = { taps++; state.value = state.value.copy(esphome = "waiting") })
         }
@@ -141,8 +141,20 @@ class EncoreScreenTest {
         compose.onNodeWithContentDescription("Start satellite").assertDoesNotExist()
         openSettings()
         pair.assertDoesNotExist()
-        compose.onNodeWithText("Reveal ESPHome encryption key").performScrollTo().assertIsDisplayed()
+        val reveal = compose.onNodeWithText("Reveal ESPHome encryption key")
+        val key = compose.onNodeWithText("test encryption key")
+        val details = compose.onNodeWithText("Connection details")
+        reveal.assertDoesNotExist()
+        details.performScrollTo().performTouchInput { click() }
+        reveal.performScrollTo().assertIsDisplayed()
+        key.assertDoesNotExist()
+        compose.onNodeWithText("Reveal Sendspin pairing token").performScrollTo().assertIsDisplayed()
         capture("android-ha-existing-settings")
+        reveal.performScrollTo().performClick()
+        key.performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("Hide connection details").performScrollTo().performClick()
+        details.performScrollTo().performClick()
+        key.assertDoesNotExist()
     }
 
     @Test fun setupSurvivesDeferralsAndPairedUpgradesDoNotReplayIt() {
@@ -188,7 +200,7 @@ class EncoreScreenTest {
         compose.onNodeWithText("Done").performScrollTo().performClick()
         compose.onNodeWithTag("display-clock").assertIsDisplayed()
         openSettings()
-        compose.onNodeWithText("Setup").performClick()
+        compose.onNodeWithText("Device setup").performClick()
         compose.onNodeWithText("Finish setup").assertIsDisplayed()
 
         // An upgraded, already paired installation has no onboarding cursor.
@@ -331,7 +343,7 @@ class EncoreScreenTest {
         settings.performTouchInput { click() }
         advance(400)
         compose.onNodeWithText("Satellite settings").assertIsDisplayed()
-        compose.onNodeWithText("Bluetooth proxy setup").assertIsDisplayed()
+        compose.onNodeWithText("Bluetooth proxy").assertIsDisplayed()
         compose.onNodeWithText("Talk").assertDoesNotExist()
         compose.onNodeWithText("Mute mic").assertDoesNotExist()
         assertEquals(1, talks)
@@ -745,7 +757,7 @@ class EncoreScreenTest {
 
     @Test fun landscapeGlowKeepsStopInRightDock() = checkGlowPlacement(landscape = true)
 
-    @Test @Config(qualifiers = "w400dp-h700dp-mdpi") fun portraitGlowKeepsStopInBottomDock() = checkGlowPlacement(landscape = false)
+    @Test @Config(qualifiers = "w400dp-h700dp-night-mdpi") fun portraitGlowKeepsStopInBottomDock() = checkGlowPlacement(landscape = false)
 
     private fun checkGlowPlacement(landscape: Boolean) {
         compose.mainClock.autoAdvance = false

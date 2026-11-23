@@ -88,7 +88,7 @@ APK CI checks, an explicitly gated signed-candidate workflow, authenticated
 stable/dev feeds, a persistent ESPHome **Update channel** dropdown, available-update
 reporting and an install request. Changing channel only changes subsequent checks;
 it never installs or downgrades. Feeds/keys are not provisioned by default. On
-Android 12+, opt in under **Settings → Setup → Remote install settings**
+Android 12+, opt in under **Settings → Device setup → Remote install settings**
 and allow APKs from Encore in Android Settings. After setup, only an explicit
 Home Assistant **Install** request can start a native self-update. If Android
 requires confirmation or native updates are off or unavailable, use the Settings
@@ -200,8 +200,8 @@ these devices, acoustic timings or model-backed enrollment/training.
    HA generates the permanent encryption key; no key entry is required. If the
    window expires, tap **Pair with Home Assistant** again. If HA adds the device
    but controls do not appear, reload its ESPHome integration. Existing installs
-   keep their key and settings and skip pairing; **Reveal ESPHome encryption key**
-   in local Settings remains available for manual recovery after pairing.
+   keep their key and settings and skip pairing. For manual recovery after
+   pairing, go to **Settings → Connection details → Reveal ESPHome encryption key**.
    The read-only **Microphone muted** (`microphone_muted`) binary sensor reports
    the app's microphone privacy latch and updates when it changes. It does not
    report Android permission or recorder readiness and cannot unmute the app.
@@ -218,7 +218,7 @@ these devices, acoustic timings or model-backed enrollment/training.
    First-run setup then offers the Bluetooth proxy on supported hardware; it
    defaults On but needs local access and scan approval. Dashboard, Android Home
    and remote installs are optional. Choose **Done** to use Encore without a
-   dashboard; **Settings → Setup** reopens the checklist.
+   dashboard; **Settings → Device setup** reopens the checklist.
 4. Tap the Encore display, then open **Settings → Dashboards**. Enter the Home
    Assistant server address (for example `https://home.example`) and tap **Choose dashboards**.
    Sign in on the tablet, then select up to five Home Assistant dashboard views
@@ -253,13 +253,13 @@ these devices, acoustic timings or model-backed enrollment/training.
      The session has the account's normal HA permissions, not dashboard-only access.
    - If a session is lost or revoked, tap **Sign in with phone** again, or choose
      **Sign in on tablet** from the recovery screen. To revoke one tablet from HA,
-     compare the Session ID shown in Encore Settings with the HA profile's
+     compare the session ID in **Settings → Connection details** with the HA profile's
      refresh-token list for the satellite account under **Security**. You can also
      sign out from that tablet's dashboard. No need to re-pair ESPHome.
    Manual sign-in still works, including when the QR flow is unavailable. The
    tablet WebView permits only same-origin navigation (no external-IdP allowlist).
 5. Optionally connect a **current Noise-capable Sendspin server** by host:port in
-   Settings. Reveal the independent Sendspin pairing token locally and provision
+   **Settings → Connection details**. Reveal the Sendspin pairing token there and provision
    it on the server. The player uses encrypted, Keystore-protected identity/trust;
    it does not silently fall back to plaintext or admit unpaired playback.
    Older plaintext-only servers are not compatible. Music can be disconnected

@@ -35,7 +35,7 @@ Known address types and existing Linux behavior are unchanged.
   The fresh default does not grant permission or let the controller start a scan.
 - First-run setup offers Bluetooth after ESPHome pairing. **Not now** keeps the
   preference on while scanning stays blocked; **Turn off proxy** saves Off.
-  Revisit at **Settings → Bluetooth proxy setup**. Nearby addresses,
+  Revisit at **Settings → Bluetooth proxy**. Nearby addresses,
   raw advertisement payloads and RSSI can disclose device presence. Encore does
   not save a beacon history. Neither voice mute nor music controls imply BLE
   consent; Bluetooth does not start or unmute the microphone.

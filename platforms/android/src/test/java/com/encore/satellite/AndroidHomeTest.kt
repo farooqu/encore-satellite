@@ -150,7 +150,7 @@ class AndroidHomeTest {
                 RoborazziOptions(taskType = RoborazziTaskType.Record))
 
             choose.performTouchInput { click() }
-            compose.onNodeWithText("Android Home").assertDoesNotExist()
+            compose.onNodeWithTag("settings-screen").assertDoesNotExist()
             compose.runOnIdle {
                 val intent = android.nextStartedActivity
                 assertEquals(Settings.ACTION_HOME_SETTINGS, intent.action)

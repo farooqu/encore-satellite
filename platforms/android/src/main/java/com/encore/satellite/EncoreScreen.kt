@@ -2,11 +2,14 @@ package com.encore.satellite
 
 import android.content.Context
 import android.net.Uri
+import android.os.Build
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -202,12 +205,20 @@ internal fun EncoreScreen(state: EncoreState, onStart: () -> Unit, onTalk: () ->
                 // Keep Settings in the Activity window so a remote turn can take over without losing window focus.
                 val choosing = pickerOrigin
                 BackHandler(onBack = if (choosing != null) ::closePicker else ::closeSettings)
-                Surface(Modifier.fillMaxSize().testTag("settings-screen").semantics { paneTitle = "Satellite settings" }) {
-                    if (choosing != null) DashboardPicker(choosing, displayPages.takeIf { choosing == displayOrigin }.orEmpty(),
-                        dashboardAuth, ::closePicker) { saveDisplay(choosing, it); closeSettings() }
-                    else SettingsContent(state, noiseKey, musicToken, onMusicConnect, onMusicDisconnect, onMusicCommand, onUpdate, onBluetooth,
-                        dashboardAuth, onChooseHome, onNotificationSettings, { closeSettings(); onSetup() }, ::closeSettings,
-                        displayOrigin, displayPages, { pickerOrigin = it }, { saveDisplay(displayOrigin, it) })
+                val dark = isSystemInDarkTheme()
+                val colors = when {
+                    Build.VERSION.SDK_INT >= 31 -> if (dark) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
+                    dark -> darkColorScheme()
+                    else -> lightColorScheme()
+                }
+                MaterialTheme(colorScheme = colors) {
+                    Surface(Modifier.fillMaxSize().testTag("settings-screen").semantics { paneTitle = "Satellite settings" }) {
+                        if (choosing != null) DashboardPicker(choosing, displayPages.takeIf { choosing == displayOrigin }.orEmpty(),
+                            dashboardAuth, ::closePicker) { saveDisplay(choosing, it); closeSettings() }
+                        else SettingsContent(state, noiseKey, musicToken, onMusicConnect, onMusicDisconnect, onMusicCommand, onUpdate, onBluetooth,
+                            dashboardAuth, onChooseHome, onNotificationSettings, { closeSettings(); onSetup() }, ::closeSettings,
+                            displayOrigin, displayPages, { pickerOrigin = it }, { saveDisplay(displayOrigin, it) })
+                    }
                 }
             } else if (pendingWake) {
                 VoiceWakeCue(Modifier.align(Alignment.BottomCenter).navigationBarsPadding()
@@ -274,16 +285,15 @@ internal fun EncoreScreen(state: EncoreState, onStart: () -> Unit, onTalk: () ->
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable private fun MusicControls(music: MusicState, command: (String) -> Unit, interrupted: Boolean) {
-    Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp)) {
-        Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
-            Text(music.title.ifEmpty { "Sendspin · ${music.status}" }, maxLines = 1, color = Color.White)
-            if (music.artist.isNotEmpty()) Text(music.artist, color = Muted, maxLines = 1, fontSize = 12.sp)
-            FlowRow {
-                if (music.playing && interrupted) TextButton(onClick = { command("resume") }) { Text("Resume audio") }
-                val action = if (music.playing) Mobile.SendspinPause else Mobile.SendspinPlay
-                TextButton(onClick = { command(action) }, enabled = action in music.commands) { Text(if (music.playing) "Pause" else "Play") }
-                TextButton(onClick = { command(Mobile.SendspinNext) }, enabled = Mobile.SendspinNext in music.commands) { Text("Next") }
-            }
+    Column(Modifier.fillMaxWidth()) {
+        Text(music.title.ifEmpty { "Sendspin · ${music.status}" }, maxLines = 1, style = MaterialTheme.typography.titleMedium)
+        if (music.artist.isNotEmpty()) Text(music.artist, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1, style = MaterialTheme.typography.bodySmall)
+        FlowRow {
+            if (music.playing && interrupted) TextButton(onClick = { command("resume") }) { Text("Resume audio") }
+            val action = if (music.playing) Mobile.SendspinPause else Mobile.SendspinPlay
+            TextButton(onClick = { command(action) }, enabled = action in music.commands) { Text(if (music.playing) "Pause" else "Play") }
+            TextButton(onClick = { command(Mobile.SendspinNext) }, enabled = Mobile.SendspinNext in music.commands) { Text("Next") }
         }
     }
 }
@@ -334,10 +344,10 @@ internal fun trustedNavigation(origin: String, value: String): Boolean {
 
 @Composable
 internal fun DashboardSignInNeeded(onPhone: (() -> Unit)?, onTablet: () -> Unit) {
-    Column(Modifier.fillMaxSize().background(Color(0xff101d28)).padding(32.dp),
+    Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surface).padding(32.dp),
         verticalArrangement = Arrangement.Center) {
-        Text("Dashboard sign-in needed", style = MaterialTheme.typography.headlineMedium, color = Color.White)
-        Text("Your Home Assistant session ended. Sign in again without changing your dashboard selection.", color = Muted)
+        Text("Dashboard sign-in needed", style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.onSurface)
+        Text("Sign in to Home Assistant again. Your dashboards are still saved.", color = MaterialTheme.colorScheme.onSurfaceVariant)
         if (onPhone != null) Button(onClick = onPhone) { Text("Sign in with phone") }
         TextButton(onClick = onTablet) { Text("Sign in on tablet") }
     }
@@ -349,48 +359,67 @@ internal fun DashboardSignInNeeded(onPhone: (() -> Unit)?, onTablet: () -> Unit)
     onChooseHome: () -> Unit, onNotificationSettings: () -> Unit, onSetup: () -> Unit, close: () -> Unit,
     displayOrigin: String, displayPages: List<DashboardPage>, chooseDashboards: (String) -> Unit,
     updateDashboards: (List<DashboardPage>) -> Unit) {
+    var details by remember { mutableStateOf(false) }
     var sendspin by remember { mutableStateOf("") }
-    var secret by remember { mutableStateOf("") }
+    val dashboardSignIn = auth?.takeIf { displayOrigin.startsWith("https://") && supportsDashboardBridge() }
+    val account = dashboardSignIn?.saved?.takeIf { it.origin() == displayOrigin }
     Column(Modifier.fillMaxSize().systemBarsPadding().imePadding(), horizontalAlignment = Alignment.CenterHorizontally) {
         Row(Modifier.widthIn(max = 640.dp).fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text("Satellite settings", Modifier.weight(1f).semantics { heading() }, style = MaterialTheme.typography.titleLarge)
+            Text("Satellite settings", Modifier.weight(1f).semantics { heading() }, style = MaterialTheme.typography.headlineSmall)
             TextButton(onClick = close) { Text("Done") }
         }
         Column(Modifier.widthIn(max = 640.dp).fillMaxWidth().verticalScroll(rememberScrollState()).padding(start = 20.dp, end = 20.dp, bottom = 20.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text("${state.name} · Incubator only", color = Mint)
-            Text(state.status, Modifier.semantics { liveRegion = LiveRegionMode.Polite }, color = Muted)
-            TextButton(onClick = onSetup) { Text("Setup") }
-            TextButton(onClick = { close(); onNotificationSettings() }) { Text("Manage notifications") }
-            HorizontalDivider()
-            Text("Android Home", Modifier.semantics { heading() }, style = MaterialTheme.typography.titleMedium)
-            Text("Choose Encore Incubator in Android to open Encore when you press Home. To switch back, choose your previous launcher in the same screen.")
-            TextButton(onClick = { close(); onChooseHome() }) { Text("Choose Home app") }
-            HorizontalDivider()
+            Surface(Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.large, color = MaterialTheme.colorScheme.primaryContainer) {
+                Column(Modifier.padding(horizontal = 20.dp, vertical = 16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(state.status, Modifier.semantics { liveRegion = LiveRegionMode.Polite }, style = MaterialTheme.typography.titleLarge)
+                    Text(state.name, style = MaterialTheme.typography.bodyMedium)
+                }
+            }
             if (state.music.enabled) MusicControls(state.music, onMusicCommand, state.audioInterrupted)
-            Text("Incubator voice uses trusted-LAN TCP 6055. ESPHome controls use encrypted TCP 6053. Bluetooth capabilities depend on the running Android APIs; no Assist backend.", fontSize = 12.sp)
-            TextButton(onClick = onBluetooth) { Text("Bluetooth proxy setup") }
+            HorizontalDivider()
+            Column {
+                Text("Device", Modifier.semantics { heading() }, style = MaterialTheme.typography.titleMedium)
+                SettingsAction("Device setup", onClick = onSetup)
+                SettingsAction("Choose Home app", "Set which app opens when you press Home.") { close(); onChooseHome() }
+                SettingsAction("Manage notifications") { close(); onNotificationSettings() }
+                SettingsAction("Bluetooth proxy", onClick = onBluetooth)
+                SettingsAction("Review downloaded update", onClick = onUpdate)
+            }
             HorizontalDivider()
             DashboardSettings(displayOrigin, displayPages, chooseDashboards, updateDashboards)
-            if (auth != null && displayOrigin.startsWith("https://") && supportsDashboardBridge()) {
-                auth.saved?.takeIf { it.origin() == displayOrigin }?.let {
-                    Text("Dashboard account: ${it.name()}\nSession ID: ${it.clientID()}", fontSize = 12.sp)
-                }
-                TextButton(onClick = { close(); auth.start(displayOrigin) }) { Text("Sign in with phone") }
+            if (dashboardSignIn != null) {
+                account?.let { Text("Signed in as ${it.name()}", style = MaterialTheme.typography.bodyMedium) }
+                TextButton(onClick = { close(); dashboardSignIn.start(displayOrigin) }) { Text("Sign in with phone") }
             }
-            if (!state.needsHomeAssistantSetup) {
-                TextButton(onClick = { secret = noiseKey() }) { Text("Reveal ESPHome encryption key") }
-            }
-            Text("Choose stable/dev, check, and request updates through ESPHome. Installing a downloaded APK needs approval on this device.", fontSize = 12.sp)
-            TextButton(onClick = onUpdate) { Text("Review downloaded update") }
             HorizontalDivider()
-            OutlinedTextField(sendspin, { sendspin = it }, label = { Text("Sendspin host:port") }, singleLine = true)
-            Row {
-                TextButton(onClick = { onMusicConnect(sendspin) }) { Text("Connect music") }
-                TextButton(onClick = onMusicDisconnect) { Text("Disconnect") }
+            SettingsAction(if (details) "Hide connection details" else "Connection details",
+                if (details) null else "Sendspin and pairing keys",
+                Modifier.semantics { stateDescription = if (details) "Expanded" else "Collapsed" }) { details = !details }
+            if (details) {
+                var secret by remember { mutableStateOf("") }
+                Text("Sendspin", Modifier.semantics { heading() }, style = MaterialTheme.typography.titleMedium)
+                OutlinedTextField(sendspin, { sendspin = it }, Modifier.fillMaxWidth(), label = { Text("Sendspin host:port") }, singleLine = true)
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(onClick = { onMusicConnect(sendspin) }) { Text("Connect music") }
+                    TextButton(onClick = onMusicDisconnect) { Text("Disconnect") }
+                }
+                Text("Pairing and recovery", Modifier.semantics { heading() }, style = MaterialTheme.typography.titleMedium)
+                if (!state.needsHomeAssistantSetup) {
+                    SettingsAction("Reveal ESPHome encryption key") { secret = noiseKey() }
+                }
+                SettingsAction("Reveal Sendspin pairing token") { secret = musicToken() }
+                if (secret.isNotEmpty()) SelectionContainer { Text(secret, style = MaterialTheme.typography.bodySmall) }
+                account?.let { Text("Dashboard session ID: ${it.clientID()}", style = MaterialTheme.typography.bodySmall) }
             }
-            TextButton(onClick = { secret = musicToken() }) { Text("Reveal Sendspin pairing token") }
-            if (secret.isNotEmpty()) SelectionContainer { Text(secret, fontSize = 12.sp) }
         }
+    }
+}
+
+@Composable private fun SettingsAction(label: String, detail: String? = null, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    Column(modifier.fillMaxWidth().clickable(role = Role.Button, onClick = onClick)
+        .heightIn(min = 48.dp).padding(vertical = 8.dp), verticalArrangement = Arrangement.Center) {
+        Text(label, style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.primary)
+        if (detail != null) Text(detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
