@@ -335,7 +335,7 @@ class EncoreScreenTest {
         assertFalse("Opening settings changed mute intent", privacy)
     }
 
-    @Test fun localWakeShowsOnlyAnAcceptedCallAndKeepsItsFollowUpsThroughDrain() {
+    @Test fun localWakeShowsAnImmediateCueAndOnlyAnAcceptedCallKeepsItsTranscript() {
         compose.mainClock.autoAdvance = false
         val state = mutableStateOf(ready())
         var stops = 0
@@ -352,27 +352,33 @@ class EncoreScreenTest {
         val cue = compose.onNodeWithTag("voice-wake-cue")
         val oldIndicator = compose.onNodeWithTag("voice-edge-glow")
         val tentative = ready().copy(voiceActive = true, invocation = "wake", phase = "tentative", input = "tentative")
-        compose.runOnIdle { state.value = tentative }
-        advance(250)
         cue.assertDoesNotExist()
+        capture("tablet-wake-idle")
+        compose.runOnIdle { state.value = tentative }
+        advance(64)
+        cue.assertIsDisplayed().assertHasNoClickAction()
+        capture("tablet-wake-cue")
         panel.assertDoesNotExist()
         oldIndicator.assertDoesNotExist()
         compose.runOnIdle { state.value = ready().copy(reason = "answered_elsewhere") }
-        advance(450)
+        advance(64)
         cue.assertDoesNotExist()
         panel.assertDoesNotExist()
         compose.runOnIdle { state.value = tentative.copy(turn = 2) }
-        advance(440)
-        cue.assertIsDisplayed().assertHasNoClickAction()
-        capture("tablet-wake-cue")
+        advance(64)
+        cue.assertIsDisplayed()
         compose.runOnIdle { state.value = ready().copy(turn = 2, reason = "wake_rejected") }
         advance(64)
         cue.assertDoesNotExist()
         panel.assertDoesNotExist()
         oldIndicator.assertDoesNotExist()
 
+        compose.runOnIdle { state.value = tentative.copy(turn = 3) }
+        advance(64)
+        cue.assertIsDisplayed()
         compose.runOnIdle { state.value = tentative.copy(turn = 3, accepted = true, phase = "listening", input = "listening") }
         advance(64)
+        cue.assertDoesNotExist()
         val compact = panel.assertIsDisplayed().fetchSemanticsNode().boundsInRoot
         compose.onNodeWithText("Listening…").assertIsDisplayed()
         compose.onNodeWithContentDescription("Encore Satellite").assertIsDisplayed()

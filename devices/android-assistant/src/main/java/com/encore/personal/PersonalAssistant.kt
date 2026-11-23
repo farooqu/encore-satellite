@@ -3,8 +3,6 @@ package com.encore.personal
 import android.app.KeyguardManager
 import android.content.Intent
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
 import android.os.PowerManager
 import android.speech.RecognitionService
 import android.speech.SpeechRecognizer
@@ -34,28 +32,14 @@ internal data class VoiceTurn(
 
 // A show is requested at most once per wake. An already-shown cue upgrades in
 // its own window; an outstanding system show reads the latest state at delivery.
-internal class WakeWindow(private val handler: Handler, private val show: (TurnKey) -> Unit) {
+internal class WakeWindow(private val show: (TurnKey) -> Unit) {
     private var key: TurnKey? = null
-    private var requested = false
-    private val showCue = Runnable { request() }
 
     fun update(turn: VoiceTurn?) {
-        val wake = turn?.takeIf { it.invocation == "wake" && (it.pending || it.accepted) }
-        if (wake?.key != key) {
-            handler.removeCallbacks(showCue)
-            requested = false
-            key = wake?.key
-            if (wake?.pending == true) handler.postDelayed(showCue, 350)
-        }
-        if (wake?.accepted == true) {
-            handler.removeCallbacks(showCue)
-            request()
-        }
-    }
-
-    private fun request() {
-        if (requested) return
-        key?.let { requested = true; show(it) }
+        val next = turn?.takeIf { it.invocation == "wake" && (it.pending || it.accepted) }?.key
+        if (next == key) return
+        key = next
+        if (next != null) show(next)
     }
 }
 
@@ -64,7 +48,7 @@ class PersonalAssistant : VoiceInteractionService() {
     private var source: MicService? = null
     private var request: Show? = null
     internal var session: PersonalVoiceSession? = null
-    private val wake = WakeWindow(Handler(Looper.getMainLooper())) { key ->
+    private val wake = WakeWindow { key ->
         val mic = source
         val live = mic?.voiceTurn()
         if (mic != null && mic === MicService.armedMic && live?.key == key &&

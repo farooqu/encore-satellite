@@ -63,34 +63,22 @@ class MicActivityTest {
         }
     }
 
-    @Test fun pendingWakeDoesNotOpenEarlyAndAcceptedWakeDoesNotWaitForCue() {
-        val loop = shadowOf(Looper.getMainLooper())
+    @Test fun pendingWakeRequestsOneShowImmediatelyAndAcceptanceDoesNotRequestAnother() {
         val requests = mutableListOf<TurnKey>()
-        val window = WakeWindow(Handler(Looper.getMainLooper()), requests::add)
+        val window = WakeWindow(requests::add)
         val candidate = VoiceTurn(TurnKey(4, 10), "wake", "tentative", false, "", "")
         assertFalse(candidate.canPresent)
         window.update(candidate)
-        loop.idleFor(Duration.ofMillis(349))
-        assertTrue(requests.isEmpty())
-        // A fast terminal verdict removes the candidate before it can show.
-        window.update(null)
-        loop.idleFor(Duration.ofMillis(1))
-        assertTrue(requests.isEmpty())
-
-        val fast = candidate.copy(key = TurnKey(4, 11))
-        window.update(fast)
-        window.update(fast.copy(accepted = true, phase = "listening"))
-        assertEquals(listOf(fast.key), requests)
-        loop.idleFor(Duration.ofMillis(350))
-        assertEquals(listOf(fast.key), requests)
-
-        val slow = candidate.copy(key = TurnKey(4, 12))
-        window.update(slow)
-        loop.idleFor(Duration.ofMillis(350))
-        assertEquals(listOf(fast.key, slow.key), requests)
-        window.update(slow.copy(accepted = true, phase = "listening"))
+        assertEquals(listOf(candidate.key), requests)
+        window.update(candidate)
+        window.update(candidate.copy(accepted = true, phase = "listening"))
         // Acceptance updates the existing window; it does not issue a second show.
-        assertEquals(listOf(fast.key, slow.key), requests)
+        assertEquals(listOf(candidate.key), requests)
+        window.update(null)
+
+        val firstSeenAccepted = candidate.copy(key = TurnKey(4, 11), accepted = true, phase = "listening")
+        window.update(firstSeenAccepted)
+        assertEquals(listOf(candidate.key, firstSeenAccepted.key), requests)
         window.update(null)
     }
 

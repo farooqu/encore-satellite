@@ -65,10 +65,6 @@ internal fun EncoreScreen(state: EncoreState, onStart: () -> Unit, onTalk: () ->
     }
     val pendingWake = localAssist && state.microphoneVisible && state.invocation == "wake" && !state.accepted &&
         state.phase == "tentative" && state.reason.isEmpty()
-    var cue by remember(state.generation, state.turn, pendingWake) { mutableStateOf(false) }
-    LaunchedEffect(state.generation, state.turn, pendingWake) {
-        if (pendingWake) { delay(350); cue = true }
-    }
     var settingsVisible by remember(legacyVisible || panel != null) { mutableStateOf(false) }
     fun closeSettings() { settingsVisible = false }
     fun closePanel() {
@@ -140,7 +136,7 @@ internal fun EncoreScreen(state: EncoreState, onStart: () -> Unit, onTalk: () ->
                     SettingsContent(state, noiseKey, musicToken, onMusicConnect, onMusicDisconnect, onMusicCommand, onUpdate, onBluetooth,
                         dashboardAuth, onChooseHome, onNotificationSettings, { closeSettings(); onSetup() }, ::closeSettings)
                 }
-            } else if (cue) VoiceWakeCue(Modifier.align(Alignment.BottomCenter).navigationBarsPadding()
+            } else if (pendingWake) VoiceWakeCue(Modifier.align(Alignment.BottomCenter).navigationBarsPadding()
                 .padding(bottom = if (landscape) 8.dp else 82.dp))
             if (!settingsVisible && state.problem.isNotEmpty()) {
                 Surface(Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(horizontal = 20.dp, vertical = 4.dp),

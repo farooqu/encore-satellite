@@ -82,12 +82,13 @@ using Android's ordinary sideloading confirmation. The debug app ID is
    closes the satellite. Changing the Wi-Fi network/address or losing sustained
    microphone access pauses it. It does not re-arm at boot or after process death.
 
-On an unlocked, interactive screen, a tentative wake that lasts 350 ms can
-show a small, non-interactive cue above navigation. The phone keeps capturing
+On an unlocked, interactive screen, a tentative wake requests a small,
+non-interactive cue above navigation immediately. The phone keeps capturing
 through the decision. Only Incubator's `listening` event opens the full wake
 panel and requests audio focus. A room win or a rejection removes the cue
-without an alert; fast verdicts skip it. Explicit assistant gestures can get
-immediate feedback. The Listening panel stays compact and grows to fit the
+without an alert. If Android delivers the window request after the verdict,
+it opens directly as the full panel on acceptance or stays hidden on rejection.
+The Listening panel stays compact and grows to fit the
 transcript or reply, up to half the screen. Longer text scrolls inside the
 panel. The close icon stops the current turn; Pause mic stays in setup and the
 notification. Automatic wake UI does not turn on the display or show over
