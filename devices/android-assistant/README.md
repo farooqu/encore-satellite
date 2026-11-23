@@ -1,12 +1,37 @@
 # Encore Satellite Assistant
 
-An experimental, Incubator-only Android APK for a personal phone. It is built
-separately from Encore's tablet satellite; it is not a ROM, Home replacement,
-or Assist pipeline. The Companion app can stay installed; the overlay requires
-choosing Encore Satellite Assistant as Android's default
-digital assistant yourself.
+Use your Android phone as a personal input for Voice Incubator. To use the
+overlay, choose Encore Satellite Assistant as Android's default digital
+assistant. You can keep the Home Assistant Companion app installed. See the
+[device comparison](../../docs/voice-experience.md) for the tablet and Echo Dot.
 
-## Try it
+## Install the signed APK
+
+From the [Assistant prereleases](https://github.com/farooqu/encore-satellite/releases?q=tag%3Aandroid-assistant-),
+download `encore-satellite-assistant.apk` and `SHA256SUMS` from the same release.
+The APK supports ARM64 and ARMv7 on Android 8 (API 26) or newer; the optional
+system assistant overlay needs Android 12 or newer. Verify the APK before
+opening it on your phone and accepting Android's install prompt:
+
+```sh
+grep -E '[[:space:]]\*?encore-satellite-assistant\.apk$' SHA256SUMS | shasum -a 256 -c
+```
+
+With [Android platform-tools](https://developer.android.com/tools/releases/platform-tools)
+and approved USB debugging, you can also install and check it from a computer:
+
+```sh
+adb devices -l
+# Set PHONE_SERIAL to the intended phone listed as "device".
+adb -s "$PHONE_SERIAL" install encore-satellite-assistant.apk
+adb -s "$PHONE_SERIAL" shell pm path com.encore.personal
+```
+
+Use `install -r` to keep app data when you install a newer APK with the same
+signer. The signed, tablet, and debug apps have different app IDs. Open the
+phone app and [connect it to Incubator](#connect-to-voice-incubator).
+
+## Build locally instead
 
 Build with Go 1.27, JDK 21, Gradle 9.4.1, Android SDK platform/build-tools 36,
 NDK 28.0.13004108, Meson and Ninja. Set `ANDROID_HOME` and put Gradle on `PATH`
@@ -19,6 +44,8 @@ devices/android-assistant/build-android assembleDebug testDebugUnitTest lintDebu
 Install `devices/android-assistant/build/outputs/apk/debug/EncoreSatelliteAssistant-debug.apk`
 using Android's ordinary sideloading confirmation. The debug app ID is
 `com.encore.personal.dev`, with ARM64 and ARMv7 native libraries, API 26 minimum.
+
+## Connect to Voice Incubator
 
 1. On trusted home Wi-Fi, enter the private IPv4 address the Incubator app
    connects **from** (normally the HA host; reserve its address in DHCP).

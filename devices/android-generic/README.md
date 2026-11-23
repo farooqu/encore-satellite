@@ -1,11 +1,40 @@
 # Generic Android: Incubator development APK
 
-This target now contains an **Incubator-only Android app**, with a native Kotlin /
-Jetpack Compose host and an in-process Go engine. It is not a released or
-hardware-qualified package. Samsung Galaxy Tab A7 Lite is the first device to
-try; Meta Portal installation remains unverified, not ordinary tablet support.
-`profile.json` and the central release registry remain planning/revision-zero
-metadata, not runtime settings or a release declaration.
+Use this app to add Incubator voice to an Android display. You can show a Home
+Assistant dashboard with a conversation overlay. For personal voice on a phone,
+use the [Assistant app](../android-assistant/README.md).
+
+We installed the signed 0.1.63 APK on a Galaxy Tab A7 Lite (SM-T220, Android
+14, LineageOS 21 GSI) and reached **Pair with Home Assistant**. We stopped
+before pairing, voice, or OTA tests. We haven't verified a Meta Portal install.
+
+## Install the signed APK
+
+Start with an Android 8 (API 26) or newer device that can run ARM64 or ARMv7 apps.
+Download `encore-android.apk` from an `android-<version>`
+[development release](https://github.com/farooqu/encore-satellite/releases?q=tag%3Aandroid-).
+Compare its SHA-256 with the asset digest on
+GitHub before installing (`shasum -a 256 encore-android.apk` on macOS, or
+`sha256sum encore-android.apk` on Linux). Open the APK on the tablet and accept
+Android's install prompt, or use USB with [Android platform-tools](https://developer.android.com/tools/releases/platform-tools)
+and USB debugging enabled and approved on the tablet:
+
+```sh
+adb devices -l
+# Set TABLET_SERIAL to the intended device listed as "device", not "unauthorized".
+adb -s "$TABLET_SERIAL" install encore-android.apk
+adb -s "$TABLET_SERIAL" shell pm path com.encore.satellite.incubator
+adb -s "$TABLET_SERIAL" shell dumpsys package com.encore.satellite.incubator | grep -E 'versionName=|versionCode='
+```
+
+Look for `Success`, a `package:` path, and the version you chose. Use
+`install -r` to keep settings when you upgrade the same signed app.
+Uninstalling deletes pairing and settings. The debug APK has a separate app ID
+and can stay installed.
+
+Open Encore and follow [first-run setup](#set-up-the-app). Pair with Home
+Assistant before connecting Incubator. Test **Talk** before setting up a
+dashboard, changing the Android Home app, or enabling remote installs.
 
 ## Optional illuminance
 
@@ -152,11 +181,11 @@ Live Monitor and actual enrollment/training with the matched companion. Neither
 the synthetic Android tests nor prior Biscuit virtual intercom runs qualify
 these devices, acoustic timings or model-backed enrollment/training.
 
-## Use the development app
+## Set up the app
 
-1. Install the debug APK using Android's ordinary user-approved sideloading flow.
-   Open Encore and choose **Allow microphone access** if prompted. Notifications
-   are a separate, optional step on Android 13+. Encore starts its microphone/media
+1. Open the [installed app](#install-the-signed-apk) and choose **Allow microphone
+   access** if prompted. Notifications are optional on Android 13+.
+   Encore starts its microphone/media
    foreground service automatically once microphone access is granted. No boot
    receiver, root, device owner or unattended kiosk privileges are required.
    Microphone capture, Incubator and Sendspin stay off until ESPHome pairing succeeds.
@@ -190,8 +219,10 @@ these devices, acoustic timings or model-backed enrollment/training.
    Incubator sends mixednet models, which execute locally through the compatible
    microWakeWord frontend. No wake model is bundled or downloaded independently.
    Readiness combines usable ordinary wake models with current native capture
-   health; a stop-only model does not mean hands-free wake is ready. **Talk** is a
-   manual fallback, not a replacement for local wake detection.
+   health; a stop-only model does not mean hands-free wake is ready. Tap **Talk**
+   and confirm you hear a reply. Then assign a wake word in Incubator and try it
+   separately. If Talk works but wake doesn't, check model assignment and mic
+   readiness rather than repeating ESPHome pairing.
    First-run setup then offers the Bluetooth proxy on supported hardware; it
    defaults On but needs local access and scan approval. Dashboard, Android Home
    and remote installs are optional. Choose **Done** to use Encore without a

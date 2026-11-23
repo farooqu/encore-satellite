@@ -46,6 +46,9 @@ support.
 
 ## Single-backend packages and common controls
 
+See the [Voice PE comparison](voice-experience.md) for session behavior and
+device controls.
+
 Device packages and the virtual lab run only native Voice Incubator. There is no
 runtime backend selector or fallback. Routine updates preserve backend and channel. See the
 [package contract](device-packages/README.md#incubator-first-single-backend-packages).

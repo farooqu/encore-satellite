@@ -1,9 +1,13 @@
 # Echo Dot (2nd generation) development package
 
-**Experimental, not hardware-qualified.** Biscuit builds use Linux 6.1.178,
-Alpine 3.22 AArch64, the native Encore runtime and a separate USB recovery
-environment. See [the current build and fresh-install instructions](packaging/README.md).
-The Linux 3.18/ARMv7 release path is retired. Other Echo models are not supported.
+The Echo Dot (2nd gen) development build uses Linux 6.1.178 and Alpine 3.22
+AArch64. Follow the [install guide](INSTALL.md) for an unlocked Dot. The
+[packaging notes](packaging/README.md) cover private builds and recovery.
+We retired the Linux 3.18/ARMv7 build. This package supports the second-generation
+Echo Dot only.
+
+See the [Voice PE comparison](../../docs/voice-experience.md) for voice and
+monitoring features by device.
 
 ## Internal names
 
@@ -75,11 +79,10 @@ does not need this rename for physical preflight; no device migration is perform
 
 **Not implemented by this package:** beamforming, speaker EQ calibration,
 Voice PE ring parity, base/kernel OTA migration or a production release service.
-Voice activation uses Action or
-app-pushed microWakeWord/MixedNet models. Intercom is not supported. A source-backed
-route is not an acoustic result; playback level and every physical control still
-need testing on an Encore unit. The deliberately quiet untuned output is not a
-calibrated safe-output guarantee.
+Start a voice turn with Action or a microWakeWord model from Incubator. The
+runtime includes an intercom route; we haven't tested it on the Dot. We still
+need to test the physical controls and measure playback levels. The build uses
+a low default volume without speaker calibration.
 
 ### Loopback AEC and Incubator monitoring
 
