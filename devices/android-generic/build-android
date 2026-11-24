@@ -6,12 +6,15 @@ root="$(cd "$(dirname "$0")/../.." && pwd)"
 out="$root/build/android"
 mkdir -p "$out"
 pin=bd1d90a8f79b8b78c1ee924a0e6c14016ed1f1e2
-if [[ ! -f "$out/sendspindroid/.encore-pin" ]] || [[ "$(cat "$out/sendspindroid/.encore-pin")" != "$pin" ]]; then
+patch="$root/platforms/android/sendspindroid-device-info.patch"
+source_stamp="$pin:$(sha256sum < "$patch" | cut -d' ' -f1)"
+if [[ ! -f "$out/sendspindroid/.encore-pin" ]] || [[ "$(cat "$out/sendspindroid/.encore-pin")" != "$source_stamp" ]]; then
   curl -fL "https://codeload.github.com/chrisuthe/SendspinDroid/tar.gz/$pin" -o "$out/sendspindroid.tar.gz"
   echo "07e7d854c6156136ddea961fe759aae122c8827f12723e22404d44ecd6f72942  $out/sendspindroid.tar.gz" | sha256sum -c -
   mkdir -p "$out/sendspindroid"
   tar -xzf "$out/sendspindroid.tar.gz" --strip-components=1 -C "$out/sendspindroid"
-  printf '%s' "$pin" > "$out/sendspindroid/.encore-pin"
+  git -C "$root" apply --directory=build/android/sendspindroid "$patch"
+  printf '%s' "$source_stamp" > "$out/sendspindroid/.encore-pin"
 fi
 : "${ANDROID_HOME:?Set ANDROID_HOME to an Android SDK with platform 36 and NDK 28.0.13004108}"
 export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/28.0.13004108"

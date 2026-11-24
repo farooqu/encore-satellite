@@ -1,0 +1,79 @@
+diff --git a/android/player/src/main/java/com/sendspindroid/sendspin/SendSpinHost.kt b/android/player/src/main/java/com/sendspindroid/sendspin/SendSpinHost.kt
+--- a/android/player/src/main/java/com/sendspindroid/sendspin/SendSpinHost.kt
++++ b/android/player/src/main/java/com/sendspindroid/sendspin/SendSpinHost.kt
+@@ -15,6 +15,11 @@
+ interface SendSpinHost {
+     /** Reported to servers as `device_info.software_version`. */
+     val softwareVersion: String
+-
++
++    /** Optional hardware labels and device registry identity for `client/hello`. */
++    val productName: String get() = "SendSpinDroid"
++    val manufacturer: String? get() = null
++    val macAddress: String? get() = null
++
+     /** Cap the PCM bit depth at 16 and keep buffers small. */
+     val lowMemoryMode: Boolean
+diff --git a/android/player/src/main/java/com/sendspindroid/sendspin/SendSpin.kt b/android/player/src/main/java/com/sendspindroid/sendspin/SendSpin.kt
+--- a/android/player/src/main/java/com/sendspindroid/sendspin/SendSpin.kt
++++ b/android/player/src/main/java/com/sendspindroid/sendspin/SendSpin.kt
+@@ -799,9 +799,13 @@
+     override fun getDeviceName(): String = deviceName
+ 
+-    override fun getManufacturer(): String = Build.MANUFACTURER ?: "Unknown"
++    override fun getManufacturer(): String = host.manufacturer ?: Build.MANUFACTURER ?: "Unknown"
+ 
+     override fun getSoftwareVersion(): String = host.softwareVersion
+-
++
++    override fun getProductName(): String = host.productName
++
++    override fun getMacAddress(): String? = host.macAddress
++
+     override fun persistOutputDelayMs(delayMs: Int) = host.setOutputDelayMs(delayMs)
+ 
+     override fun getSupportedFormats(): List<MessageBuilder.FormatEntry> {
+diff --git a/android/player/src/main/java/com/sendspindroid/sendspin/protocol/SendSpinProtocolHandler.kt b/android/player/src/main/java/com/sendspindroid/sendspin/protocol/SendSpinProtocolHandler.kt
+--- a/android/player/src/main/java/com/sendspindroid/sendspin/protocol/SendSpinProtocolHandler.kt
++++ b/android/player/src/main/java/com/sendspindroid/sendspin/protocol/SendSpinProtocolHandler.kt
+@@ -276,6 +276,9 @@
+      * Get the client app version reported in device_info.software_version.
+      */
+     protected abstract fun getSoftwareVersion(): String
+-
++
++    protected open fun getProductName(): String = "SendSpinDroid"
++    protected open fun getMacAddress(): String? = null
++
+     /**
+      * The `supported_formats` this connection's client/hello advertised. A
+@@ -314,6 +317,8 @@
+             softwareVersion = getSoftwareVersion(),
+             unpairedAccessEnabled = isUnpairedAccessEnabled(),
+             supportedPairMethods = getSupportedPairMethods(),
+             colorRole = claimsColorRole(),
++            productName = getProductName(),
++            macAddress = getMacAddress(),
+         )
+         sendProtocolMessage(text)
+diff --git a/android/shared/src/commonMain/kotlin/com/sendspindroid/sendspin/protocol/message/MessageBuilder.kt b/android/shared/src/commonMain/kotlin/com/sendspindroid/sendspin/protocol/message/MessageBuilder.kt
+--- a/android/shared/src/commonMain/kotlin/com/sendspindroid/sendspin/protocol/message/MessageBuilder.kt
++++ b/android/shared/src/commonMain/kotlin/com/sendspindroid/sendspin/protocol/message/MessageBuilder.kt
+@@ -84,5 +84,7 @@
+         unpairedAccessEnabled: Boolean = true,
+         supportedPairMethods: List<PairMethodDescriptor> = listOf(PairMethodDescriptor.PAIRING_PSK),
+         colorRole: Boolean = true,
++        productName: String = "SendSpinDroid",
++        macAddress: String? = null,
+     ): String {
+         val message = buildJsonObject {
+@@ -102,7 +104,8 @@
+                 })
+                 put("device_info", buildJsonObject {
+-                    put("product_name", "SendSpinDroid")
++                    put("product_name", productName)
+                     put("manufacturer", manufacturer)
+                     put("software_version", softwareVersion)
++                    if (macAddress != null) put("mac_address", macAddress)
+                 })
+                 put("player@v1_support", buildJsonObject {
