@@ -83,15 +83,19 @@ want both listed in that room.
   pause it initiated in the same group. Active voice and ringing timers take
   priority; without active playback or a pause to resume, Action still starts
   voice when idle. These device interactions add no ESPHome entities.
+- Both targets expose **Sendspin music** as an ESPHome configuration switch,
+  but in Home Assistant, queue and playback controls belong to the Music
+  Assistant player rather than the ESPHome device.
 - Music remains timed while voice attenuates it to 20% of the current music gain.
   Voice activity includes listening, processing, response drain, follow-up,
   announcements and ringing timers. Countdown alone does not duck. Local voice
   activity never pauses a Music Assistant group.
-- Music Stop always silences the device locally and also requests a group Stop
-  if the server supports it. Android's voice Stop affects only the current
+- Android's Now Playing Stop silences music locally and also requests a group
+  Stop if the server supports it. Android's voice Stop affects only the current
   voice turn; Biscuit's Action also silences local music when canceling voice
   or a timer. Voice completion and privacy release do not resume locally
-  stopped music.
+  stopped music. On Biscuit, start or resume the queue in Music Assistant and
+  press Action while it is playing if local sound is still stopped.
   Voice output drain never waits for the music queue. Biscuit's ALSA driver
   cannot atomically stop and snapshot DMA; if a voice cancellation drops shared
   DMA, music discards uncertain frames and renegotiates instead of replaying them.

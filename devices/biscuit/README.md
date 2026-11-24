@@ -434,10 +434,9 @@ not a firewall exception. Host packet tests do not qualify the Dot's vendor kern
 ## Sendspin music
 
 On ARM64 images that include `/usr/local/bin/encore-sendspin`, the encrypted
-ESPHome endpoint exposes **Sendspin music**, **Resume
-music**, **Stop music**, **Pause music**, **Next track** and **Previous track**.
-There is no duplicate music media-player entity: use Music Assistant and its
-Home Assistant integration for music queues, grouping and ongoing playback.
+ESPHome endpoint exposes the **Sendspin music** configuration switch, not
+playback buttons or a duplicate music player. Use Music Assistant and its
+Home Assistant integration for music queues, grouping, and playback controls.
 Music being off or the server being absent does not stop voice, BLE or first-boot
 Improv.
 
@@ -449,7 +448,8 @@ Improv.
    Sendspin server on Wi-Fi and Home Assistant supplies the pairing token to
    Music Assistant. There's no token to copy or setup prompt to complete.
 3. Once paired, choose Biscuit in Music Assistant to start a queue. If its
-   output is locally stopped, **Resume music** releases the local Stop latch.
+   output is locally stopped, press the physical Action button while the queue
+   is playing and hardware privacy is off to restore local sound.
 
 For an older or standalone encrypted Sendspin server without auto-pairing,
 turn **Sendspin music** off and privately run `encore-sendspin pairing-token
@@ -491,15 +491,10 @@ still applies the conservative Dot master limit to the combined, pre-limited
 signal, including simultaneous sources and filter overshoot. This route is
 not a claim that the Dot's single speaker is physically stereo.
 
-Privacy and **Stop music** silence local music even when no server command can
-be sent. Enabling, changing servers or losing the ready connection also latches
-local audio off. Biscuit reconnects in the background but does not replay old
-commands or clear that latch. Once the authenticated player is ready and hardware
-privacy is clear, press **Resume music** again. If a group is already playing,
-this can restore local sound even when the server does not offer a Play command.
-Pause, Next and Previous act on the Music Assistant group only when the server
-advertises them; Stop sends a group command on a best-effort basis in addition to
-always stopping the speaker. No ESPHome entity or setting is added for Action.
+Hardware privacy and using Action to cancel voice or a ringing timer silence
+local music without sending a group command. Enabling, changing servers or
+losing the ready connection also latches local audio off. Biscuit reconnects in
+the background but does not replay old commands or clear that latch.
 
 When nothing in the foreground needs dismissal and hardware privacy is clear,
 Action pauses a known-playing Sendspin group. If the group is playing but the
@@ -512,11 +507,11 @@ The pinned Sendspin SDK reports Playing and Stopped, not a distinct Paused state
 and Music Assistant reports Stopped on pause. Biscuit therefore offers Action
 resume only if it observes the same authenticated group go from Playing to
 Stopped within five seconds of its own Action Pause. This intent is not saved;
-regrouping, disconnect, new playback or another explicit transport control clears
-it. The wire does not acknowledge Pause, so an unrelated stop in that short
-window is indistinguishable. Cold idle, externally paused, disabled, unknown
-or disconnected music falls back to the existing voice action. Use Music
-Assistant or **Resume music** to resume an externally paused group.
+regrouping, disconnect, or new playback clears it. The wire does not acknowledge
+Pause, so an unrelated stop in that short window is indistinguishable. Cold
+idle, externally paused, disabled, unknown or disconnected music falls back to
+the existing voice action. Use Music Assistant to resume an externally paused
+group.
 
 Automatic room targeting, “play here” intents, wake-over-music and music AEC are
 not implemented. Physical presentation latency, acoustic quality, power, CPU/RAM,

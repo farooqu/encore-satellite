@@ -59,8 +59,6 @@ var (
 	LinuxCheck      = CheckUpdates(key("check_updates"))
 	SpeakerMute     = Entity[*api.SwitchCommandRequest]{&api.ListEntitiesSwitchResponse{ObjectId: "speaker_mute", Key: key("speaker_mute"), Name: "Speaker mute", Icon: "mdi:volume-off"}}
 	Sendspin        = Entity[*api.SwitchCommandRequest]{&api.ListEntitiesSwitchResponse{ObjectId: "sendspin", Key: key("sendspin"), Name: "Sendspin music", Icon: "mdi:music", EntityCategory: esphome.CategoryConfig}}
-	SendspinPlay    = button("sendspin_play", "Resume music", "mdi:play", key("sendspin_play"), 0)
-	SendspinStop    = button("sendspin_stop", "Stop music", "mdi:stop", key("sendspin_stop"), 0)
 	RingBrightness  = Entity[*api.NumberCommandRequest]{&api.ListEntitiesNumberResponse{ObjectId: "ring_brightness", Key: key("ring_brightness"), Name: "Ring brightness", Icon: "mdi:brightness-6", EntityCategory: esphome.CategoryConfig, MinValue: 1, MaxValue: 100, Step: 1, UnitOfMeasurement: "%"}}
 	RingMotion      = Entity[*api.SwitchCommandRequest]{&api.ListEntitiesSwitchResponse{ObjectId: "ring_reduced_motion", Key: key("ring_reduced_motion"), Name: "Ring reduced motion", Icon: "mdi:animation-outline", EntityCategory: esphome.CategoryConfig}}
 	Announcements   = Entity[*api.MediaPlayerCommandRequest]{&api.ListEntitiesMediaPlayerResponse{

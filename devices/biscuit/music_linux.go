@@ -19,7 +19,6 @@ import (
 	"github.com/farooqu/encore-satellite/backends/esphome/announcements"
 	"github.com/farooqu/encore-satellite/backends/esphome/controls"
 	"github.com/farooqu/encore-satellite/backends/esphome/sensors"
-	"github.com/farooqu/encore-satellite/core/music"
 	"github.com/farooqu/encore-satellite/internal/esphomepairing"
 	"github.com/farooqu/encore-satellite/platforms/linuxsendspin"
 )
@@ -157,50 +156,6 @@ func (m *musicService) actionPlayback() bool {
 		return true // Keep the resume intent if Play is unavailable or not acted on.
 	}
 	return false
-}
-
-// Only the intents this player implements are translated to companion commands.
-var sendspinCommands = map[music.Command]linuxsendspin.Command{
-	music.Play:     linuxsendspin.Play,
-	music.Stop:     linuxsendspin.Stop,
-	music.Pause:    linuxsendspin.Pause,
-	music.Next:     linuxsendspin.Next,
-	music.Previous: linuxsendspin.Previous,
-}
-
-func (m *musicService) command(intent music.Command) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	// Stop is a local safety action even with no companion, or a server
-	// that does not advertise the network Stop command.
-	if intent == music.Stop {
-		m.player.StopMusic()
-	}
-	w := m.worker
-	if !m.enabled || w == nil || w.revision != m.revision || !w.ready.Ready {
-		return
-	}
-	if intent == music.Stop {
-		select {
-		case <-w.commands:
-		default:
-		}
-	}
-	if intent == music.Play {
-		// This can resume local audio even when the remote queue is already
-		// playing and does not offer Play. Privacy still owns the final veto.
-		m.player.PlayMusic()
-	}
-	cmd := sendspinCommands[intent]
-	canDispatch := intent.CanDispatch(true, w.ready.Supports(cmd))
-	if intent == music.Stop || intent == music.Play || canDispatch {
-		// A separate explicit transport action takes ownership from the key.
-		w.resumePaused, w.pausePending = false, time.Time{}
-	}
-	if !canDispatch {
-		return
-	}
-	w.queue(cmd)
 }
 
 func (w *musicWorker) queue(cmd linuxsendspin.Command) bool {
@@ -429,21 +384,6 @@ var (
 	musicKey         = controls.Sendspin.Key()
 )
 
-var musicButtons = []struct {
-	entity *api.ListEntitiesButtonResponse
-	intent music.Command
-}{
-	{musicButton("sendspin_pause", "Pause music", "mdi:pause"), music.Pause},
-	{musicButton("sendspin_next", "Next track", "mdi:skip-next"), music.Next},
-	{musicButton("sendspin_previous", "Previous track", "mdi:skip-previous"), music.Previous},
-}
-
-func musicButton(id, name, icon string) *api.ListEntitiesButtonResponse {
-	return &api.ListEntitiesButtonResponse{
-		ObjectId: id, Key: (&esphome.Base{ObjectID: id}).Key(), Name: name, Icon: icon,
-	}
-}
-
 func (d *biscuitControls) sensorSources() sensors.Sources {
 	var sources sensors.Sources
 	if d.management != nil {
@@ -515,14 +455,6 @@ func (d *biscuitControls) writable() controls.Bindings {
 			controls.Sendspin.Bind(func(_ *esphome.Conn, v *api.SwitchCommandRequest) error {
 				return report(d.music.configure(v.State))
 			}),
-			controls.SendspinPlay.Bind(func(_ *esphome.Conn, _ *api.ButtonCommandRequest) error {
-				d.music.command(music.Play)
-				return nil
-			}),
-			controls.SendspinStop.Bind(func(_ *esphome.Conn, _ *api.ButtonCommandRequest) error {
-				d.music.command(music.Stop)
-				return nil
-			}),
 		)
 	}
 	return bindings
@@ -535,25 +467,9 @@ func (d *biscuitControls) Handle(ctx context.Context, c *esphome.Conn, msg proto
 		}
 	}
 	switch v := msg.(type) {
-	case *api.ButtonCommandRequest:
-		if d.music != nil && v.DeviceId == 0 {
-			for _, button := range musicButtons {
-				if v.Key == button.entity.Key {
-					d.music.command(button.intent)
-					return nil
-				}
-			}
-		}
 	case *api.ListEntitiesRequest:
 		if err := d.writable().List(c.Send); err != nil {
 			return err
-		}
-		if d.music != nil {
-			for _, button := range musicButtons {
-				if err := c.Send(proto.Clone(button.entity)); err != nil {
-					return err
-				}
-			}
 		}
 		if err := d.sensorSources().List(c.Send); err != nil {
 			return err

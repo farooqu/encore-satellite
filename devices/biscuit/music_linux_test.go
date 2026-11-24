@@ -16,7 +16,6 @@ import (
 	"github.com/farooqu/encore-satellite/backends/bluetooth"
 	"github.com/farooqu/encore-satellite/backends/esphome/sensors"
 	"github.com/farooqu/encore-satellite/backends/incubator"
-	"github.com/farooqu/encore-satellite/core/music"
 	"github.com/farooqu/encore-satellite/core/session"
 	"github.com/farooqu/encore-satellite/platforms/linux"
 	"github.com/farooqu/encore-satellite/platforms/linuxsendspin"
@@ -144,8 +143,7 @@ func TestNativeVolumeEncryptedAPIAndPhysicalKeys(t *testing.T) {
 	peer.send(&api.HelloRequest{ClientInfo: "volume-test", ApiVersionMajor: 1, ApiVersionMinor: 12})
 	peer.receive()
 	peer.send(&api.ListEntitiesRequest{})
-	var volume, mute uint32
-	buttons := map[string]bool{}
+	var volume, mute, sendspin uint32
 listing:
 	for {
 		switch v := peer.receive().(type) {
@@ -160,21 +158,22 @@ listing:
 			if v.ObjectId == "speaker_mute" {
 				mute = v.Key
 			}
+			if v.ObjectId == "sendspin" && v.EntityCategory == esphome.CategoryConfig {
+				sendspin = v.Key
+			}
 		case *api.ListEntitiesButtonResponse:
-			buttons[v.ObjectId] = true
+			switch v.ObjectId {
+			case "sendspin_play", "sendspin_stop", "sendspin_pause", "sendspin_next", "sendspin_previous":
+				t.Fatalf("ESPHome exposed a duplicate Sendspin button %q", v.ObjectId)
+			}
 		case *api.ListEntitiesMediaPlayerResponse:
 			t.Fatal("Sendspin exposed a duplicate media-player entity")
 		case *api.ListEntitiesDoneResponse:
 			break listing
 		}
 	}
-	if volume == 0 || mute == 0 || mute == volume {
-		t.Fatal("missing native entities")
-	}
-	for _, button := range []string{"sendspin_play", "sendspin_stop", "sendspin_pause", "sendspin_next", "sendspin_previous"} {
-		if !buttons[button] {
-			t.Fatalf("missing Sendspin button %q", button)
-		}
+	if volume == 0 || mute == 0 || mute == volume || sendspin == 0 {
+		t.Fatal("missing native volume, mute, or Sendspin configuration entity")
 	}
 	// Each volume snapshot precedes its mute state. Drain through a complete
 	// matching pair, including any coalesced earlier notifications.
@@ -424,8 +423,9 @@ func TestMusicSwitchLifecycleAndIndependentPersistence(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	// OFF must stay off; commands from that period cannot turn into autoplay.
-	m.command(music.Play)
+	if m.actionPlayback() {
+		t.Fatal("disabled Sendspin handled Action")
+	}
 	m.mu.Lock()
 	worker := m.worker
 	m.mu.Unlock()
