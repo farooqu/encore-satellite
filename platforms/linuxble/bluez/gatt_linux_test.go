@@ -118,11 +118,15 @@ type testDevice struct {
 	agent          *testAgentManager
 	path           dbus.ObjectPath
 	props          *prop.Properties
+	slowConnect    atomic.Bool
 	failDisconnect atomic.Bool
 }
 
 func (d *testDevice) Connect() *dbus.Error {
 	d.props.SetMust(deviceIfc, "Connected", true)
+	if d.slowConnect.Swap(false) {
+		time.Sleep(5250 * time.Millisecond)
+	}
 	return nil
 }
 func (d *testDevice) Disconnect() *dbus.Error {
@@ -133,6 +137,9 @@ func (d *testDevice) Disconnect() *dbus.Error {
 	return nil
 }
 func (d *testDevice) Pair() *dbus.Error {
+	if paired, err := d.props.Get(deviceIfc, "Paired"); err == nil && paired.Value() == true {
+		return dbus.NewError("org.bluez.Error.AlreadyExists", []any{"Already Exists"})
+	}
 	err := d.agent.conn.Object(string(d.agent.sender), d.agent.path).Call(agentIfc+".RequestAuthorization", 0, d.path).Err
 	if err != nil {
 		return dbus.NewError("org.bluez.Error.Rejected", nil)
@@ -234,8 +241,10 @@ func TestCentralGATTAndScopedPairingOverDBus(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer c.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
+	// BlueZ can take more than five seconds to return after the link comes up.
+	device.slowConnect.Store(true)
 	mtu, err := c.Connect(ctx, "C0:FF:EE:12:34:56", true)
 	if err != nil || mtu != 61 {
 		t.Fatalf("connect mtu=%d err=%v", mtu, err)
@@ -287,6 +296,13 @@ func TestCentralGATTAndScopedPairingOverDBus(t *testing.T) {
 		}
 	}
 	dp.SetMust(deviceIfc, "Paired", true)
+	dp.SetMust(deviceIfc, "Trusted", false)
+	if err := c.Pair(ctx, "C0:FF:EE:12:34:56"); err != nil {
+		t.Fatalf("pair with an existing bond: %v", err)
+	}
+	if trusted, err := dp.Get(deviceIfc, "Trusted"); err != nil || trusted.Value() != true {
+		t.Fatalf("existing bond not trusted: %v, %v", trusted, err)
+	}
 	dp.SetMust(deviceIfc, "Icon", "phone")
 	if err := c.Unpair(ctx, "C0:FF:EE:12:34:56"); err == nil || !c.Connected("C0:FF:EE:12:34:56") {
 		t.Fatal("unpair did not protect the device's paired phone")

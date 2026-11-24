@@ -298,7 +298,8 @@ func (c *Central) Connected(address string) bool {
 
 // Connect opens a GATT connection to an LE device and waits for bluetoothd to have read its
 // services, then reports the ATT MTU. random says the address is a random one, which only matters
-// for a device bluetoothd has not heard yet.
+// for a device bluetoothd has not heard yet. Connection calls can wait for discovery, so they
+// use the caller's operation deadline instead of the shorter timeout for routine D-Bus calls.
 func (c *Central) Connect(ctx context.Context, address string, random bool) (int, error) {
 	address = strings.ToUpper(address)
 	path, err := c.devicePath(address)
@@ -325,11 +326,11 @@ func (c *Central) Connect(ctx context.Context, address string, random bool) (int
 			kind = "random"
 		}
 		args := map[string]dbus.Variant{"Address": dbus.MakeVariant(address), "AddressType": dbus.MakeVariant(kind)}
-		if err := object(c.conn, c.adapter).CallWithContext(ctx, adapterIfc+".ConnectDevice", 0, args).Store(&path); err != nil {
+		if err := c.conn.Object(service, c.adapter).CallWithContext(ctx, adapterIfc+".ConnectDevice", 0, args).Store(&path); err != nil {
 			return 0, fmt.Errorf("bluez: %s not found: %w", address, err)
 		}
 	} else {
-		err := object(c.conn, path).CallWithContext(ctx, deviceIfc+".Connect", 0).Err
+		err := c.conn.Object(service, path).CallWithContext(ctx, deviceIfc+".Connect", 0).Err
 		if err != nil && !strings.Contains(err.Error(), "AlreadyConnected") {
 			return 0, fmt.Errorf("bluez: connecting %s: %w", address, err)
 		}
@@ -483,11 +484,13 @@ func (c *Central) Pair(ctx context.Context, address string) error {
 	defer proxyPairingSet(path, false)
 	obj := object(c.conn, path)
 	err = obj.CallWithContext(ctx, deviceIfc+".Pair", 0).Err
-	if err != nil {
-		// Out of time: tell bluetoothd to stop, or it keeps trying to bond.
-		_ = obj.Call(deviceIfc+".CancelPairing", dbus.FlagNoReplyExpected).Err
-	}
-	if err != nil && !strings.Contains(err.Error(), "AlreadyExists") {
+	var dbusErr dbus.Error
+	if err != nil && !(errors.As(err, &dbusErr) && dbusErr.Name == "org.bluez.Error.AlreadyExists") {
+		// Only cancel a locally abandoned call. With no pairing pending,
+		// BlueZ can turn CancelPairing into a kernel unpair request.
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			_ = obj.Call(deviceIfc+".CancelPairing", dbus.FlagNoReplyExpected).Err
+		}
 		return err
 	}
 	return obj.SetProperty(deviceIfc+".Trusted", dbus.MakeVariant(true))
