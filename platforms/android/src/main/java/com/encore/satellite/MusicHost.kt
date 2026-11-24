@@ -17,8 +17,16 @@ import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
-/** Independent Sendspin identity/trust. Keystore failure is surfaced, never downgraded to plaintext. */
-internal class MusicHost(context: Context, private val key: SecretKey = loadMusicKey()) : SendSpinHost {
+/** Sendspin uses the adapter's hardware identity but keeps independent pairing and trust. */
+internal class MusicHost(
+    context: Context,
+    val deviceName: String,
+    override val macAddress: String,
+    override val productName: String,
+    override val manufacturer: String,
+    override val softwareVersion: String,
+    private val key: SecretKey = loadMusicKey(),
+) : SendSpinHost {
     private val prefs = context.getSharedPreferences("sendspin", Context.MODE_PRIVATE)
 
     @Synchronized private fun read(name: String): String? = prefs.getString(name, null)?.let {
@@ -89,7 +97,6 @@ internal class MusicHost(context: Context, private val key: SecretKey = loadMusi
         get() = prefs.getBoolean("muted", false)
         set(value) { prefs.edit().putBoolean("muted", value).apply() }
 
-    override val softwareVersion = "Encore ${BuildConfig.CORE_VERSION}"
     // The SDK advertises its artwork role only in standard memory mode.
     override val lowMemoryMode = false
     override val highPowerMode = false

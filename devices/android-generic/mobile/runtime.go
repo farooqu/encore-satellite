@@ -204,6 +204,20 @@ func (r *Runtime) ConfigureHardware(manufacturer, model string) {
 	r.manufacturer, r.model = manufacturer, model
 }
 
+// DeviceIdentity is the adapter's advertised identity across the gomobile
+// boundary. It does not include Sendspin pairing credentials or client ID.
+type DeviceIdentity struct {
+	FriendlyName, MACAddress, Manufacturer, Model, Version string
+}
+
+func (r *Runtime) DeviceIdentity() *DeviceIdentity {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	info := r.controlInfo()
+	return &DeviceIdentity{FriendlyName: info.FriendlyName, MACAddress: info.MACAddress,
+		Manufacturer: info.Manufacturer, Model: info.Model, Version: info.Version}
+}
+
 // controlInfo is called under mu, before starting either ESPHome listener.
 func (r *Runtime) controlInfo() esphome.Info {
 	var version string

@@ -335,7 +335,7 @@ func TestMusicSwitchLifecycleAndIndependentPersistence(t *testing.T) {
 	const clientID, token = "fixture-sendspin-id", "SP:0fixture"
 	url := "ws://192.0.2.4:8931/sendspin"
 	m.discover = func(context.Context) (string, error) { return url, nil }
-	started := make(chan string, 8)
+	started := make(chan linuxsendspin.Options, 8)
 	var live, maximum atomic.Int32
 	m.run = func(ctx context.Context, o linuxsendspin.Options) error {
 		n := live.Add(1)
@@ -344,7 +344,7 @@ func TestMusicSwitchLifecycleAndIndependentPersistence(t *testing.T) {
 		}
 		defer live.Add(-1)
 		o.OnPairing(clientID, token)
-		started <- o.URL
+		started <- o
 		<-ctx.Done()
 		return ctx.Err()
 	}
@@ -358,8 +358,9 @@ func TestMusicSwitchLifecycleAndIndependentPersistence(t *testing.T) {
 		t.Fatal(err)
 	}
 	d := &biscuitControls{Proxy: bluetooth.New(managementRadio{}, bluetooth.Options{}), player: player, music: m}
+	info := d.controlInfo(c.Name, net.HardwareAddr{0x02, 0x7a, 0x12, 0x93, 0xdf, 0x01})
 	done := make(chan error, 1)
-	go func() { done <- d.Serve(ctx, l, esphome.Info{Name: c.Name}, key) }()
+	go func() { done <- d.Serve(ctx, l, info, key) }()
 	defer func() { cancel(); l.Close(); <-done }()
 	peer := newManagementPeer(t, l.Addr().String(), key)
 	checkPairing := func(status api.SendspinPairingTokenStatus, wantID, wantToken string) {
@@ -395,8 +396,14 @@ func TestMusicSwitchLifecycleAndIndependentPersistence(t *testing.T) {
 	writes.Wait()
 	select {
 	case got := <-started:
-		if got != url {
+		if got.URL != url {
 			t.Fatal("wrong endpoint")
+		}
+		peer.send(&api.DeviceInfoRequest{})
+		device := peer.receive().(*api.DeviceInfoResponse)
+		if got.MACAddress != device.GetMacAddress() || got.MACAddress != "02:7a:12:93:df:01" ||
+			got.Name != device.GetFriendlyName() || got.Manufacturer != "Amazon" || got.Model != "Echo Dot (2nd gen)" {
+			t.Fatal("Sendspin and ESPHome do not advertise the same device")
 		}
 	case <-time.After(time.Second):
 		t.Fatal("music did not start")

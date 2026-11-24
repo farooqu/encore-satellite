@@ -306,7 +306,11 @@ class EncoreService : Service() {
     internal fun startForSavedMusic() = musicPrefs.getBoolean("enabled", false)
     fun musicToken(): String = runCatching { host().pairingToken() }
         .getOrElse { musicProblem("Sendspin secure storage unavailable"); "" }
-    private fun host(): MusicHost = musicHost ?: MusicHost(this).also { musicHost = it }
+    private fun host(): MusicHost = musicHost ?: checkNotNull(runtime).deviceIdentity().let { identity ->
+        MusicHost(this, deviceName = identity.friendlyName, macAddress = identity.getMACAddress(),
+            productName = identity.model, manufacturer = identity.manufacturer, softwareVersion = identity.version)
+            .also { musicHost = it }
+    }
     private fun enableMusic(server: String?) {
         if (mutable.value.esphome != "paired") {
             musicProblem("Pair with Home Assistant before connecting Sendspin")
@@ -364,7 +368,7 @@ class EncoreService : Service() {
     private fun connectMusic(endpoint: MusicEndpoint) {
         runCatching {
             val pairingHost = host()
-            MusicPlayer(mutable.value.name, pairingHost, ::retryMusic) { next ->
+            MusicPlayer(pairingHost, ::retryMusic) { next ->
                 mutable.value = mutable.value.copy(music = next)
                 focus.update(mutable.value.voiceActive || (next.playing && !next.stopped))
                 music?.interrupted(!focus.focused)

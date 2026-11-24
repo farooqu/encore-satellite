@@ -52,7 +52,6 @@ type musicService struct {
 	configMu sync.Mutex
 	settings *settings
 	player   *speaker
-	name     string
 	enabled  bool
 	revision uint64
 	worker   *musicWorker
@@ -84,7 +83,7 @@ func (w *musicWorker) updateReadiness(next linuxsendspin.Readiness) {
 }
 
 func newMusic(c Config, s *settings, player *speaker) *musicService {
-	return &musicService{settings: s, player: player, name: c.Name, enabled: c.Sendspin, changed: make(chan struct{}, 1), discover: discoverMusic, run: linuxsendspin.Run}
+	return &musicService{settings: s, player: player, enabled: c.Sendspin, changed: make(chan struct{}, 1), discover: discoverMusic, run: linuxsendspin.Run}
 }
 func (m *musicService) snapshot() (bool, uint64) {
 	m.mu.Lock()
@@ -218,7 +217,7 @@ func (w *musicWorker) queue(cmd linuxsendspin.Command) bool {
 	}
 }
 
-func (m *musicService) Run(ctx context.Context) {
+func (m *musicService) Run(ctx context.Context, info esphome.Info) {
 	var cancel context.CancelFunc
 	var done chan error
 	var worker *musicWorker
@@ -268,7 +267,9 @@ func (m *musicService) Run(ctx context.Context) {
 			m.mu.Unlock()
 			cancel = childCancel
 			done = make(chan error, 1)
-			opts := linuxsendspin.Options{Name: m.name, StateDir: musicStateDir, Executable: musicExecutable, Output: m.player, Commands: w.commands,
+			opts := linuxsendspin.Options{
+				Name: info.FriendlyName, MACAddress: info.MACAddress, Manufacturer: info.Manufacturer, Model: info.Model, Version: info.Version,
+				StateDir: musicStateDir, Executable: musicExecutable, Output: m.player, Commands: w.commands,
 				OnPairing: func(clientID, token string) {
 					m.mu.Lock()
 					defer m.mu.Unlock()
@@ -652,11 +653,11 @@ func (d *biscuitControls) ConnClosed(c *esphome.Conn) {
 	}
 	d.Proxy.ConnClosed(c)
 }
-func (d *biscuitControls) Run(ctx context.Context) {
+func (d *biscuitControls) run(ctx context.Context, info esphome.Info) {
 	var workers sync.WaitGroup
 	workers.Go(func() { d.Proxy.Run(ctx) })
 	if d.music != nil {
-		workers.Go(func() { d.music.Run(ctx) })
+		workers.Go(func() { d.music.Run(ctx, info) })
 	}
 	workers.Go(func() {
 		for {
@@ -693,15 +694,15 @@ func (d *biscuitControls) Serve(ctx context.Context, l net.Listener, info esphom
 	if key.IsZero() {
 		return errors.New("dot: a nonzero Noise key is required")
 	}
-	ctx, cancel := context.WithCancel(ctx)
-	done := make(chan struct{})
-	go func() { defer close(done); d.Run(ctx) }()
-	defer func() { cancel(); <-done }()
 	info.BluetoothFeatures = d.Features()
 	info.VoiceFeatures = 0 // Common controls are not a second Assist voice endpoint.
 	if d.music != nil {
 		info.Sendspin = d.music.sendspinPairing
 	}
+	ctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() { defer close(done); d.run(ctx, info) }()
+	defer func() { cancel(); <-done }()
 	return (&esphome.Server{Info: info, PSK: &key, Handler: d, WriteTimeout: 2 * time.Second,
 		OnSetEncryptionKey: esphomepairing.RefuseKey,
 	}).Serve(ctx, l)

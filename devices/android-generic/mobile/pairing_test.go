@@ -72,7 +72,7 @@ func TestHomeAssistantKeyEnablesEncryptedControlsAfterReopen(t *testing.T) {
 	}
 	first := esphome.PSK{51, 7, 19}
 	bootstrap := pairingNoisePeer(t, esphome.PSK{})
-	checkInfo := func(peer func(proto.Message, proto.Message), version string, provisionable bool) {
+	checkInfo := func(runtime *Runtime, peer func(proto.Message, proto.Message), version string, provisionable bool) {
 		t.Helper()
 		info := &api.DeviceInfoResponse{}
 		peer(&api.DeviceInfoRequest{}, info)
@@ -84,8 +84,13 @@ func TestHomeAssistantKeyEnablesEncryptedControlsAfterReopen(t *testing.T) {
 			info.ProjectVersion != version || info.EsphomeVersion != esphome.DefaultESPHomeVersion {
 			t.Fatalf("incorrect Android metadata (want installed version %q): %v", version, info)
 		}
+		identity := runtime.DeviceIdentity()
+		if identity.FriendlyName != info.FriendlyName || identity.MACAddress != info.MacAddress ||
+			identity.Manufacturer != info.Manufacturer || identity.Model != info.Model || identity.Version != info.ProjectVersion {
+			t.Fatalf("native client identity = %+v, does not match advertised ESPHome identity: %v", identity, info)
+		}
 	}
-	checkInfo(bootstrap, "1.2.3-dev.4", true)
+	checkInfo(r, bootstrap, "1.2.3-dev.4", true)
 	const clientID, token = "test-sendspin-client", "SP:0fixture"
 	r.SetSendspinPairing(clientID, token)
 	capabilities := &api.DeviceCapabilitiesResponse{}
@@ -125,7 +130,7 @@ func TestHomeAssistantKeyEnablesEncryptedControlsAfterReopen(t *testing.T) {
 		t.Fatal("paired Incubator did not send its hello", hello, err)
 	}
 	paired := pairingNoisePeer(t, first)
-	checkInfo(paired, "1.2.3-dev.4", false)
+	checkInfo(r, paired, "1.2.3-dev.4", false)
 	checkMusicPairing := func(status api.SendspinPairingTokenStatus, wantID, wantToken string) {
 		t.Helper()
 		capabilities := &api.DeviceCapabilitiesResponse{}
@@ -211,7 +216,7 @@ listing:
 	if installed.NoiseKey() != first.String() {
 		t.Fatal("runtime did not reload the HA key")
 	}
-	checkInfo(pairingNoisePeer(t, first), "1.2.4", false)
+	checkInfo(installed, pairingNoisePeer(t, first), "1.2.4", false)
 }
 
 func TestHomeAssistantPairingExpiresAndRequiresAnotherTap(t *testing.T) {

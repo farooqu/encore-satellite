@@ -11,8 +11,9 @@ import (
 // CompatibilityVersion is the ESPHome version for both discovery and device info.
 const CompatibilityVersion = device.DefaultESPHomeVersion
 
-// DeviceInfo formats the hardware labels and installed version for Home Assistant.
-// Name and MAC identify the unit and are passed through unchanged.
+// DeviceInfo formats the unit identity advertised by ESPHome and reused by
+// Sendspin. Devices supply the hardware labels and installed version; the
+// names and MAC identify the unit and are passed through unchanged.
 func DeviceInfo(info device.Info) device.Info {
 	label := func(value string) string {
 		value = strings.Join(strings.Fields(value), " ")

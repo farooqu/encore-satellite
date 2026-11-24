@@ -46,6 +46,30 @@ revoked, not a disposable PIN. Avoid verbose protocol logging during pairing.
 Manual token entry remains a fallback for older or standalone servers that
 support encrypted Sendspin but not the Home Assistant handoff.
 
+### Device name, announcements, and area
+
+Pairing and ESPHome matching are separate. Like [ESPHome's Sendspin hub at
+`1feda1b`](https://github.com/esphome/esphome/blob/1feda1bcaa861a5f2e933f2c65d599e44f4b132b/esphome/components/sendspin/sendspin_hub.cpp),
+Encore reports the device MAC and hardware labels in the Sendspin hello. Each
+target supplies its identity to the shared ESPHome adapter; Sendspin reuses the
+resulting name, MAC, manufacturer, model, and installed version. On Android the
+MAC is Encore's persisted ESPHome MAC, not the tablet's Wi-Fi MAC.
+[Music Assistant 2.10.9](https://github.com/music-assistant/server/blob/2.10.9/music_assistant/providers/sendspin/provider.py)
+uses that MAC to look up the ESPHome device's name and its announcement-capable
+media player in Home Assistant. It does not replace the encrypted Sendspin client
+ID, so existing players can reconnect without re-pairing.
+
+After updating Encore, reconnect the player (turn **Sendspin music** off and
+back on if needed). In Music Assistant, check that the existing player shows
+the ESPHome device name and the expected hardware; the ESPHome **Announcements**
+entity must be available in Home Assistant to use that announcement path.
+[Home Assistant 2026.11](https://github.com/home-assistant/core/blob/2026.11.0/homeassistant/components/music_assistant/entity.py)
+still registers the Music Assistant player as a separate device. If it still
+shows the old labels after Music Assistant has updated them, reload the Home
+Assistant Music Assistant integration. Set the player's area to the same one
+as the ESPHome device in **Settings → Devices & services → Devices** if you
+want both listed in that room.
+
 ## Runtime behavior
 
 - Android uses the clock page for Now Playing, with the time, large album art

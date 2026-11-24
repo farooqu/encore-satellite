@@ -71,9 +71,10 @@ type CommandRequest struct {
 }
 
 type Options struct {
-	Name, URL, StateDir, Executable string
-	Output                          Output
-	Commands                        <-chan CommandRequest
+	Name, URL, StateDir, Executable          string
+	MACAddress, Manufacturer, Model, Version string
+	Output                                   Output
+	Commands                                 <-chan CommandRequest
 	// OnReadiness runs on the IPC reader. It must return promptly and receives
 	// a zero snapshot when the reader exits.
 	OnReadiness func(Readiness)
@@ -174,7 +175,8 @@ func Run(ctx context.Context, o Options) error {
 		return err
 	}
 	conn := nc.(*net.UnixConn)
-	cmd := exec.Command(o.Executable, "run", "--state", o.StateDir, "--name", o.Name, "--url", o.URL)
+	cmd := exec.Command(o.Executable, "run", "--state", o.StateDir, "--name", o.Name, "--url", o.URL,
+		"--mac", o.MACAddress, "--manufacturer", o.Manufacturer, "--model", o.Model, "--version", o.Version)
 	cmd.ExtraFiles = []*os.File{child}
 	cmd.Env = []string{"LANG=C", "LC_ALL=C"}
 	// Do not forward the SDK's diagnostics: future upstream logs may contain

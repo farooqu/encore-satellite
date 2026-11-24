@@ -59,7 +59,9 @@ class Companion(unittest.TestCase):
             os.dup2(child.fileno(), 3)
             os.set_inheritable(3, True)
         p = subprocess.Popen(EXE + ["run", "--state", str(self.state), "--name", "test",
-                                   "--url", url],
+                                   "--url", url, "--mac", "02:7a:12:93:df:01",
+                                   "--manufacturer", "Amazon", "--model", "Echo Dot (2nd gen)",
+                                   "--version", "0.10.0-dev.1"],
                              pass_fds=(child.fileno(), 3), preexec_fn=setup,
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         child.close()
@@ -241,6 +243,10 @@ class Companion(unittest.TestCase):
                 )), 10)
                 self.assertEqual(client.connection_security.psk_category, PskCategory.LONG_TERM)
                 old, group = await readiness(ipc, READY | STOPPED)
+                self.assertEqual(client.info.name, "test")
+                device = client.info.device_info
+                self.assertEqual((device.mac_address, device.manufacturer, device.product_name, device.software_version),
+                                 ("02:7a:12:93:df:01", "Amazon", "Echo Dot (2nd gen)", "0.10.0-dev.1"))
                 controller = client.group.group_role("controller")
                 commands = (1 << 0) | (1 << 2) | (1 << 3)
                 controller.set_supported_commands([MediaCommand.PLAY, MediaCommand.PAUSE, MediaCommand.NEXT])

@@ -8,6 +8,8 @@ import android.media.AudioManager
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import com.sendspindroid.sendspin.crypto.TrustStore
+import com.sendspindroid.sendspin.protocol.message.MessageBuilder
+import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -79,21 +81,45 @@ class EncoreServiceTest {
         assertEquals("Turning off cancels pending discovery", 2, results.size)
     }
 
+    @Test fun sendspinHelloIdentifiesTheEsphomeDeviceWithoutReplacingPairingIdentity() {
+        val mac = "02:7a:12:93:df:01"
+        val host = MusicHost(RuntimeEnvironment.getApplication(), "Encore Android · DF01", mac,
+            "Tab 10.1 Pro", "ACME Inc.", "1.2.3-dev.4", KeyGenerator.getInstance("AES").generateKey())
+        val hello = JSONObject(MessageBuilder.buildClientHello(
+            deviceName = host.deviceName,
+            bufferCapacity = 1_680_000,
+            manufacturer = host.manufacturer,
+            supportedFormats = listOf(MessageBuilder.FormatEntry("pcm", 48000, 2, 16)),
+            softwareVersion = host.softwareVersion,
+            productName = host.productName,
+            macAddress = host.macAddress,
+        )).getJSONObject("payload")
+        val device = hello.getJSONObject("device_info")
+        assertEquals("Encore Android · DF01", hello.getString("name"))
+        assertEquals(mac, device.getString("mac_address"))
+        assertEquals("Tab 10.1 Pro", device.getString("product_name"))
+        assertEquals("ACME Inc.", device.getString("manufacturer"))
+        assertEquals("1.2.3-dev.4", device.getString("software_version"))
+        assertNotEquals(mac, host.pairingClientId)
+    }
+
     @Test fun revocationKeepsIdentityAndAnOldConnectionCannotReinstateTrust() {
         val context = RuntimeEnvironment.getApplication()
         val key = KeyGenerator.getInstance("AES").generateKey()
-        val before = MusicHost(context, key)
+        val mac = "02:7a:12:93:df:01"
+        fun host() = MusicHost(context, "Encore Android · DF01", mac, "Tab 10.1 Pro", "ACME Inc.", "1.2.3", key)
+        val before = host()
         val token = before.pairingToken()
         val psk = ByteArray(32) { 7 }
         assertTrue(before.trustStore().addRecord(psk, "server-a") is TrustStore.AddRecordResult.Ok)
-        val persisted = MusicHost(context, key)
+        val persisted = host()
         assertTrue("Pairing token must survive restart", token == persisted.pairingToken())
         assertEquals("server-a", persisted.trustStore().listRecords().single().serverId)
 
         persisted.revokeAll()
         assertEquals(TrustStore.AddRecordResult.StorageFailed,
             persisted.trustStore().addRecord(ByteArray(32) { 9 }, "server-b"))
-        val after = MusicHost(context, key)
+        val after = host()
         assertEquals(before.clientIdentity().clientId, after.clientIdentity().clientId)
         assertTrue("Previously revealed token must stop working", token != after.pairingToken())
         assertTrue(after.trustStore().listRecords().isEmpty())

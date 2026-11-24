@@ -9,6 +9,7 @@ import (
 
 	"github.com/farooqu/encore-satellite/core/music"
 	"github.com/farooqu/encore-satellite/platforms/linuxsendspin"
+	esphome "github.com/ygelfand/go-esphome-device"
 )
 
 func TestSendspinActionDoesNotTreatUnrelatedStopAsPause(t *testing.T) {
@@ -133,7 +134,7 @@ func TestSendspinWorkerReplacementCannotInheritReadinessOrCommands(t *testing.T)
 	}
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
-	go func() { defer close(done); m.Run(ctx) }()
+	go func() { defer close(done); m.Run(ctx, esphome.Info{FriendlyName: c.Name}) }()
 	defer func() { cancel(); <-done }()
 	start := func() linuxsendspin.Options {
 		t.Helper()

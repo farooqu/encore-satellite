@@ -507,6 +507,7 @@ int main(int argc, char **argv) {
   try {
     check(argc >= 4);
     std::string mode = argv[1], state, name, url;
+    SendspinClientConfig cfg;
     check(mode == "run" || mode == "pairing-token" || mode == "revoke-all");
     for (int i = 2; i < argc; i += 2) {
       check(i + 1 < argc);
@@ -517,6 +518,14 @@ int main(int argc, char **argv) {
         name = argv[i + 1];
       else if (k == "--url")
         url = argv[i + 1];
+      else if (mode == "run" && k == "--mac")
+        cfg.mac_address = argv[i + 1];
+      else if (mode == "run" && k == "--manufacturer")
+        cfg.manufacturer = argv[i + 1];
+      else if (mode == "run" && k == "--model")
+        cfg.product_name = argv[i + 1];
+      else if (mode == "run" && k == "--version")
+        cfg.software_version = argv[i + 1];
       else
         check(false);
     }
@@ -544,7 +553,6 @@ int main(int argc, char **argv) {
     Network network(mode == "run");
     timespec raw{};
     check(clock_gettime(CLOCK_MONOTONIC_RAW, &raw) == 0);
-    SendspinClientConfig cfg;
     cfg.name = name.empty() ? "Echo" : name;
     cfg.accept_inbound_connections = false;
     cfg.pairing_psk_locations = {"operator"};

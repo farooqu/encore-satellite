@@ -19,7 +19,7 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.combine
 
 /** Sendspin is an independent connection/output; it is not an ESPHome entity. */
-internal class MusicPlayer(name: String, private val host: MusicHost, private val rediscover: () -> Unit,
+internal class MusicPlayer(private val host: MusicHost, private val rediscover: () -> Unit,
     private val changed: (MusicState) -> Unit) : SendSpin.Callback {
     private val main = Handler(Looper.getMainLooper())
     private var state = MusicState(enabled = true, status = "Connecting")
@@ -36,7 +36,7 @@ internal class MusicPlayer(name: String, private val host: MusicHost, private va
         override fun onPlayerChanged(player: SyncAudioPlayer?) {}
         override fun onPlayerStateChanged(state: PlaybackState) {}
     }, lowMemoryMode = { host.lowMemoryMode }, playerMuted = { muted })
-    private val client = SendSpin(name, this, host).also { engine.client = it }
+    private val client = SendSpin(host.deviceName, this, host).also { engine.client = it }
     private val commands = mapOf(
         Mobile.SendspinPlay to client::play,
         Mobile.SendspinPause to client::pause,
