@@ -1,5 +1,5 @@
 # Native Biscuit AArch64 kernel configuration.
-CONFIG_LOCALVERSION="-encore-biscuit-arm64-stpfix1"
+CONFIG_LOCALVERSION="-encore-biscuit-arm64-stpfix1-lesmp1"
 CONFIG_LOCALVERSION_AUTO=n
 CONFIG_ARM64_4K_PAGES=y
 CONFIG_ARM64_VA_BITS_39=y

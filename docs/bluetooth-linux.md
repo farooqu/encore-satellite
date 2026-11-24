@@ -276,6 +276,16 @@ Both suites contact only ephemeral loopback listeners and do not modify
 production HA. Their GATT peer and pairing outcomes are virtual; neither suite
 qualifies BlueZ/RF bonding or changed-service cache invalidation on a real peer.
 
+On the physical Office Dot with Biscuit dev.8 (Linux 6.1.178), HA repeatedly
+opened an LE link without getting a usable ATT session. A filtered kernel trace
+showed the ATT socket becoming ready before the link's SMP fixed channel was
+attached, after the first security check found no channel. The Biscuit kernel
+recipe applies `le-smp-ready.patch` to attach that channel first, leaving the
+normal security checks in place. To qualify the change, update the test Dot
+without wiping its existing bonds, confirm GATT reads and reconnect through HA,
+and independently verify a new Just Works bond on a test peripheral. A clean
+install would not isolate the ordering change from bond state.
+
 Before supported-device release, test the exact kernel/base on a physical Dot:
 phone/browser first-boot Improv with proxy OFF (physical authorization, expired
 auth, rejected credentials, association/address/persistence, reconnect and

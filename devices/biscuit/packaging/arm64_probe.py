@@ -77,7 +77,8 @@ def main():
     if compiler != "14.2.0":
         parser.error("probe requires AArch64 GCC 14.2.0")
     patches = ("capture.patch", "arm64-probe.patch", "arm64-connectivity.patch",
-               "playback-sram.patch", "stp-read.patch", "fpga-zero-padding.patch")
+               "playback-sram.patch", "stp-read.patch", "fpga-zero-padding.patch",
+               "le-smp-ready.patch")
     inputs = {name: sha(HERE / name) for name in
               ("arm64_probe.py", "arm64-probe.fragment", "arm64-probe.dts",
                "biscuit.dts", "encore.fragment", *patches)}
