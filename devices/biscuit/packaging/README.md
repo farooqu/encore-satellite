@@ -13,10 +13,10 @@ source checkout, with the unit in reviewed Biscuit TWRP via fastboot, run
 `python3 devices/biscuit/packaging/install.py install-native` with `--serial`,
 `--candidate`, `--receipt-sha256`, `--public-key`, `--twrp-sha256`, and a new
 private `--backup-dir`. The default checks the signed bytes and device layout
-without writing. An explicitly approved `--apply` requires the Encore store
-and data paths to be absent; it neither imports nor erases old enrollment.
-Keep the previously enrolled test unit's backups and separately review its
-clean-state transition before running apply.
+without writing. Before `--apply`, follow the [clean-install steps to back up
+and clear cache and userdata](../INSTALL.md#3-clear-cache-and-userdata-in-recovery).
+The installer checks for leftover Encore state; it doesn't wipe it for you.
+Use OTA to keep your existing setup.
 
 Direct provisioning or clean reinstallation replaces both Encore slots with
 the selected version, so the device cannot fall back to stale software against
