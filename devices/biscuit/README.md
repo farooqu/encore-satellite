@@ -51,6 +51,28 @@ promised. Do not rewrite retained provenance, source kits, backups or device dat
 The frozen first private candidate remains built from its original commit and
 does not need this rename for physical preflight; no device migration is performed.
 
+## Previous-boot diagnostics
+
+The installed ARM64 image keeps a local history of Encore, Wi-Fi and DHCP
+service output, kernel warnings/errors, and unexpected service exits. On the USB
+rescue console, check `/data/encore/diagnostics/{app,wifi,dhcp,system}/previous/`
+after the next boot has reached base readiness. For each source, read `boot-id`
+for the boot identity and `log.1` (if present) before `log`. The `current/`
+directories contain this boot's records. Timestamps are UTC as observed by the
+logger and may be inaccurate before device clock sync; kernel messages also
+retain their kernel timestamps. If a boot records nothing for a source, its
+last non-empty previous history is kept.
+
+Each source retains up to two 64 KiB segments per boot, for up to 1 MiB of
+text across both boots, plus small boot-ID files and filesystem metadata. The
+oldest segment is replaced first. Logs are root-only, never sent over the
+network, and do not capture console input, voice audio, or transcripts. Normal
+network logs can contain local addresses and Wi-Fi identifiers; review before
+sharing. Writes are batched and synced every five seconds when data is pending.
+Heavy bursts, unavailable storage, or a sudden power cut can lose log lines;
+storage writes do not run on the service output path. OTA preserves `/data`;
+a clean install clears it, including this history.
+
 ## Runtime and device behavior
 
 - Static Go Linux AArch64 executable explicitly assembling the shared engine,

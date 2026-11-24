@@ -454,8 +454,9 @@ class RootfsTests(unittest.TestCase):
                 t.addfile(member, io.BytesIO(data))
         packed = starter_build.starter_rootfs(archive.getvalue(), {})
         with tarfile.open(fileobj=io.BytesIO(packed), mode="r:gz") as t:
-            self.assertIn(b"::respawn:/usr/local/sbin/runtime-service time-sync",
-                          t.extractfile("etc/inittab").read().splitlines())
+            entries = t.extractfile("etc/inittab").read().splitlines()
+            for service in (b"time-sync", b"diagnostics"):
+                self.assertIn(b"::respawn:/usr/local/sbin/runtime-service " + service, entries)
             self.assertEqual(t.extractfile("usr/local/sbin/usb-rescue").read(), (HERE / "usb-rescue").read_bytes())
             self.assertTrue(set(obsolete).isdisjoint(t.getnames()))
 

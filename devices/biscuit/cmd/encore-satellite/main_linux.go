@@ -13,6 +13,10 @@ import (
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+	if len(os.Args) == 3 && os.Args[1] == "--boot-log" {
+		captureBootLog(ctx, os.Args[2])
+		return
+	}
 	// This service must not load voice config, clear voice readiness, or enter
 	// provisioning: it survives voice runtime restarts during a Wi-Fi change.
 	if len(os.Args) == 2 && os.Args[1] == "--network-manager" {

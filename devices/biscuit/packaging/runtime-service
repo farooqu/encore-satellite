@@ -6,7 +6,7 @@ BB=/bin/busybox.static
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 umask 077
 name=${1:-}
-case "$name" in base|radio|wifi|dhcp|time-sync|bluetooth|network|app|enrollment|health) ;; *) exit 2;; esac
+case "$name" in base|radio|wifi|dhcp|time-sync|bluetooth|network|app|enrollment|health|diagnostics) ;; *) exit 2;; esac
 dir=/run/encore/services/$name
 child=
 sleeper=
@@ -80,6 +80,7 @@ run() {
       wait_for test -s /run/encore/bluetooth-ready
       /usr/local/bin/encore-satellite --provision-only
       touch /run/encore/enrollment-ready;;
+    diagnostics) exec /usr/local/bin/encore-satellite --boot-log system;;
     health)
       wait_for_marker app-started
       exec /usr/local/sbin/encore-health supervised;;
@@ -99,14 +100,30 @@ run() {
 if test "${2:-}" = worker; then
   # Base copies stock firmware into the bounded /run tmpfs. A process-wide
   # 128 KiB limit there would cap the payload, not just the log.
-  if test "$name" = app && test -f /run/encore/arm64-installed.json; then
+  capture=false
+  if { test "$name" = app || test "$name" = wifi || test "$name" = dhcp; } &&
+     test -f /run/encore/arm64-installed.json &&
+     test "$("$BB" cat /etc/encore-base 2>/dev/null || :)" = encore-biscuit-arm64-starter-v1; then
+    capture=true
+  fi
+  fifo=$dir/output.pipe
+  if "$capture" || { test "$name" = app && test -f /run/encore/arm64-installed.json; }; then
     # Limit diagnostic output, not the authenticated archive the app stages.
-    # Keep reading after the prefix so the app never gets SIGPIPE on its log.
-    fifo=$dir/output.pipe
-    "$BB" mkfifo -m 600 "$fifo"
-    { "$BB" head -c 131072; "$BB" cat >/dev/null; } <"$fifo" &
-    exec >"$fifo" 2>&1
-    "$BB" rm "$fifo"
+    if "$BB" mkfifo -m 600 "$fifo"; then
+      # Keep the read end open and drain to /dev/null if the relay fails.
+      {
+        if "$capture"; then
+          /usr/local/bin/encore-satellite --boot-log "$name" || :
+        else
+          "$BB" head -c 131072 || :
+        fi
+        "$BB" cat >/dev/null
+      } <"$fifo" &
+      exec >"$fifo" 2>&1
+      "$BB" rm "$fifo" || :
+    else
+      exec >/dev/null 2>&1
+    fi
   elif test "$name" != base; then
     ulimit -f 256
   fi

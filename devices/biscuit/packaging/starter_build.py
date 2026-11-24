@@ -84,7 +84,7 @@ fi''')
                               '/usr/local/sbin/encore-stock-firmware load\nfw=/run/encore/firmware')
     files["etc/encore/boot.sh"] = ((startup + "touch /run/encore/base-ready\n").encode(), 0o755)
     inittab = "::respawn:/usr/local/sbin/usb-rescue\n"
-    for service in ("base", "radio", "wifi", "dhcp", "time-sync", "bluetooth", "network", "enrollment", "app", "health"):
+    for service in ("base", "radio", "wifi", "dhcp", "time-sync", "bluetooth", "network", "enrollment", "app", "health", "diagnostics"):
         inittab += f"::respawn:/usr/local/sbin/runtime-service {service}\n"
     files["etc/inittab"] = (inittab.encode(), 0o644)
     # Drop the private diagnostic overlay, including any old ARMv7 companion;

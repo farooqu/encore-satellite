@@ -45,18 +45,31 @@ class RuntimeTests(unittest.TestCase):
         runtime = self.root / "run/encore"
         (runtime / "services/app").mkdir(parents=True)
         (runtime / "arm64-installed.json").touch()
+        base = self.root / "encore-base"
+        base.write_text("encore-biscuit-arm64-starter-v1\n")
+        relay = self.root / "boot-log"
         source = (HERE / "runtime-service").read_text().replace("/bin/busybox.static", self.bb)
         source = source.replace("/run/encore", str(runtime))
+        source = source.replace("/etc/encore-base", str(base))
+        source = source.replace("/usr/local/bin/encore-satellite", str(relay))
         begin, end = source.index("run() {"), source.index('if test "${2:-}" = worker;')
         source = source[:begin] + f'''run() {{
   "$BB" dd if=/dev/zero of={self.root}/archive bs=1024 count=512 2>/dev/null
   "$BB" dd if=/dev/zero bs=1024 count=640 2>/dev/null
+  printf 'worker survived\n' > {self.root}/finished
 }}
 ''' + source[end:]
-        result = subprocess.run([self.bb, "sh", "-s", "app", "worker"], input=source.encode(),
-                                check=True, capture_output=True, timeout=10)
-        self.assertEqual((self.root / "archive").stat().st_size, 512 * 1024)
-        self.assertEqual(len(result.stdout), 128 * 1024)
+        for status in (0, 1):
+            with self.subTest(relay_status=status):
+                (self.root / "finished").unlink(missing_ok=True)
+                relay.write_text(f'#!/bin/sh\nset -eu\ntest "$*" = "--boot-log app"\n'
+                                 f'head -c 131072\nexit {status}\n')
+                relay.chmod(0o700)
+                result = subprocess.run([self.bb, "sh", "-s", "app", "worker"], input=source.encode(),
+                                        check=True, capture_output=True, timeout=10)
+                self.assertEqual((self.root / "archive").stat().st_size, 512 * 1024)
+                self.assertEqual(len(result.stdout), 128 * 1024)
+                self.assertTrue((self.root / "finished").exists())
 
     def test_stock_firmware_checks_both_slots_but_loads_only_a(self):
         root = self.root
